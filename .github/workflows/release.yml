@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '*'  # срабатывает на любой тег
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.23'
+
+      - name: Build Release Binaries
+        run: |
+          mkdir -p release
+          for GOOS in linux darwin; do 
+            for GOARCH in amd64 arm64; do 
+              for BIN in plugin-sqlite server; do 
+                echo "Building $BIN for $GOOS/$GOARCH..."
+                BUILD_DIR=release GOOS=$GOOS GOARCH=$GOARCH make $BIN \
+                  && mv release/easyrest-$BIN release/easyrest-$BIN-$GOOS-$GOARCH;
+              done; 
+            done; 
+          done
+
+      - name: Create GitHub Release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          artifacts: release/*

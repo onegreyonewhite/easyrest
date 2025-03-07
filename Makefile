@@ -1,7 +1,7 @@
 PREFIX = easyrest-
 BINARIES = plugin-sqlite server
 SRC_DIR = ./cmd
-BUILD_DIR = $(shell pwd)/bin
+BUILD_DIR ?= $(shell pwd)/bin
 BIN_OUT = $(addprefix $(BUILD_DIR)/$(PREFIX), $(BINARIES))
 export PATH := $(BUILD_DIR):$(PATH)
 
