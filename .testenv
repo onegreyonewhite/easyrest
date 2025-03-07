@@ -1,0 +1,5 @@
+export ER_DB_TEST=sqlite://./test.db
+export ER_TOKEN_USER_SEARCH=sub
+export ER_PORT=8080
+export ER_CHECK_SCOPE=1
+export PATH=$(pwd):$PATH

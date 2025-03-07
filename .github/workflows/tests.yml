@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.23'
+
+      - name: Build Binaries using Make
+        run: |
+          echo "Building binaries using Make..."
+          make all
+          echo "$(pwd)/bin" >> $GITHUB_PATH
+
+      - name: Run Tests using Make
+        run: |
+          echo "Running tests using Make..."
+          make test
