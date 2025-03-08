@@ -29,7 +29,7 @@ import (
 var (
 	cfg        config.Config
 	cfgOnce    sync.Once
-	dbPlugins  = make(map[string]easyrest.DBPlugin)
+	DbPlugins  = make(map[string]easyrest.DBPlugin)
 	allowedOps = map[string]string{
 		"eq":    "=",
 		"neq":   "!=",
@@ -59,7 +59,7 @@ func getConfig() config.Config {
 	return cfg
 }
 
-func isAllowedFunction(item string) bool {
+func IsAllowedFunction(item string) bool {
 	for _, v := range allowedFuncs {
 		if v == item {
 			return true
@@ -68,10 +68,10 @@ func isAllowedFunction(item string) bool {
 	return false
 }
 
-// buildPluginContext extracts context variables from the HTTP request.
+// BuildPluginContext extracts context variables from the HTTP request.
 // It uses lowercase keys. TIMEZONE is taken from header "timezone", HEADERS from request headers,
 // and CLAIMS from token claims (converted to a plain map).
-func buildPluginContext(r *http.Request) map[string]interface{} {
+func BuildPluginContext(r *http.Request) map[string]interface{} {
 	headers := make(map[string]interface{})
 	for k, vals := range r.Header {
 		lk := strings.ToLower(k)
@@ -112,8 +112,8 @@ func buildPluginContext(r *http.Request) map[string]interface{} {
 	}
 }
 
-// accessLogMiddleware logs incoming HTTP requests if enabled.
-func accessLogMiddleware(next http.Handler) http.Handler {
+// AccessLogMiddleware logs incoming HTTP requests if enabled.
+func AccessLogMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		next.ServeHTTP(w, r)
@@ -126,7 +126,7 @@ func Run() {
 	config := getConfig()
 	router := SetupRouter()
 	if config.AccessLogOn {
-		router.Use(accessLogMiddleware)
+		router.Use(AccessLogMiddleware)
 	}
 	stdlog.Printf("Server listening on port %s...", config.Port)
 	srv := &http.Server{
@@ -140,15 +140,15 @@ func Run() {
 }
 
 func SetupRouter() *mux.Router {
-	loadDBPlugins()
+	LoadDBPlugins()
 	r := mux.NewRouter()
 	r.HandleFunc("/api/{db}/rpc/{func}/", rpcHandler).Methods("POST")
 	r.HandleFunc("/api/{db}/{table}/", tableHandler)
 	return r
 }
 
-// loadDBPlugins scans environment variables and initializes plugins.
-func loadDBPlugins() {
+// LoadDBPlugins scans environment variables and initializes plugins.
+func LoadDBPlugins() {
 	config := getConfig()
 	for _, env := range os.Environ() {
 		if strings.HasPrefix(env, "ER_DB_") {
@@ -212,15 +212,15 @@ func loadDBPlugins() {
 				stdlog.Printf("Error initializing connection for plugin %s: %v", connName, err)
 				continue
 			}
-			dbPlugins[connName] = dbPlug
+			DbPlugins[connName] = dbPlug
 			stdlog.Printf("Connection %s initialized using plugin %s", connName, pluginExec)
 		}
 	}
 }
 
-// parseWhereClause converts query parameters (those starting with "where.") into a map.
+// ParseWhereClause converts query parameters (those starting with "where.") into a map.
 // It does not perform additional validation because that was done on the controller.
-func parseWhereClause(values map[string][]string) (map[string]interface{}, error) {
+func ParseWhereClause(values map[string][]string) (map[string]interface{}, error) {
 	result := make(map[string]interface{})
 	for key, vals := range values {
 		if strings.HasPrefix(key, "where.") {
@@ -283,7 +283,7 @@ func processSelectParam(param string) ([]string, []string, error) {
 				return nil, nil, fmt.Errorf("Invalid function syntax in select field: %s", part)
 			}
 			funcName := funcPart[:len(funcPart)-2]
-			if !isAllowedFunction(funcName) {
+			if !IsAllowedFunction(funcName) {
 				return nil, nil, fmt.Errorf("Function %s is not allowed", funcName)
 			}
 			if funcName == "count" && fieldPart == "" {
@@ -317,7 +317,7 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 	dbKey := strings.ToLower(vars["db"])
 	table := vars["table"]
 
-	dbPlug, ok := dbPlugins[dbKey]
+	dbPlug, ok := DbPlugins[dbKey]
 	if !ok {
 		http.Error(w, "DB plugin not found", http.StatusNotFound)
 		return
@@ -338,13 +338,13 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if config.CheckScope {
 		claims := getTokenClaims(r)
-		if !checkScope(claims, requiredScope) {
+		if !CheckScope(claims, requiredScope) {
 			http.Error(w, "Forbidden: insufficient scope", http.StatusForbidden)
 			return
 		}
 	}
 
-	pluginCtx := buildPluginContext(r)
+	pluginCtx := BuildPluginContext(r)
 
 	switch r.Method {
 	case http.MethodGet:
@@ -354,12 +354,12 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Error processing select parameter: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		where, err := parseWhereClause(r.URL.Query())
+		where, err := ParseWhereClause(r.URL.Query())
 		if err != nil {
 			http.Error(w, "Error processing where clause: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		ordering := parseCSV(r.URL.Query().Get("ordering"))
+		ordering := ParseCSV(r.URL.Query().Get("ordering"))
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 
@@ -387,7 +387,7 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "JSON parse error: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		where, err := parseWhereClause(r.URL.Query())
+		where, err := ParseWhereClause(r.URL.Query())
 		if err != nil {
 			http.Error(w, "Error processing where clause: "+err.Error(), http.StatusBadRequest)
 			return
@@ -399,7 +399,7 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		respondJSON(w, http.StatusOK, map[string]int{"updated": updated})
 	case http.MethodDelete:
-		where, err := parseWhereClause(r.URL.Query())
+		where, err := ParseWhereClause(r.URL.Query())
 		if err != nil {
 			http.Error(w, "Error processing where clause: "+err.Error(), http.StatusBadRequest)
 			return
@@ -420,7 +420,7 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 	dbKey := strings.ToLower(vars["db"])
 	funcName := vars["func"]
 
-	dbPlug, ok := dbPlugins[dbKey]
+	dbPlug, ok := DbPlugins[dbKey]
 	if !ok {
 		http.Error(w, "DB plugin not found", http.StatusNotFound)
 		return
@@ -436,7 +436,7 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 	if config.CheckScope {
 		requiredScope := funcName + "-write"
 		claims := getTokenClaims(r)
-		if !checkScope(claims, requiredScope) {
+		if !CheckScope(claims, requiredScope) {
 			http.Error(w, "Forbidden: insufficient scope", http.StatusForbidden)
 			return
 		}
@@ -448,7 +448,7 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pluginCtx := buildPluginContext(r)
+	pluginCtx := BuildPluginContext(r)
 	result, err := dbPlug.CallFunction(userID, funcName, data, pluginCtx)
 	if err != nil {
 		http.Error(w, "Error in CallFunction: "+err.Error(), http.StatusInternalServerError)
@@ -457,7 +457,7 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, result)
 }
 
-func parseCSV(s string) []string {
+func ParseCSV(s string) []string {
 	if s == "" {
 		return nil
 	}
@@ -565,7 +565,7 @@ func DecodeTokenWithoutValidation(tokenStr string) (jwt.MapClaims, error) {
 	return jwt.MapClaims(claims), err
 }
 
-func checkScope(claims jwt.MapClaims, required string) bool {
+func CheckScope(claims jwt.MapClaims, required string) bool {
 	scopeVal, ok := claims["scope"]
 	if !ok {
 		return false

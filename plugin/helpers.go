@@ -54,8 +54,10 @@ func FormatToContext(input map[string]interface{}) (map[string]string, error) {
 		case map[string]interface{}:
 			for k, v2 := range v {
 				normalizedKey := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(k, ".", "_"), "-", "_"))
-				newPrefix := normalizedKey
-				if prefix != "" {
+				var newPrefix string
+				if prefix == "" {
+					newPrefix = normalizedKey
+				} else {
 					newPrefix = prefix + "_" + normalizedKey
 				}
 				if err := flatten(newPrefix, v2); err != nil {
@@ -71,7 +73,6 @@ func FormatToContext(input map[string]interface{}) (map[string]string, error) {
 			}
 		default:
 			s := fmt.Sprintf("%v", v)
-			// Validate that the value does not contain dangerous characters.
 			if strings.Contains(s, ";") || strings.Contains(s, "--") {
 				return fmt.Errorf("invalid value in context: %s", s)
 			}
@@ -79,8 +80,11 @@ func FormatToContext(input map[string]interface{}) (map[string]string, error) {
 		}
 		return nil
 	}
-	if err := flatten("", input); err != nil {
-		return nil, err
+	for k, v := range input {
+		normalizedKey := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(k, ".", "_"), "-", "_"))
+		if err := flatten(normalizedKey, v); err != nil {
+			return nil, err
+		}
 	}
 	return output, nil
 }

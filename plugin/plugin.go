@@ -10,7 +10,7 @@ import (
 	"github.com/hashicorp/go-plugin"
 )
 
-var Version = "v0.1.0"
+var Version = "v0.1.1"
 
 // DBPlugin – interface for DB access plugins.
 type DBPlugin interface {

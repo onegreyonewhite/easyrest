@@ -20,52 +20,51 @@ type sqlitePlugin struct {
 	db *sql.DB
 }
 
-// Helper function to check if any value in a map (string value) contains "erctx."
-func mapNeedsCTE(m map[string]interface{}) bool {
-	for _, v := range m {
-		if s, ok := v.(string); ok && strings.Contains(s, "erctx.") {
-			return true
-		}
-	}
-	return false
-}
-
-// Helper function to check if any value in a slice of maps contains "erctx."
-func dataNeedsCTE(data []map[string]interface{}) bool {
-	for _, row := range data {
-		if mapNeedsCTE(row) {
-			return true
-		}
-	}
-	return false
-}
-
-// TableGet now uses queryNeedsCTE as before.
-func queryNeedsCTE(selectFields []string, where map[string]interface{}) bool {
-	// Check select fields.
-	for _, field := range selectFields {
-		if strings.Contains(field, "erctx.") {
-			return true
-		}
-	}
-	// Check where values.
-	for _, val := range where {
-		switch v := val.(type) {
-		case map[string]interface{}:
-			for _, operand := range v {
-				if s, ok := operand.(string); ok && strings.Contains(s, "erctx.") {
-					return true
-				}
+// substituteContextValues recursively substitutes any string value that starts with "erctx."
+// with its corresponding value from flatCtx. It returns the substituted value.
+func substituteContextValues(input interface{}, flatCtx map[string]string) interface{} {
+	switch v := input.(type) {
+	case string:
+		if strings.HasPrefix(v, "erctx.") {
+			key := strings.TrimPrefix(v, "erctx.")
+			normalizedKey := strings.ToLower(strings.ReplaceAll(key, "-", "_"))
+			if val, exists := flatCtx[normalizedKey]; exists {
+				return val
 			}
-		case string:
-			if strings.Contains(v, "erctx.") {
-				return true
-			}
+			return v
 		}
+		return v
+	case map[string]interface{}:
+		m := make(map[string]interface{})
+		for key, value := range v {
+			m[key] = substituteContextValues(value, flatCtx)
+		}
+		return m
+	case []interface{}:
+		s := make([]interface{}, len(v))
+		for i, item := range v {
+			s[i] = substituteContextValues(item, flatCtx)
+		}
+		return s
+	default:
+		return v
 	}
-	return false
 }
 
+// substituteContextInData applies substitution for each map in a slice.
+func substituteContextInData(data []map[string]interface{}, flatCtx map[string]string) []map[string]interface{} {
+	result := make([]map[string]interface{}, len(data))
+	for i, row := range data {
+		if substituted, ok := substituteContextValues(row, flatCtx).(map[string]interface{}); ok {
+			result[i] = substituted
+		} else {
+			result[i] = row
+		}
+	}
+	return result
+}
+
+// InitConnection opens the SQLite database based on the provided URI.
 func (s *sqlitePlugin) InitConnection(uri string) error {
 	// Expected format: sqlite://<path>
 	if !strings.HasPrefix(uri, "sqlite://") {
@@ -80,17 +79,30 @@ func (s *sqlitePlugin) InitConnection(uri string) error {
 	return s.db.Ping()
 }
 
-// TableGet now receives an extra context parameter (ctx).
-// If ctx is non-empty, it is flattened and injected via a CTE named erctx.
+// TableGet receives an extra context parameter. If provided, it substitutes any
+// where clause operand that begins with "erctx." with its value from the context.
 func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, where map[string]interface{},
-	ordering []string, groupBy []string, limit, offset int, ctx map[string]interface{}) (results []map[string]interface{}, err error) {
+	ordering []string, groupBy []string, limit, offset int, ctx map[string]interface{}) ([]map[string]interface{}, error) {
+
+	// If context is provided, substitute values in the where clause.
+	if ctx != nil {
+		flatCtx, err := easyrest.FormatToContext(ctx)
+		if err != nil {
+			return nil, err
+		}
+		substituted := substituteContextValues(where, flatCtx)
+		if m, ok := substituted.(map[string]interface{}); ok {
+			where = m
+		} else {
+			return nil, fmt.Errorf("expected map[string]interface{} after substitution")
+		}
+	}
 
 	fields := "*"
 	if len(selectFields) > 0 {
 		fields = strings.Join(selectFields, ", ")
 	}
 	query := fmt.Sprintf("SELECT %s FROM %s", fields, table)
-	// Build the WHERE clause using the helper from plugin/helpers.go.
 	whereClause, args, err := easyrest.BuildWhereClause(where)
 	if err != nil {
 		return nil, err
@@ -109,29 +121,6 @@ func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, whe
 		query += fmt.Sprintf(" OFFSET %d", offset)
 	}
 
-	// Only wrap with CTE if either select or where contains "erctx.".
-	if queryNeedsCTE(selectFields, where) && ctx != nil {
-		flatCtx, err := easyrest.FormatToContext(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if len(flatCtx) > 0 {
-			parts := make([]string, 0, len(flatCtx))
-			cteParams := make([]interface{}, 0, len(flatCtx))
-			for k, v := range flatCtx {
-				parts = append(parts, fmt.Sprintf("? AS %s", k))
-				cteParams = append(cteParams, v)
-			}
-			cteExpr := strings.Join(parts, ", ")
-			// Modify FROM clause to include ", erctx"
-			modifiedFrom := fmt.Sprintf("FROM %s, erctx", table)
-			query = strings.Replace(query, fmt.Sprintf("FROM %s", table), modifiedFrom, 1)
-			query = fmt.Sprintf("WITH erctx AS (SELECT %s) %s", cteExpr, query)
-			// Prepend the CTE parameters to the arguments.
-			args = append(cteParams, args...)
-		}
-	}
-
 	ctxQuery := context.WithValue(context.Background(), "USER_ID", userID)
 	rows, err := s.db.QueryContext(ctxQuery, query, args...)
 	if err != nil {
@@ -148,6 +137,7 @@ func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, whe
 	for i := range columns {
 		columnPointers[i] = &columns[i]
 	}
+	var results []map[string]interface{}
 	for rows.Next() {
 		if err := rows.Scan(columnPointers...); err != nil {
 			return nil, err
@@ -169,7 +159,7 @@ func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, whe
 	return results, nil
 }
 
-// TableCreate wraps the INSERT query with a CTE if context is provided.
+// TableCreate substitutes context references in the data values and then builds a standard INSERT query.
 func (s *sqlitePlugin) TableCreate(userID, table string, data []map[string]interface{}, ctx map[string]interface{}) ([]map[string]interface{}, error) {
 	ctxQuery := context.WithValue(context.Background(), "USER_ID", userID)
 	tx, err := s.db.BeginTx(ctxQuery, nil)
@@ -177,35 +167,26 @@ func (s *sqlitePlugin) TableCreate(userID, table string, data []map[string]inter
 		return nil, err
 	}
 	var results []map[string]interface{}
+	var flatCtx map[string]string
+	if ctx != nil {
+		flatCtx, err = easyrest.FormatToContext(ctx)
+		if err != nil {
+			tx.Rollback()
+			return nil, err
+		}
+	}
+	// Substitute context references in each row.
+	data = substituteContextInData(data, flatCtx)
 	for _, row := range data {
-		cols := make([]string, 0, len(row))
-		placeholders := make([]string, 0, len(row))
-		args := make([]interface{}, 0, len(row))
+		var cols []string
+		var placeholders []string
+		var args []interface{}
 		for k, v := range row {
 			cols = append(cols, k)
 			placeholders = append(placeholders, "?")
 			args = append(args, v)
 		}
 		baseQuery := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", table, strings.Join(cols, ", "), strings.Join(placeholders, ", "))
-		// Only wrap with CTE if context is provided and data contains "erctx."
-		if ctx != nil && dataNeedsCTE(data) {
-			flatCtx, err := easyrest.FormatToContext(ctx)
-			if err != nil {
-				tx.Rollback()
-				return nil, err
-			}
-			if len(flatCtx) > 0 {
-				parts := make([]string, 0, len(flatCtx))
-				cteParams := make([]interface{}, 0, len(flatCtx))
-				for k, v := range flatCtx {
-					parts = append(parts, fmt.Sprintf("? AS %s", k))
-					cteParams = append(cteParams, v)
-				}
-				cteExpr := strings.Join(parts, ", ")
-				baseQuery = fmt.Sprintf("WITH erctx AS (SELECT %s) %s", cteExpr, baseQuery)
-				args = append(cteParams, args...)
-			}
-		}
 		_, err := tx.ExecContext(ctxQuery, baseQuery, args...)
 		if err != nil {
 			tx.Rollback()
@@ -219,46 +200,47 @@ func (s *sqlitePlugin) TableCreate(userID, table string, data []map[string]inter
 	return results, nil
 }
 
-// TableUpdate wraps the UPDATE query with a CTE if context is provided.
+// TableUpdate substitutes context references in both the update data and where clause.
 func (s *sqlitePlugin) TableUpdate(userID, table string, data map[string]interface{}, where map[string]interface{}, ctx map[string]interface{}) (int, error) {
 	ctxQuery := context.WithValue(context.Background(), "USER_ID", userID)
 	tx, err := s.db.BeginTx(ctxQuery, nil)
 	if err != nil {
 		return 0, err
 	}
-	setParts := make([]string, 0, len(data))
-	args := make([]interface{}, 0, len(data))
-	for k, v := range data {
+	var flatCtx map[string]string
+	if ctx != nil {
+		flatCtx, err = easyrest.FormatToContext(ctx)
+		if err != nil {
+			tx.Rollback()
+			return 0, err
+		}
+	}
+	// Substitute in both data and where maps recursively.
+	substitutedData, ok := substituteContextValues(data, flatCtx).(map[string]interface{})
+	if !ok {
+		tx.Rollback()
+		return 0, fmt.Errorf("failed to substitute context in data")
+	}
+	substitutedWhere, ok := substituteContextValues(where, flatCtx).(map[string]interface{})
+	if !ok {
+		tx.Rollback()
+		return 0, fmt.Errorf("failed to substitute context in where")
+	}
+
+	var setParts []string
+	var args []interface{}
+	for k, v := range substitutedData {
 		setParts = append(setParts, fmt.Sprintf("%s = ?", k))
 		args = append(args, v)
 	}
 	baseQuery := fmt.Sprintf("UPDATE %s SET %s", table, strings.Join(setParts, ", "))
-	whereClause, whereArgs, err := easyrest.BuildWhereClause(where)
+	whereClause, whereArgs, err := easyrest.BuildWhereClause(substitutedWhere)
 	if err != nil {
 		tx.Rollback()
 		return 0, err
 	}
 	baseQuery += whereClause
 	args = append(args, whereArgs...)
-	// For TableUpdate, wrap with CTE only if context is provided and either data or where contains "erctx."
-	if ctx != nil && (mapNeedsCTE(data) || mapNeedsCTE(where)) {
-		flatCtx, err := easyrest.FormatToContext(ctx)
-		if err != nil {
-			tx.Rollback()
-			return 0, err
-		}
-		if len(flatCtx) > 0 {
-			parts := make([]string, 0, len(flatCtx))
-			cteParams := make([]interface{}, 0, len(flatCtx))
-			for k, v := range flatCtx {
-				parts = append(parts, fmt.Sprintf("? AS %s", k))
-				cteParams = append(cteParams, v)
-			}
-			cteExpr := strings.Join(parts, ", ")
-			baseQuery = fmt.Sprintf("WITH erctx AS (SELECT %s) %s", cteExpr, baseQuery)
-			args = append(cteParams, args...)
-		}
-	}
 	res, err := tx.ExecContext(ctxQuery, baseQuery, args...)
 	if err != nil {
 		tx.Rollback()
@@ -275,40 +257,34 @@ func (s *sqlitePlugin) TableUpdate(userID, table string, data map[string]interfa
 	return int(affected), nil
 }
 
-// TableDelete wraps the DELETE query with a CTE if context is provided.
+// TableDelete substitutes context references in the where clause.
 func (s *sqlitePlugin) TableDelete(userID, table string, where map[string]interface{}, ctx map[string]interface{}) (int, error) {
 	ctxQuery := context.WithValue(context.Background(), "USER_ID", userID)
 	tx, err := s.db.BeginTx(ctxQuery, nil)
 	if err != nil {
 		return 0, err
 	}
-	whereClause, whereArgs, err := easyrest.BuildWhereClause(where)
+	var flatCtx map[string]string
+	if ctx != nil {
+		flatCtx, err = easyrest.FormatToContext(ctx)
+		if err != nil {
+			tx.Rollback()
+			return 0, err
+		}
+	}
+	substitutedWhere, ok := substituteContextValues(where, flatCtx).(map[string]interface{})
+	if !ok {
+		tx.Rollback()
+		return 0, fmt.Errorf("failed to substitute context in where")
+	}
+	whereClause, whereArgs, err := easyrest.BuildWhereClause(substitutedWhere)
 	if err != nil {
 		tx.Rollback()
 		return 0, err
 	}
 	baseQuery := fmt.Sprintf("DELETE FROM %s%s", table, whereClause)
-	args := whereArgs
-	// For TableDelete, wrap with CTE only if context is provided and where contains "erctx."
-	if ctx != nil && mapNeedsCTE(where) {
-		flatCtx, err := easyrest.FormatToContext(ctx)
-		if err != nil {
-			tx.Rollback()
-			return 0, err
-		}
-		if len(flatCtx) > 0 {
-			parts := make([]string, 0, len(flatCtx))
-			cteParams := make([]interface{}, 0, len(flatCtx))
-			for k, v := range flatCtx {
-				parts = append(parts, fmt.Sprintf("? AS %s", k))
-				cteParams = append(cteParams, v)
-			}
-			cteExpr := strings.Join(parts, ", ")
-			baseQuery = fmt.Sprintf("WITH erctx AS (SELECT %s) %s", cteExpr, baseQuery)
-			args = append(cteParams, args...)
-		}
-	}
-	res, err := tx.ExecContext(ctxQuery, baseQuery, args...)
+	ctxQuery = context.WithValue(context.Background(), "USER_ID", userID)
+	res, err := tx.ExecContext(ctxQuery, baseQuery, whereArgs...)
 	if err != nil {
 		tx.Rollback()
 		return 0, err

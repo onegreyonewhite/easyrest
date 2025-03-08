@@ -3,6 +3,7 @@ BINARIES = plugin-sqlite server
 SRC_DIR = ./cmd
 BUILD_DIR ?= $(shell pwd)/bin
 BIN_OUT = $(addprefix $(BUILD_DIR)/$(PREFIX), $(BINARIES))
+COVERAGE ?= cover.out
 export PATH := $(BUILD_DIR):$(PATH)
 
 all: $(BIN_OUT)
@@ -17,7 +18,8 @@ clean:
 	rm -rf $(BUILD_DIR)
 
 test: $(BUILD_DIR)/$(PREFIX)plugin-sqlite
-	go test ./...
+	go test -v -coverpkg=./... -coverprofile=$(COVERAGE) ./...
+	go tool cover -func=$(COVERAGE)
 
 bench: $(BUILD_DIR)/$(PREFIX)plugin-sqlite
 	go test -bench=. ./...
