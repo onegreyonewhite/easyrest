@@ -142,7 +142,7 @@ func TestParseWhereClause(t *testing.T) {
 // TestBuildPluginContext checks coverage for buildPluginContext.
 func TestBuildPluginContext(t *testing.T) {
 	// Mock a request with some headers and a token claim context.
-	req, _ := http.NewRequest("GET", "/", nil)
+	req, _ := http.NewRequest("GET", "/api/test/users/", nil)
 	req.Header.Set("Timezone", "Asia/Tokyo")
 	req.Header.Set("Prefer", "timezone=America/Los_Angeles")
 	req.Header.Add("X-Custom", "Value1")
@@ -164,9 +164,21 @@ func TestBuildPluginContext(t *testing.T) {
 	if headers["x-custom"] != "Value1 Value2" {
 		t.Errorf("Expected x-custom='Value1 Value2', got %v", headers["x-custom"])
 	}
+	method, _ := got["method"].(string)
+	if method != "GET" {
+		t.Errorf("Expected method='GET', got %v", method)
+	}
+	path, _ := got["path"].(string)
+	if path != "/api/test/users/" {
+		t.Errorf("Expected path='/api/test/users/', got %v", path)
+	}
 	claimsMap, _ := got["claims"].(map[string]interface{})
 	if claimsMap["sub"] != "Alice" {
 		t.Errorf("Expected claims.sub = 'Alice', got %v", claimsMap["sub"])
+	}
+	jwtClaimsMap, _ := got["jwt.claims"].(map[string]interface{})
+	if jwtClaimsMap["sub"] != "Alice" {
+		t.Errorf("Expected jwt.claims.sub = 'Alice', got %v", jwtClaimsMap["sub"])
 	}
 }
 

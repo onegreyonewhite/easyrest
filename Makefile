@@ -5,6 +5,10 @@ BUILD_DIR ?= $(shell pwd)/bin
 BIN_OUT = $(addprefix $(BUILD_DIR)/$(PREFIX), $(BINARIES))
 COVERAGE ?= cover.out
 export PATH := $(BUILD_DIR):$(PATH)
+export ER_DB_TEST := sqlite://./test.db
+export ER_TOKEN_USER_SEARCH := sub
+export ER_PORT := 8080
+export ER_CHECK_SCOPE := 1
 
 all: $(BIN_OUT)
 
@@ -17,14 +21,14 @@ $(BUILD_DIR)/$(PREFIX)%: $(SRC_DIR)/%/*.go
 clean:
 	rm -rf $(BUILD_DIR)
 
-test: $(BUILD_DIR)/$(PREFIX)plugin-sqlite
+test: plugin-sqlite
 	go test -v -coverpkg=./... -coverprofile=$(COVERAGE) ./...
 	go tool cover -func=$(COVERAGE)
 
 bench: $(BUILD_DIR)/$(PREFIX)plugin-sqlite
 	go test -bench=. ./...
 
-run: $(BUILD_DIR)/$(PREFIX)plugin-sqlite
+run: plugin-sqlite
 	export ER_DB_TEST=sqlite://./test.db
 	export ER_TOKEN_USER_SEARCH=sub
 	export ER_PORT=8080

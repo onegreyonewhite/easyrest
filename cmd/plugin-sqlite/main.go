@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -90,11 +91,17 @@ func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, whe
 		if err != nil {
 			return nil, err
 		}
-		substituted := substituteContextValues(where, flatCtx)
-		if m, ok := substituted.(map[string]interface{}); ok {
+		substituted_where := substituteContextValues(where, flatCtx)
+		if m, ok := substituted_where.(map[string]interface{}); ok {
 			where = m
 		} else {
-			return nil, fmt.Errorf("expected map[string]interface{} after substitution")
+			return nil, fmt.Errorf("Where expected map[string]interface{} after substitution")
+		}
+		substituted_select := substituteContextValues(selectFields, flatCtx)
+		if m, ok := substituted_select.([]string); ok {
+			selectFields = m
+		} else {
+			return nil, fmt.Errorf("Select expected []string after substitution")
 		}
 	}
 
@@ -302,9 +309,7 @@ func (s *sqlitePlugin) TableDelete(userID, table string, where map[string]interf
 
 // CallFunction returns a message including the passed context.
 func (s *sqlitePlugin) CallFunction(userID, funcName string, data map[string]interface{}, ctx map[string]interface{}) (interface{}, error) {
-	return map[string]interface{}{
-		"message": fmt.Sprintf("Function '%s' called by user %s with data: %v and context: %v", funcName, userID, data, ctx),
-	}, nil
+	return nil, http.ErrNotSupported
 }
 
 func main() {

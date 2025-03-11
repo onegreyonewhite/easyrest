@@ -2,7 +2,6 @@ package main
 
 import (
 	"database/sql"
-	"encoding/json"
 	"strings"
 	"testing"
 
@@ -265,17 +264,8 @@ func TestCallFunction_WithContext(t *testing.T) {
 		t.Fatalf("InitConnection failed: %v", err)
 	}
 	ctx := buildTestContext()
-	result, err := plugin.CallFunction("testuser", "myFunc", map[string]interface{}{"param": "value"}, ctx)
-	if err != nil {
-		t.Fatalf("CallFunction failed: %v", err)
-	}
-	// Convert result to JSON to check that context appears in the message.
-	resBytes, err := json.Marshal(result)
-	if err != nil {
-		t.Fatalf("JSON marshal failed: %v", err)
-	}
-	resStr := string(resBytes)
-	if !strings.Contains(resStr, "TestAgent") || !strings.Contains(resStr, "America/Los_Angeles") {
-		t.Errorf("Expected context values in result, got: %s", resStr)
+	_, err := plugin.CallFunction("testuser", "myFunc", map[string]interface{}{"param": "value"}, ctx)
+	if err == nil {
+		t.Fatalf("CallFunction is not supported for SQLite")
 	}
 }

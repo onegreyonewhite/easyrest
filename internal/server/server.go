@@ -72,6 +72,7 @@ func IsAllowedFunction(item string) bool {
 // It uses lowercase keys. TIMEZONE is taken from header "timezone", HEADERS from request headers,
 // and CLAIMS from token claims (converted to a plain map).
 func BuildPluginContext(r *http.Request) map[string]interface{} {
+	cfg := getConfig()
 	headers := make(map[string]interface{})
 	for k, vals := range r.Header {
 		lk := strings.ToLower(k)
@@ -85,30 +86,41 @@ func BuildPluginContext(r *http.Request) map[string]interface{} {
 
 	// Extract timezone from Prefer header.
 	timezone := ""
-	if prefer := r.Header.Get("Prefer"); prefer != "" {
+	prefer := make(map[string]interface{})
+	if prefer_string := r.Header.Get("Prefer"); prefer_string != "" {
 		// Prefer header might contain multiple tokens separated by space.
-		tokens := strings.Split(prefer, " ")
+		tokens := strings.Split(prefer_string, " ")
 		for _, token := range tokens {
-			if strings.HasPrefix(strings.ToLower(token), "timezone=") {
-				parts := strings.SplitN(token, "=", 2)
-				if len(parts) == 2 {
-					timezone = parts[1]
-					break
-				}
+			parts := strings.SplitN(token, "=", 2)
+			key := strings.ToLower(parts[0])
+			val := parts[1]
+			if key == "timezone" {
+				timezone = val
 			}
+			prefer[key] = val
 		}
 	}
 
 	// If timezone is still empty, get default from server configuration.
 	if timezone == "" {
-		cfg := getConfig()
 		timezone = cfg.DefaultTimezone
 	}
 
+	jsonClaims := make(map[string]interface{})
+	jsonClaimBytes, err := json.Marshal(claims)
+	if err == nil {
+		json.Unmarshal(jsonClaimBytes, &jsonClaims)
+	}
+
 	return map[string]interface{}{
-		"timezone": timezone,
-		"headers":  headers,
-		"claims":   plainClaims,
+		"timezone":   timezone,
+		"headers":    headers,
+		"claims":     plainClaims,
+		"jwt.claims": jsonClaims,
+		"method":     r.Method,
+		"path":       r.URL.Path,
+		"query":      r.URL.RawQuery,
+		"prefer":     prefer,
 	}
 }
 
