@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,7 +31,7 @@ var (
 	cfg        config.Config
 	cfgOnce    sync.Once
 	DbPlugins  = make(map[string]easyrest.DBPlugin)
-	allowedOps = map[string]string{
+	AllowedOps = map[string]string{
 		"eq":    "=",
 		"neq":   "!=",
 		"lt":    "<",
@@ -51,6 +52,12 @@ var (
 	}
 )
 
+// schemaCache caches GetSchema results per dbKey.
+var (
+	schemaCache      = make(map[string]interface{})
+	schemaCacheMutex sync.RWMutex
+)
+
 // getConfig loads configuration only once.
 func getConfig() config.Config {
 	cfgOnce.Do(func() {
@@ -59,6 +66,7 @@ func getConfig() config.Config {
 	return cfg
 }
 
+// IsAllowedFunction checks if the provided function name is allowed.
 func IsAllowedFunction(item string) bool {
 	for _, v := range allowedFuncs {
 		if v == item {
@@ -68,204 +76,81 @@ func IsAllowedFunction(item string) bool {
 	return false
 }
 
-// BuildPluginContext extracts context variables from the HTTP request.
-// It uses lowercase keys. TIMEZONE is taken from header "timezone", HEADERS from request headers,
-// and CLAIMS from token claims (converted to a plain map).
-func BuildPluginContext(r *http.Request) map[string]interface{} {
-	cfg := getConfig()
-	headers := make(map[string]interface{})
-	for k, vals := range r.Header {
-		lk := strings.ToLower(k)
-		headers[lk] = strings.Join(vals, " ")
-	}
-	claims := getTokenClaims(r)
-	plainClaims := make(map[string]interface{})
-	for k, v := range claims {
-		plainClaims[strings.ToLower(k)] = v
-	}
-
-	// Extract timezone from Prefer header.
-	timezone := ""
-	prefer := make(map[string]interface{})
-	if prefer_string := r.Header.Get("Prefer"); prefer_string != "" {
-		// Prefer header might contain multiple tokens separated by space.
-		tokens := strings.Split(prefer_string, " ")
-		for _, token := range tokens {
-			parts := strings.SplitN(token, "=", 2)
-			key := strings.ToLower(parts[0])
-			val := parts[1]
-			if key == "timezone" {
-				timezone = val
-			}
-			prefer[key] = val
-		}
-	}
-
-	// If timezone is still empty, get default from server configuration.
-	if timezone == "" {
-		timezone = cfg.DefaultTimezone
-	}
-
-	jsonClaims := make(map[string]interface{})
-	jsonClaimBytes, err := json.Marshal(claims)
-	if err == nil {
-		json.Unmarshal(jsonClaimBytes, &jsonClaims)
-	}
-
-	return map[string]interface{}{
-		"timezone":   timezone,
-		"headers":    headers,
-		"claims":     plainClaims,
-		"jwt.claims": jsonClaims,
-		"method":     r.Method,
-		"path":       r.URL.Path,
-		"query":      r.URL.RawQuery,
-		"prefer":     prefer,
-	}
+// escapeSQLLiteral escapes single quotes in SQL string literals.
+func escapeSQLLiteral(s string) string {
+	return strings.ReplaceAll(s, "'", "''")
 }
 
-// AccessLogMiddleware logs incoming HTTP requests if enabled.
-func AccessLogMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		next.ServeHTTP(w, r)
-		stdlog.Printf("ACCESS: %s %s from %s in %v", r.Method, r.RequestURI, r.RemoteAddr, time.Since(start))
-	})
-}
-
-// Run starts the HTTP server.
-func Run() {
-	config := getConfig()
-	router := SetupRouter()
-	if config.AccessLogOn {
-		router.Use(AccessLogMiddleware)
-	}
-	stdlog.Printf("Server listening on port %s...", config.Port)
-	srv := &http.Server{
-		Addr:         ":" + config.Port,
-		Handler:      router,
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  120 * time.Second,
-	}
-	stdlog.Fatal(srv.ListenAndServe())
-}
-
-func SetupRouter() *mux.Router {
-	LoadDBPlugins()
-	r := mux.NewRouter()
-	r.HandleFunc("/api/{db}/rpc/{func}/", rpcHandler).Methods("POST")
-	r.HandleFunc("/api/{db}/{table}/", tableHandler)
-	return r
-}
-
-// LoadDBPlugins scans environment variables and initializes plugins.
-func LoadDBPlugins() {
-	config := getConfig()
-	for _, env := range os.Environ() {
-		if strings.HasPrefix(env, "ER_DB_") {
-			parts := strings.SplitN(env, "=", 2)
-			if len(parts) != 2 {
-				continue
-			}
-			envName := parts[0]
-			uri := parts[1]
-			connName := strings.ToLower(strings.TrimPrefix(envName, "ER_DB_"))
-			splitURI := strings.SplitN(uri, "://", 2)
-			if len(splitURI) != 2 {
-				stdlog.Printf("Invalid URI for %s: %s", connName, uri)
-				continue
-			}
-			pluginType := splitURI[0]
-			pluginExec := "easyrest-plugin-" + pluginType
-			pluginPath, err := exec.LookPath(pluginExec)
-			if err != nil {
-				stdlog.Printf("Plugin %s not found: %v", pluginExec, err)
-				continue
-			}
-			absPluginPath, err := filepath.Abs(pluginPath)
-			if err != nil {
-				stdlog.Printf("Error getting absolute path for plugin %s: %v", pluginExec, err)
-				continue
-			}
-			pluginConfig := hplugin.ClientConfig{
-				HandshakeConfig: easyrest.Handshake,
-				Plugins: map[string]hplugin.Plugin{
-					"db": &easyrest.DBPluginPlugin{},
-				},
-				Cmd:              exec.Command(absPluginPath),
-				AllowedProtocols: []hplugin.Protocol{hplugin.ProtocolNetRPC},
-			}
-			if config.NoPluginLog {
-				pluginConfig.Logger = hclog.New(&hclog.LoggerOptions{
-					Output: io.Discard,
-					Level:  hclog.Error,
-					Name:   "plugin",
-				})
-			}
-			client := hplugin.NewClient(&pluginConfig)
-			rpcClient, err := client.Client()
-			if err != nil {
-				stdlog.Printf("Error starting plugin %s: %v", pluginExec, err)
-				continue
-			}
-			raw, err := rpcClient.Dispense("db")
-			if err != nil {
-				stdlog.Printf("Error obtaining plugin %s: %v", pluginExec, err)
-				continue
-			}
-			dbPlug, ok := raw.(easyrest.DBPlugin)
-			if !ok {
-				stdlog.Printf("Invalid plugin type for %s", pluginExec)
-				continue
-			}
-			err = dbPlug.InitConnection(uri)
-			if err != nil {
-				stdlog.Printf("Error initializing connection for plugin %s: %v", connName, err)
-				continue
-			}
-			DbPlugins[connName] = dbPlug
-			stdlog.Printf("Connection %s initialized using plugin %s", connName, pluginExec)
-		}
-	}
-}
-
-// ParseWhereClause converts query parameters (those starting with "where.") into a map.
-// It does not perform additional validation because that was done on the controller.
-func ParseWhereClause(values map[string][]string) (map[string]interface{}, error) {
-	result := make(map[string]interface{})
-	for key, vals := range values {
-		if strings.HasPrefix(key, "where.") {
-			parts := strings.Split(key, ".")
-			if len(parts) != 3 {
-				return nil, fmt.Errorf("Invalid where key format: %s", key)
-			}
-			opCode := strings.ToLower(parts[1])
-			field := parts[2]
-			// If the operator is not allowed, return an error immediately.
-			if _, ok := allowedOps[opCode]; !ok {
-				return nil, fmt.Errorf("Unknown operator: %s", opCode)
-			}
-			op := allowedOps[opCode]
-			value := vals[0]
-			if existing, found := result[field]; found {
-				m, ok := existing.(map[string]interface{})
-				if !ok {
-					return nil, fmt.Errorf("Type error for field %s", field)
-				}
-				m[op] = value
-				result[field] = m
+// getNestedValue traverses a nested map using dot-separated keys.
+// If the full path is found, it returns the value and true; otherwise false.
+func getNestedValue(data map[string]interface{}, path string) (interface{}, bool) {
+	parts := strings.Split(path, ".")
+	var current interface{} = data
+	for _, p := range parts {
+		if m, ok := current.(map[string]interface{}); ok {
+			if val, exists := m[p]; exists {
+				current = val
 			} else {
-				result[field] = map[string]interface{}{op: value}
+				return nil, false
 			}
+		} else {
+			return nil, false
 		}
 	}
-	return result, nil
+	return current, true
 }
 
-// processSelectParam parses the "select" query parameter, allowing aliasing and SQL functions.
-// It validates plain field names using IsValidIdentifier (or allowed erctx fields).
-func processSelectParam(param string) ([]string, []string, error) {
+// substitutePluginContext replaces values starting with "erctx." or "request."
+// with the corresponding value from flatCtx or pluginCtx.
+func substitutePluginContext(input string, flatCtx map[string]string, pluginCtx map[string]interface{}) string {
+	if strings.HasPrefix(input, "erctx.") {
+		key := input[len("erctx."):]
+		normalizedKey := strings.ToLower(strings.ReplaceAll(key, "-", "_"))
+		if val, ok := flatCtx[normalizedKey]; ok {
+			return val
+		}
+	} else if strings.HasPrefix(input, "request.") {
+		key := input[len("request."):]
+		if v, ok := getNestedValue(pluginCtx, key); ok {
+			rv := reflect.ValueOf(v)
+			switch rv.Kind() {
+			case reflect.Map, reflect.Slice, reflect.Array:
+				if bytes, err := json.Marshal(v); err == nil {
+					return string(bytes)
+				}
+			}
+			return fmt.Sprintf("%v", v)
+		}
+	}
+	return input
+}
+
+// substituteValue recursively substitutes string values in arbitrary data structures.
+func substituteValue(val interface{}, flatCtx map[string]string, pluginCtx map[string]interface{}) interface{} {
+	switch s := val.(type) {
+	case string:
+		if strings.HasPrefix(s, "erctx.") || strings.HasPrefix(s, "request.") {
+			return substitutePluginContext(s, flatCtx, pluginCtx)
+		}
+		return s
+	case map[string]interface{}:
+		for k, v := range s {
+			s[k] = substituteValue(v, flatCtx, pluginCtx)
+		}
+		return s
+	case []interface{}:
+		for i, v := range s {
+			s[i] = substituteValue(v, flatCtx, pluginCtx)
+		}
+		return s
+	default:
+		return val
+	}
+}
+
+// processSelectParam parses the "select" query parameter, performs context substitution,
+// and assigns an alias (defaulting to the field name with dots replaced by underscores) if not provided.
+func processSelectParam(param string, flatCtx map[string]string, pluginCtx map[string]interface{}) ([]string, []string, error) {
 	if param == "" {
 		return nil, nil, nil
 	}
@@ -288,6 +173,7 @@ func processSelectParam(param string) ([]string, []string, error) {
 		}
 		var expr string
 		if strings.Contains(raw, ".") && strings.HasSuffix(raw, "()") {
+			// Process function syntax like "amount.sum()"
 			subParts := strings.SplitN(raw, ".", 2)
 			fieldPart := strings.TrimSpace(subParts[0])
 			funcPart := strings.TrimSpace(subParts[1])
@@ -306,24 +192,348 @@ func processSelectParam(param string) ([]string, []string, error) {
 			if alias == "" {
 				alias = funcName
 			}
+			// Append alias so that the SQL query becomes, for example, "SUM(amount) AS sum"
+			expr = expr + " AS " + alias
 		} else if raw == "count()" {
 			expr = "COUNT(*)"
 			if alias == "" {
 				alias = "count"
 			}
-		} else {
-			// Validate field: assume valid if it is an identifier or starts with "erctx.".
-			expr = raw
-			groupBy = append(groupBy, raw)
-		}
-		if alias != "" {
 			expr = expr + " AS " + alias
+		} else {
+			// For plain fields – если значение является контекстным, подставляем его как литерал.
+			if strings.HasPrefix(raw, "erctx.") || strings.HasPrefix(raw, "request.") {
+				substituted := substitutePluginContext(raw, flatCtx, pluginCtx)
+				if alias == "" {
+					alias = strings.ReplaceAll(raw, ".", "_")
+				}
+				expr = fmt.Sprintf("'%s' AS %s", escapeSQLLiteral(substituted), alias)
+			} else {
+				expr = raw
+				if alias != "" {
+					expr = expr + " AS " + alias
+				}
+				groupBy = append(groupBy, raw)
+			}
 		}
 		selectFields = append(selectFields, expr)
 	}
 	return selectFields, groupBy, nil
 }
 
+// ParseWhereClause converts query parameters starting with "where." into a map,
+// performing context substitution for values.
+func ParseWhereClause(values map[string][]string, flatCtx map[string]string, pluginCtx map[string]interface{}) (map[string]interface{}, error) {
+	result := make(map[string]interface{})
+	for key, vals := range values {
+		if strings.HasPrefix(key, "where.") {
+			parts := strings.Split(key, ".")
+			if len(parts) != 3 {
+				return nil, fmt.Errorf("Invalid where key format: %s", key)
+			}
+			opCode := strings.ToLower(parts[1])
+			field := parts[2]
+			if _, ok := AllowedOps[opCode]; !ok {
+				return nil, fmt.Errorf("Unknown operator: %s", opCode)
+			}
+			op := AllowedOps[opCode]
+			substituted := substitutePluginContext(vals[0], flatCtx, pluginCtx)
+			if existing, found := result[field]; found {
+				m, ok := existing.(map[string]interface{})
+				if !ok {
+					return nil, fmt.Errorf("Type error for field %s", field)
+				}
+				m[op] = substituted
+				result[field] = m
+			} else {
+				result[field] = map[string]interface{}{op: substituted}
+			}
+		}
+	}
+	return result, nil
+}
+
+// BuildPluginContext extracts context variables from the HTTP request.
+func BuildPluginContext(r *http.Request) map[string]interface{} {
+	cfg := getConfig()
+	headers := make(map[string]interface{})
+	for k, vals := range r.Header {
+		lk := strings.ToLower(k)
+		headers[lk] = strings.Join(vals, " ")
+	}
+	claims := getTokenClaims(r)
+	plainClaims := make(map[string]interface{})
+	for k, v := range claims {
+		plainClaims[strings.ToLower(k)] = v
+	}
+
+	timezone := ""
+	prefer := make(map[string]interface{})
+	if preferStr := r.Header.Get("Prefer"); preferStr != "" {
+		tokens := strings.Split(preferStr, " ")
+		for _, token := range tokens {
+			parts := strings.SplitN(token, "=", 2)
+			key := strings.ToLower(parts[0])
+			val := parts[1]
+			if key == "timezone" {
+				timezone = val
+			}
+			prefer[key] = val
+		}
+	}
+	if timezone == "" {
+		timezone = cfg.DefaultTimezone
+	}
+
+	return map[string]interface{}{
+		"timezone":   timezone,
+		"headers":    headers,
+		"claims":     plainClaims,
+		"jwt.claims": plainClaims,
+		"method":     r.Method,
+		"path":       r.URL.Path,
+		"query":      r.URL.RawQuery,
+		"prefer":     prefer,
+	}
+}
+
+// AccessLogMiddleware logs incoming HTTP requests if enabled.
+func AccessLogMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		next.ServeHTTP(w, r)
+		stdlog.Printf("ACCESS: %s %s from %s in %v", r.Method, r.RequestURI, r.RemoteAddr, time.Since(start))
+	})
+}
+
+// buildSwaggerSpec constructs a Swagger 2.0 specification based on the definitions
+// returned from dbPlug.GetSchema. dbKey is the current database key.
+func buildSwaggerSpec(r *http.Request, dbKey string, definitions map[string]interface{}) map[string]interface{} {
+	cfg := getConfig()
+	swaggerDef := map[string]interface{}{
+		"swagger": "2.0",
+		"info": map[string]interface{}{
+			"title":   "EasyRest API",
+			"version": easyrest.Version,
+		},
+		"host":        r.Host,
+		"basePath":    "/api/" + dbKey,
+		"schemes":     []string{"http"},
+		"consumes":    []string{"application/json"},
+		"produces":    []string{"application/json"},
+		"definitions": definitions,
+		"securityDefinitions": map[string]interface{}{
+			"oauth2": map[string]interface{}{
+				"type":     "oauth2",
+				"flow":     cfg.AuthFlow,
+				"tokenUrl": cfg.TokenURL,
+				"scopes":   map[string]interface{}{},
+			},
+		},
+		"paths": map[string]interface{}{},
+	}
+	paths := swaggerDef["paths"].(map[string]interface{})
+
+	// For each table in definitions, build endpoints.
+	for tableName, modelSchemaRaw := range definitions {
+		modelSchema, ok := modelSchemaRaw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		// Get list of field names from model schema.
+		properties, ok := modelSchema["properties"].(map[string]interface{})
+		var fieldNames []string
+		if ok {
+			for fieldName := range properties {
+				fieldNames = append(fieldNames, fieldName)
+			}
+		}
+
+		// Common query parameters for GET.
+		getParams := []map[string]interface{}{
+			{
+				"name":             "select",
+				"in":               "query",
+				"description":      "Comma-separated list of fields",
+				"type":             "string",
+				"required":         false,
+				"enum":             fieldNames,
+				"collectionFormat": "csv",
+			},
+			{
+				"name":             "ordering",
+				"in":               "query",
+				"description":      "Comma-separated ordering fields",
+				"type":             "string",
+				"required":         false,
+				"collectionFormat": "csv",
+			},
+			{
+				"name":        "limit",
+				"in":          "query",
+				"description": "Maximum number of records to return",
+				"type":        "integer",
+				"required":    false,
+			},
+			{
+				"name":        "offset",
+				"in":          "query",
+				"description": "Number of records to skip",
+				"type":        "integer",
+				"required":    false,
+			},
+		}
+		// For each field and for each allowed operator, add a query parameter.
+		for _, fieldName := range fieldNames {
+			// Determine type from property schema.
+			prop, ok := properties[fieldName].(map[string]interface{})
+			var paramType string = "string"
+			if ok {
+				if t, exists := prop["type"].(string); exists {
+					paramType = t
+				}
+			}
+			for op := range AllowedOps {
+				// For string fields, skip lt, lte, gt, gte.
+				if paramType == "string" {
+					if op == "lt" || op == "lte" || op == "gt" || op == "gte" {
+						continue
+					}
+				}
+				// For numeric fields, skip like and ilike.
+				if paramType == "integer" || paramType == "number" {
+					if op == "like" || op == "ilike" {
+						continue
+					}
+				}
+				param := map[string]interface{}{
+					"name":        fmt.Sprintf("where.%s.%s", op, fieldName),
+					"in":          "query",
+					"description": fmt.Sprintf("Filter for field '%s' with operator %s", fieldName, op),
+					"type":        paramType,
+					"required":    false,
+				}
+				getParams = append(getParams, param)
+			}
+		}
+
+		path := "/" + tableName + "/"
+		paths[path] = map[string]interface{}{
+			"get": map[string]interface{}{
+				"summary":     fmt.Sprintf("Get %s", tableName),
+				"description": fmt.Sprintf("Retrieve rows from the %s table", tableName),
+				"parameters":  getParams,
+				"responses": map[string]interface{}{
+					"200": map[string]interface{}{
+						"description": "Successful response",
+						"schema": map[string]interface{}{
+							"type":  "array",
+							"items": map[string]interface{}{"$ref": "#/definitions/" + tableName},
+						},
+					},
+				},
+				"security": []map[string]interface{}{
+					{"oauth2": []string{}},
+				},
+			},
+			"post": map[string]interface{}{
+				"summary":     fmt.Sprintf("Create rows in %s", tableName),
+				"description": fmt.Sprintf("Insert new rows into the %s table", tableName),
+				"parameters": []map[string]interface{}{
+					{
+						"name":        "body",
+						"in":          "body",
+						"description": fmt.Sprintf("Array of %s objects", tableName),
+						"required":    true,
+						"schema": map[string]interface{}{
+							"type":  "array",
+							"items": map[string]interface{}{"$ref": "#/definitions/" + tableName},
+						},
+					},
+				},
+				"responses": map[string]interface{}{
+					"201": map[string]interface{}{
+						"description": "Rows created",
+					},
+				},
+				"security": []map[string]interface{}{
+					{"oauth2": []string{}},
+				},
+			},
+			"patch": map[string]interface{}{
+				"summary":     fmt.Sprintf("Update rows in %s", tableName),
+				"description": fmt.Sprintf("Update existing rows in the %s table", tableName),
+				"parameters": append(getParams, map[string]interface{}{
+					"name":        "body",
+					"in":          "body",
+					"description": fmt.Sprintf("Partial update of a %s object", tableName),
+					"required":    true,
+					"schema":      map[string]interface{}{"$ref": "#/definitions/" + tableName},
+				}),
+				"responses": map[string]interface{}{
+					"200": map[string]interface{}{
+						"description": "Rows updated",
+						"schema": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"updated": map[string]interface{}{"type": "integer"},
+							},
+						},
+					},
+				},
+				"security": []map[string]interface{}{
+					{"oauth2": []string{}},
+				},
+			},
+			"delete": map[string]interface{}{
+				"summary":     fmt.Sprintf("Delete rows from %s", tableName),
+				"description": fmt.Sprintf("Delete rows from the %s table", tableName),
+				"parameters":  getParams,
+				"responses": map[string]interface{}{
+					"204": map[string]interface{}{
+						"description": "Rows deleted",
+					},
+				},
+				"security": []map[string]interface{}{
+					{"oauth2": []string{}},
+				},
+			},
+		}
+	}
+	return swaggerDef
+}
+
+// schemaHandler now builds and returns a full swagger 2.0 spec.
+func schemaHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	dbKey := strings.ToLower(vars["db"])
+	dbPlug, ok := DbPlugins[dbKey]
+	if !ok {
+		http.Error(w, "DB plugin not found", http.StatusNotFound)
+		return
+	}
+	pluginCtx := BuildPluginContext(r)
+	schemaRaw, err := dbPlug.GetSchema(pluginCtx)
+	if err != nil {
+		stdlog.Println(err)
+		http.Error(w, "GetSchema not implemented", http.StatusNotImplemented)
+		return
+	}
+	schemaMap, ok := schemaRaw.(map[string]interface{})
+	if !ok {
+		http.Error(w, "Invalid schema format", http.StatusInternalServerError)
+		return
+	}
+	definitions, ok := schemaMap["tables"].(map[string]interface{})
+	if !ok {
+		http.Error(w, "Invalid tables schema", http.StatusInternalServerError)
+		return
+	}
+	swaggerSpec := buildSwaggerSpec(r, dbKey, definitions)
+	respondJSON(w, http.StatusOK, swaggerSpec)
+}
+
+// tableHandler processes CRUD operations on tables.
 func tableHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	dbKey := strings.ToLower(vars["db"])
@@ -357,16 +567,21 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pluginCtx := BuildPluginContext(r)
+	flatCtx, err := easyrest.FormatToContext(pluginCtx)
+	if err != nil {
+		http.Error(w, "Error formatting context: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	switch r.Method {
 	case http.MethodGet:
 		selectParam := r.URL.Query().Get("select")
-		selectFields, groupBy, err := processSelectParam(selectParam)
+		selectFields, groupBy, err := processSelectParam(selectParam, flatCtx, pluginCtx)
 		if err != nil {
 			http.Error(w, "Error processing select parameter: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		where, err := ParseWhereClause(r.URL.Query())
+		where, err := ParseWhereClause(r.URL.Query(), flatCtx, pluginCtx)
 		if err != nil {
 			http.Error(w, "Error processing where clause: "+err.Error(), http.StatusBadRequest)
 			return
@@ -387,6 +602,9 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "JSON parse error: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		for i, row := range data {
+			data[i] = substituteValue(row, flatCtx, pluginCtx).(map[string]interface{})
+		}
 		rows, err := dbPlug.TableCreate(userID, table, data, pluginCtx)
 		if err != nil {
 			http.Error(w, "Error in TableCreate: "+err.Error(), http.StatusInternalServerError)
@@ -399,7 +617,8 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "JSON parse error: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		where, err := ParseWhereClause(r.URL.Query())
+		data = substituteValue(data, flatCtx, pluginCtx).(map[string]interface{})
+		where, err := ParseWhereClause(r.URL.Query(), flatCtx, pluginCtx)
 		if err != nil {
 			http.Error(w, "Error processing where clause: "+err.Error(), http.StatusBadRequest)
 			return
@@ -411,7 +630,7 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		respondJSON(w, http.StatusOK, map[string]int{"updated": updated})
 	case http.MethodDelete:
-		where, err := ParseWhereClause(r.URL.Query())
+		where, err := ParseWhereClause(r.URL.Query(), flatCtx, pluginCtx)
 		if err != nil {
 			http.Error(w, "Error processing where clause: "+err.Error(), http.StatusBadRequest)
 			return
@@ -427,6 +646,7 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// rpcHandler processes RPC calls to plugin functions.
 func rpcHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	dbKey := strings.ToLower(vars["db"])
@@ -461,6 +681,12 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pluginCtx := BuildPluginContext(r)
+	flatCtx, err := easyrest.FormatToContext(pluginCtx)
+	if err != nil {
+		http.Error(w, "Error formatting context: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	data = substituteValue(data, flatCtx, pluginCtx).(map[string]interface{})
 	result, err := dbPlug.CallFunction(userID, funcName, data, pluginCtx)
 	if err != nil {
 		http.Error(w, "Error in CallFunction: "+err.Error(), http.StatusInternalServerError)
@@ -469,6 +695,7 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, result)
 }
 
+// ParseCSV splits a comma-separated string.
 func ParseCSV(s string) []string {
 	if s == "" {
 		return nil
@@ -597,4 +824,104 @@ func CheckScope(claims jwt.MapClaims, required string) bool {
 		}
 	}
 	return false
+}
+
+// SetupRouter initializes the router and endpoints.
+func SetupRouter() *mux.Router {
+	LoadDBPlugins()
+	r := mux.NewRouter()
+	// Schema endpoint.
+	r.HandleFunc("/api/{db}/", schemaHandler).Methods("GET")
+	r.HandleFunc("/api/{db}/rpc/{func}/", rpcHandler).Methods("POST")
+	r.HandleFunc("/api/{db}/{table}/", tableHandler)
+	return r
+}
+
+// Run starts the HTTP server.
+func Run() {
+	config := getConfig()
+	router := SetupRouter()
+	if config.AccessLogOn {
+		router.Use(AccessLogMiddleware)
+	}
+	stdlog.Printf("Server listening on port %s...", config.Port)
+	srv := &http.Server{
+		Addr:         ":" + config.Port,
+		Handler:      router,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+	stdlog.Fatal(srv.ListenAndServe())
+}
+
+// LoadDBPlugins scans environment variables and initializes plugins.
+func LoadDBPlugins() {
+	config := getConfig()
+	for _, env := range os.Environ() {
+		if strings.HasPrefix(env, "ER_DB_") {
+			parts := strings.SplitN(env, "=", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			envName := parts[0]
+			uri := parts[1]
+			connName := strings.ToLower(strings.TrimPrefix(envName, "ER_DB_"))
+			splitURI := strings.SplitN(uri, "://", 2)
+			if len(splitURI) != 2 {
+				stdlog.Printf("Invalid URI for %s: %s", connName, uri)
+				continue
+			}
+			pluginType := splitURI[0]
+			pluginExec := "easyrest-plugin-" + pluginType
+			pluginPath, err := exec.LookPath(pluginExec)
+			if err != nil {
+				stdlog.Printf("Plugin %s not found: %v", pluginExec, err)
+				continue
+			}
+			absPluginPath, err := filepath.Abs(pluginPath)
+			if err != nil {
+				stdlog.Printf("Error getting absolute path for plugin %s: %v", pluginExec, err)
+				continue
+			}
+			pluginConfig := hplugin.ClientConfig{
+				HandshakeConfig: easyrest.Handshake,
+				Plugins: map[string]hplugin.Plugin{
+					"db": &easyrest.DBPluginPlugin{},
+				},
+				Cmd:              exec.Command(absPluginPath),
+				AllowedProtocols: []hplugin.Protocol{hplugin.ProtocolNetRPC},
+			}
+			if config.NoPluginLog {
+				pluginConfig.Logger = hclog.New(&hclog.LoggerOptions{
+					Output: io.Discard,
+					Level:  hclog.Error,
+					Name:   "plugin",
+				})
+			}
+			client := hplugin.NewClient(&pluginConfig)
+			rpcClient, err := client.Client()
+			if err != nil {
+				stdlog.Printf("Error starting plugin %s: %v", pluginExec, err)
+				continue
+			}
+			raw, err := rpcClient.Dispense("db")
+			if err != nil {
+				stdlog.Printf("Error obtaining plugin %s: %v", pluginExec, err)
+				continue
+			}
+			dbPlug, ok := raw.(easyrest.DBPlugin)
+			if !ok {
+				stdlog.Printf("Invalid plugin type for %s", pluginExec)
+				continue
+			}
+			err = dbPlug.InitConnection(uri)
+			if err != nil {
+				stdlog.Printf("Error initializing connection for plugin %s: %v", connName, err)
+				continue
+			}
+			DbPlugins[connName] = dbPlug
+			stdlog.Printf("Connection %s initialized using plugin %s", connName, pluginExec)
+		}
+	}
 }

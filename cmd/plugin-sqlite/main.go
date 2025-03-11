@@ -21,50 +21,6 @@ type sqlitePlugin struct {
 	db *sql.DB
 }
 
-// substituteContextValues recursively substitutes any string value that starts with "erctx."
-// with its corresponding value from flatCtx. It returns the substituted value.
-func substituteContextValues(input interface{}, flatCtx map[string]string) interface{} {
-	switch v := input.(type) {
-	case string:
-		if strings.HasPrefix(v, "erctx.") {
-			key := strings.TrimPrefix(v, "erctx.")
-			normalizedKey := strings.ToLower(strings.ReplaceAll(key, "-", "_"))
-			if val, exists := flatCtx[normalizedKey]; exists {
-				return val
-			}
-			return v
-		}
-		return v
-	case map[string]interface{}:
-		m := make(map[string]interface{})
-		for key, value := range v {
-			m[key] = substituteContextValues(value, flatCtx)
-		}
-		return m
-	case []interface{}:
-		s := make([]interface{}, len(v))
-		for i, item := range v {
-			s[i] = substituteContextValues(item, flatCtx)
-		}
-		return s
-	default:
-		return v
-	}
-}
-
-// substituteContextInData applies substitution for each map in a slice.
-func substituteContextInData(data []map[string]interface{}, flatCtx map[string]string) []map[string]interface{} {
-	result := make([]map[string]interface{}, len(data))
-	for i, row := range data {
-		if substituted, ok := substituteContextValues(row, flatCtx).(map[string]interface{}); ok {
-			result[i] = substituted
-		} else {
-			result[i] = row
-		}
-	}
-	return result
-}
-
 // InitConnection opens the SQLite database based on the provided URI.
 func (s *sqlitePlugin) InitConnection(uri string) error {
 	// Expected format: sqlite://<path>
@@ -80,30 +36,9 @@ func (s *sqlitePlugin) InitConnection(uri string) error {
 	return s.db.Ping()
 }
 
-// TableGet receives an extra context parameter. If provided, it substitutes any
-// where clause operand that begins with "erctx." with its value from the context.
+// TableGet constructs and executes a SELECT query.
 func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, where map[string]interface{},
 	ordering []string, groupBy []string, limit, offset int, ctx map[string]interface{}) ([]map[string]interface{}, error) {
-
-	// If context is provided, substitute values in the where clause.
-	if ctx != nil {
-		flatCtx, err := easyrest.FormatToContext(ctx)
-		if err != nil {
-			return nil, err
-		}
-		substituted_where := substituteContextValues(where, flatCtx)
-		if m, ok := substituted_where.(map[string]interface{}); ok {
-			where = m
-		} else {
-			return nil, fmt.Errorf("Where expected map[string]interface{} after substitution")
-		}
-		substituted_select := substituteContextValues(selectFields, flatCtx)
-		if m, ok := substituted_select.([]string); ok {
-			selectFields = m
-		} else {
-			return nil, fmt.Errorf("Select expected []string after substitution")
-		}
-	}
 
 	fields := "*"
 	if len(selectFields) > 0 {
@@ -166,7 +101,7 @@ func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, whe
 	return results, nil
 }
 
-// TableCreate substitutes context references in the data values and then builds a standard INSERT query.
+// TableCreate builds and executes an INSERT query.
 func (s *sqlitePlugin) TableCreate(userID, table string, data []map[string]interface{}, ctx map[string]interface{}) ([]map[string]interface{}, error) {
 	ctxQuery := context.WithValue(context.Background(), "USER_ID", userID)
 	tx, err := s.db.BeginTx(ctxQuery, nil)
@@ -174,16 +109,6 @@ func (s *sqlitePlugin) TableCreate(userID, table string, data []map[string]inter
 		return nil, err
 	}
 	var results []map[string]interface{}
-	var flatCtx map[string]string
-	if ctx != nil {
-		flatCtx, err = easyrest.FormatToContext(ctx)
-		if err != nil {
-			tx.Rollback()
-			return nil, err
-		}
-	}
-	// Substitute context references in each row.
-	data = substituteContextInData(data, flatCtx)
 	for _, row := range data {
 		var cols []string
 		var placeholders []string
@@ -207,41 +132,21 @@ func (s *sqlitePlugin) TableCreate(userID, table string, data []map[string]inter
 	return results, nil
 }
 
-// TableUpdate substitutes context references in both the update data and where clause.
+// TableUpdate builds and executes an UPDATE query.
 func (s *sqlitePlugin) TableUpdate(userID, table string, data map[string]interface{}, where map[string]interface{}, ctx map[string]interface{}) (int, error) {
 	ctxQuery := context.WithValue(context.Background(), "USER_ID", userID)
 	tx, err := s.db.BeginTx(ctxQuery, nil)
 	if err != nil {
 		return 0, err
 	}
-	var flatCtx map[string]string
-	if ctx != nil {
-		flatCtx, err = easyrest.FormatToContext(ctx)
-		if err != nil {
-			tx.Rollback()
-			return 0, err
-		}
-	}
-	// Substitute in both data and where maps recursively.
-	substitutedData, ok := substituteContextValues(data, flatCtx).(map[string]interface{})
-	if !ok {
-		tx.Rollback()
-		return 0, fmt.Errorf("failed to substitute context in data")
-	}
-	substitutedWhere, ok := substituteContextValues(where, flatCtx).(map[string]interface{})
-	if !ok {
-		tx.Rollback()
-		return 0, fmt.Errorf("failed to substitute context in where")
-	}
-
 	var setParts []string
 	var args []interface{}
-	for k, v := range substitutedData {
+	for k, v := range data {
 		setParts = append(setParts, fmt.Sprintf("%s = ?", k))
 		args = append(args, v)
 	}
 	baseQuery := fmt.Sprintf("UPDATE %s SET %s", table, strings.Join(setParts, ", "))
-	whereClause, whereArgs, err := easyrest.BuildWhereClause(substitutedWhere)
+	whereClause, whereArgs, err := easyrest.BuildWhereClause(where)
 	if err != nil {
 		tx.Rollback()
 		return 0, err
@@ -264,33 +169,19 @@ func (s *sqlitePlugin) TableUpdate(userID, table string, data map[string]interfa
 	return int(affected), nil
 }
 
-// TableDelete substitutes context references in the where clause.
+// TableDelete builds and executes a DELETE query.
 func (s *sqlitePlugin) TableDelete(userID, table string, where map[string]interface{}, ctx map[string]interface{}) (int, error) {
 	ctxQuery := context.WithValue(context.Background(), "USER_ID", userID)
 	tx, err := s.db.BeginTx(ctxQuery, nil)
 	if err != nil {
 		return 0, err
 	}
-	var flatCtx map[string]string
-	if ctx != nil {
-		flatCtx, err = easyrest.FormatToContext(ctx)
-		if err != nil {
-			tx.Rollback()
-			return 0, err
-		}
-	}
-	substitutedWhere, ok := substituteContextValues(where, flatCtx).(map[string]interface{})
-	if !ok {
-		tx.Rollback()
-		return 0, fmt.Errorf("failed to substitute context in where")
-	}
-	whereClause, whereArgs, err := easyrest.BuildWhereClause(substitutedWhere)
+	whereClause, whereArgs, err := easyrest.BuildWhereClause(where)
 	if err != nil {
 		tx.Rollback()
 		return 0, err
 	}
 	baseQuery := fmt.Sprintf("DELETE FROM %s%s", table, whereClause)
-	ctxQuery = context.WithValue(context.Background(), "USER_ID", userID)
 	res, err := tx.ExecContext(ctxQuery, baseQuery, whereArgs...)
 	if err != nil {
 		tx.Rollback()
@@ -307,9 +198,110 @@ func (s *sqlitePlugin) TableDelete(userID, table string, where map[string]interf
 	return int(affected), nil
 }
 
-// CallFunction returns a message including the passed context.
+// CallFunction returns an error since it is not supported.
 func (s *sqlitePlugin) CallFunction(userID, funcName string, data map[string]interface{}, ctx map[string]interface{}) (interface{}, error) {
 	return nil, http.ErrNotSupported
+}
+
+// GetSchema returns a schema object with two keys:
+// "tables" is a map from table names to JSON schema (Swagger 2.0 compatible),
+// "rpc" is nil since SQLite does not support stored procedures.
+func (s *sqlitePlugin) GetSchema(ctx map[string]interface{}) (interface{}, error) {
+	tables := make(map[string]interface{})
+	// Get list of tables excluding internal ones.
+	rows, err := s.db.Query("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tableNames []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		tableNames = append(tableNames, name)
+	}
+	for _, tableName := range tableNames {
+		schema, err := s.getJSONSchemaForTable(tableName)
+		if err != nil {
+			return nil, err
+		}
+		tables[tableName] = schema
+	}
+	result := map[string]interface{}{
+		"tables": tables,
+		"rpc":    nil,
+	}
+	return result, nil
+}
+
+// getJSONSchemaForTable builds a JSON schema for a given table by querying PRAGMA table_info.
+func (s *sqlitePlugin) getJSONSchemaForTable(tableName string) (map[string]interface{}, error) {
+	query := fmt.Sprintf("PRAGMA table_info(%s)", tableName)
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	properties := make(map[string]interface{})
+	var required []string
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notnull int
+		var dfltValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &colType, &notnull, &dfltValue, &pk); err != nil {
+			return nil, err
+		}
+		jsType := mapSQLiteType(colType)
+		prop := map[string]interface{}{
+			"type": jsType,
+		}
+		// If BLOB type, add format "byte".
+		if strings.Contains(strings.ToUpper(colType), "BLOB") {
+			prop["format"] = "byte"
+		}
+		// If the column allows null, mark as x-nullable.
+		if notnull == 0 {
+			prop["x-nullable"] = true
+		}
+		// If the column is primary key, mark as readOnly.
+		if pk > 0 {
+			prop["readOnly"] = true
+		}
+		properties[name] = prop
+		// Add to required only if column is NOT NULL and has no DEFAULT value.
+		if notnull == 1 && !dfltValue.Valid {
+			required = append(required, name)
+		}
+	}
+	// Always include "required" key (even if empty).
+	schema := map[string]interface{}{
+		"type":       "object",
+		"properties": properties,
+	}
+	if len(required) > 0 {
+		schema["required"] = required
+	}
+
+	return schema, nil
+}
+
+// mapSQLiteType maps an SQLite column type to a JSON schema type.
+func mapSQLiteType(sqliteType string) string {
+	upperType := strings.ToUpper(sqliteType)
+	if strings.Contains(upperType, "INT") {
+		return "integer"
+	} else if strings.Contains(upperType, "CHAR") || strings.Contains(upperType, "CLOB") || strings.Contains(upperType, "TEXT") {
+		return "string"
+	} else if strings.Contains(upperType, "BLOB") {
+		return "string"
+	} else if strings.Contains(upperType, "REAL") || strings.Contains(upperType, "FLOA") || strings.Contains(upperType, "DOUB") {
+		return "number"
+	}
+	return "string"
 }
 
 func main() {

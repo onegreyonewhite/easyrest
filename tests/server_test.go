@@ -123,13 +123,14 @@ func TestParseWhereClause(t *testing.T) {
 		"where.gt.id":     {"100"},
 		"where.unknown.x": {"foo"},
 	}
-	_, err := server.ParseWhereClause(values)
+	// Pass empty flat and plugin contexts.
+	_, err := server.ParseWhereClause(values, map[string]string{}, map[string]interface{}{})
 	if err == nil {
 		t.Error("Expected parseWhereClause to fail with unknown operator 'unknown'")
 	}
-	// Remove the unknown operator
+	// Remove the unknown operator.
 	delete(values, "where.unknown.x")
-	whereMap, err2 := server.ParseWhereClause(values)
+	whereMap, err2 := server.ParseWhereClause(values, map[string]string{}, map[string]interface{}{})
 	if err2 != nil {
 		t.Errorf("Unexpected error from parseWhereClause: %v", err2)
 	}

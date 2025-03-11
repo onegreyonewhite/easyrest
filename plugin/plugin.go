@@ -10,7 +10,8 @@ import (
 	"github.com/hashicorp/go-plugin"
 )
 
-var Version = "v0.1.1"
+// Version is the plugin version.
+var Version = "v0.2.0"
 
 // DBPlugin – interface for DB access plugins.
 type DBPlugin interface {
@@ -21,6 +22,7 @@ type DBPlugin interface {
 	TableUpdate(userID, table string, data map[string]interface{}, where map[string]interface{}, ctx map[string]interface{}) (int, error)
 	TableDelete(userID, table string, where map[string]interface{}, ctx map[string]interface{}) (int, error)
 	CallFunction(userID, funcName string, data map[string]interface{}, ctx map[string]interface{}) (interface{}, error)
+	GetSchema(ctx map[string]interface{}) (interface{}, error)
 }
 
 // RPC request/response structures.
@@ -95,6 +97,16 @@ type CallFunctionRequest struct {
 
 type CallFunctionResponse struct {
 	Result interface{}
+	Error  string
+}
+
+// New structures for GetSchema.
+type GetSchemaRequest struct {
+	Ctx map[string]interface{}
+}
+
+type GetSchemaResponse struct {
+	Schema interface{}
 	Error  string
 }
 
@@ -241,7 +253,21 @@ func (g *DBPluginRPC) CallFunction(userID, funcName string, data map[string]inte
 	return resp.Result, nil
 }
 
-// DBPluginRPCServer implements the server side RPC.
+// New GetSchema method.
+func (g *DBPluginRPC) GetSchema(ctx map[string]interface{}) (interface{}, error) {
+	req := GetSchemaRequest{Ctx: ctx}
+	var resp GetSchemaResponse
+	err := g.client.Call("Plugin.GetSchema", req, &resp)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Error != "" {
+		return nil, errors.New(resp.Error)
+	}
+	return resp.Schema, nil
+}
+
+// DBPluginRPCServer is the server-side RPC implementation.
 type DBPluginRPCServer struct {
 	Impl DBPlugin
 }
@@ -304,6 +330,17 @@ func (s *DBPluginRPCServer) CallFunction(req CallFunctionRequest, resp *CallFunc
 	return nil
 }
 
+// New GetSchema server method.
+func (s *DBPluginRPCServer) GetSchema(req GetSchemaRequest, resp *GetSchemaResponse) error {
+	schema, err := s.Impl.GetSchema(req.Ctx)
+	if err != nil {
+		resp.Error = err.Error()
+		return nil
+	}
+	resp.Schema = schema
+	return nil
+}
+
 // DBPluginPlugin wraps the DBPlugin implementation for go-plugin.
 type DBPluginPlugin struct {
 	Impl DBPlugin
@@ -321,6 +358,7 @@ func init() {
 	gob.Register(map[string]interface{}(nil))
 	gob.Register([]map[string]interface{}{})
 	gob.Register(time.Time{})
+	gob.Register([]interface{}{})
 }
 
 // Handshake configuration for plugin security.

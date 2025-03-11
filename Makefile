@@ -7,6 +7,7 @@ COVERAGE ?= cover.out
 export PATH := $(BUILD_DIR):$(PATH)
 export ER_DB_TEST := sqlite://./test.db
 export ER_TOKEN_USER_SEARCH := sub
+export ER_TOKEN_AUTHURL := http://auth.example.com/token
 export ER_PORT := 8080
 export ER_CHECK_SCOPE := 1
 
@@ -25,7 +26,7 @@ test: plugin-sqlite
 	go test -v -coverpkg=./... -coverprofile=$(COVERAGE) ./...
 	go tool cover -func=$(COVERAGE)
 
-bench: $(BUILD_DIR)/$(PREFIX)plugin-sqlite
+bench: plugin-sqlite
 	go test -bench=. ./...
 
 run: plugin-sqlite

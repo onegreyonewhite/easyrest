@@ -13,6 +13,8 @@ type Config struct {
 	NoPluginLog     bool
 	AccessLogOn     bool
 	DefaultTimezone string
+	TokenURL        string
+	AuthFlow        string
 }
 
 func Load() Config {
@@ -22,7 +24,7 @@ func Load() Config {
 		port = "8080"
 	}
 
-	// CheckScope: if not set default to true; if set, only "1" yields true.
+	// CheckScope: default true, unless set to other value than "1"
 	checkScopeStr := os.Getenv("ER_CHECK_SCOPE")
 	checkScope := true
 	if checkScopeStr != "" {
@@ -40,7 +42,7 @@ func Load() Config {
 		tokenUserSearch = "sub"
 	}
 
-	// NoPluginLog: if not set, default to true; otherwise only "1" yields true.
+	// NoPluginLog: default true, unless set to other value than "1"
 	noPluginLogStr := os.Getenv("ER_NO_PLUGIN_LOG")
 	noPluginLog := true
 	if noPluginLogStr != "" {
@@ -58,6 +60,7 @@ func Load() Config {
 		accessLogOn = true
 	}
 
+	// DefaultTimezone: try environment variable, then system /etc/localtime
 	defaultTimezone := os.Getenv("ER_DEFAULT_TIMEZONE")
 	if defaultTimezone == "" {
 		link, err := os.Readlink("/etc/localtime")
@@ -73,6 +76,15 @@ func Load() Config {
 		}
 	}
 
+	// TokenURL: HTTP path for authorization from ER_TOKEN_AUTHURL
+	tokenURL := os.Getenv("ER_TOKEN_AUTHURL")
+
+	authFlow := os.Getenv("ER_TOKEN_AUTHFLOW")
+
+	if authFlow == "" {
+		authFlow = "password"
+	}
+
 	return Config{
 		Port:            port,
 		CheckScope:      checkScope,
@@ -81,5 +93,7 @@ func Load() Config {
 		NoPluginLog:     noPluginLog,
 		AccessLogOn:     accessLogOn,
 		DefaultTimezone: defaultTimezone,
+		TokenURL:        tokenURL,
+		AuthFlow:        authFlow,
 	}
 }
