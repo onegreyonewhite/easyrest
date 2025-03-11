@@ -11,6 +11,70 @@ import (
 	"github.com/onegreyonewhite/easyrest/internal/server"
 )
 
+// fakeDBPluginWithRPC is a fake implementation of DBPlugin for testing GetSchema with RPC.
+type fakeDBPluginWithRPC struct{}
+
+func (f *fakeDBPluginWithRPC) InitConnection(uri string) error { return nil }
+func (f *fakeDBPluginWithRPC) TableGet(userID, table string, selectFields []string, where map[string]interface{},
+	ordering []string, groupBy []string, limit, offset int, ctx map[string]interface{}) ([]map[string]interface{}, error) {
+	return nil, nil
+}
+func (f *fakeDBPluginWithRPC) TableCreate(userID, table string, data []map[string]interface{}, ctx map[string]interface{}) ([]map[string]interface{}, error) {
+	return nil, nil
+}
+func (f *fakeDBPluginWithRPC) TableUpdate(userID, table string, data map[string]interface{}, where map[string]interface{}, ctx map[string]interface{}) (int, error) {
+	return 0, nil
+}
+func (f *fakeDBPluginWithRPC) TableDelete(userID, table string, where map[string]interface{}, ctx map[string]interface{}) (int, error) {
+	return 0, nil
+}
+func (f *fakeDBPluginWithRPC) CallFunction(userID, funcName string, data map[string]interface{}, ctx map[string]interface{}) (interface{}, error) {
+	return nil, nil
+}
+func (f *fakeDBPluginWithRPC) GetSchema(ctx map[string]interface{}) (interface{}, error) {
+	// Return a fake schema with both tables and rpc.
+	return map[string]interface{}{
+		"tables": map[string]interface{}{
+			"myTable": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"id": map[string]interface{}{
+						"type":     "integer",
+						"readOnly": true,
+					},
+					"name": map[string]interface{}{
+						"type": "string",
+					},
+				},
+				"required": []interface{}{"name"},
+			},
+		},
+		"rpc": map[string]interface{}{
+			"myFunc": []interface{}{
+				// Request schema
+				map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"param": map[string]interface{}{
+							"type": "string",
+						},
+					},
+					"required": []interface{}{"param"},
+				},
+				// Response schema
+				map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"result": map[string]interface{}{
+							"type": "string",
+						},
+					},
+				},
+			},
+		},
+	}, nil
+}
+
 // setupTestDBForSchema creates a test DB and a "test" table with various field types.
 func setupTestDBForSchema(t *testing.T) string {
 	dbPath := setupTestDB(t)
@@ -165,5 +229,48 @@ func TestSwaggerSchema(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestSwaggerSchemaWithRPC(t *testing.T) {
+	// Unset ER_DB_TEST to prevent LoadDBPlugins from overriding our fake plugin.
+	os.Unsetenv("ER_DB_TEST")
+	// Set the fake plugin for database "test".
+	server.DbPlugins["mock"] = &fakeDBPluginWithRPC{}
+
+	// Create a fake HTTP request to /api/test/
+	req, err := http.NewRequest("GET", "/api/mock/", nil)
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	rr := httptest.NewRecorder()
+	router := server.SetupRouter()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d, body: %s", rr.Code, rr.Body.String())
+	}
+	var swaggerSpec map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &swaggerSpec); err != nil {
+		t.Fatalf("Failed to unmarshal swagger spec: %v", err)
+	}
+
+	// Check that definitions contain the "myTable" model.
+	definitions, ok := swaggerSpec["definitions"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("definitions is not a map")
+	}
+	if _, ok := definitions["myTable"]; !ok {
+		t.Errorf("Expected definitions to contain 'myTable'")
+	}
+	// Check that paths contain both "/myTable/" and "/rpc/myFunc/".
+	paths, ok := swaggerSpec["paths"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("paths is not a map")
+	}
+	if _, ok := paths["/myTable/"]; !ok {
+		t.Errorf("Expected paths to contain '/myTable/'")
+	}
+	if _, ok := paths["/rpc/myFunc/"]; !ok {
+		t.Errorf("Expected paths to contain '/rpc/myFunc/'")
 	}
 }

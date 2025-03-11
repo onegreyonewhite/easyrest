@@ -306,26 +306,69 @@ func AccessLogMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// buildSwaggerSpec constructs a Swagger 2.0 specification based on the definitions
-// returned from dbPlug.GetSchema. dbKey is the current database key.
-func buildSwaggerSpec(r *http.Request, dbKey string, definitions map[string]interface{}) map[string]interface{} {
+// updateSwaggerSpecWithRPC adds paths for RPC functions based on rpcDefinitions.
+func updateSwaggerSpecWithRPC(swaggerSpec map[string]interface{}, rpcDefinitions map[string]interface{}) {
+	paths, ok := swaggerSpec["paths"].(map[string]interface{})
+	if !ok {
+		paths = make(map[string]interface{})
+		swaggerSpec["paths"] = paths
+	}
+	for funcName, def := range rpcDefinitions {
+		arr, ok := def.([]interface{})
+		if !ok || len(arr) != 2 {
+			continue
+		}
+		reqSchema := arr[0]
+		respSchema := arr[1]
+		path := "/rpc/" + funcName + "/"
+		op := map[string]interface{}{
+			"summary":     fmt.Sprintf("Call RPC function %s", funcName),
+			"description": fmt.Sprintf("Invoke the RPC function %s", funcName),
+			"parameters": []interface{}{
+				map[string]interface{}{
+					"name":        "body",
+					"in":          "body",
+					"description": "RPC request payload",
+					"required":    true,
+					"schema":      reqSchema,
+				},
+			},
+			"responses": map[string]interface{}{
+				"200": map[string]interface{}{
+					"description": "RPC response",
+					"schema":      respSchema,
+				},
+			},
+			"security": []map[string]interface{}{
+				{"oauth2": []string{}},
+			},
+		}
+		paths[path] = map[string]interface{}{
+			"post": op,
+		}
+	}
+}
+
+// buildSwaggerSpec constructs a Swagger 2.0 specification based on table definitions and RPC definitions.
+// dbKey is the current database key.
+func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs map[string]interface{}, rpcDefs map[string]interface{}) map[string]interface{} {
 	cfg := getConfig()
 	swaggerDef := map[string]interface{}{
 		"swagger": "2.0",
 		"info": map[string]interface{}{
 			"title":   "EasyRest API",
-			"version": easyrest.Version,
+			"version": "v0.1.1",
 		},
 		"host":        r.Host,
 		"basePath":    "/api/" + dbKey,
 		"schemes":     []string{"http"},
 		"consumes":    []string{"application/json"},
 		"produces":    []string{"application/json"},
-		"definitions": definitions,
+		"definitions": tableDefs,
 		"securityDefinitions": map[string]interface{}{
 			"oauth2": map[string]interface{}{
 				"type":     "oauth2",
-				"flow":     cfg.AuthFlow,
+				"flow":     "password",
 				"tokenUrl": cfg.TokenURL,
 				"scopes":   map[string]interface{}{},
 			},
@@ -334,13 +377,13 @@ func buildSwaggerSpec(r *http.Request, dbKey string, definitions map[string]inte
 	}
 	paths := swaggerDef["paths"].(map[string]interface{})
 
-	// For each table in definitions, build endpoints.
-	for tableName, modelSchemaRaw := range definitions {
+	// For each table in tableDefs, build endpoints.
+	for tableName, modelSchemaRaw := range tableDefs {
 		modelSchema, ok := modelSchemaRaw.(map[string]interface{})
 		if !ok {
 			continue
 		}
-		// Get list of field names from model schema.
+		// Get list of field names from the model schema.
 		properties, ok := modelSchema["properties"].(map[string]interface{})
 		var fieldNames []string
 		if ok {
@@ -385,7 +428,6 @@ func buildSwaggerSpec(r *http.Request, dbKey string, definitions map[string]inte
 		}
 		// For each field and for each allowed operator, add a query parameter.
 		for _, fieldName := range fieldNames {
-			// Determine type from property schema.
 			prop, ok := properties[fieldName].(map[string]interface{})
 			var paramType string = "string"
 			if ok {
@@ -500,6 +542,10 @@ func buildSwaggerSpec(r *http.Request, dbKey string, definitions map[string]inte
 			},
 		}
 	}
+	// Add RPC paths once if rpcDefs is not nil.
+	if rpcDefs != nil {
+		updateSwaggerSpecWithRPC(swaggerDef, rpcDefs)
+	}
 	return swaggerDef
 }
 
@@ -515,7 +561,6 @@ func schemaHandler(w http.ResponseWriter, r *http.Request) {
 	pluginCtx := BuildPluginContext(r)
 	schemaRaw, err := dbPlug.GetSchema(pluginCtx)
 	if err != nil {
-		stdlog.Println(err)
 		http.Error(w, "GetSchema not implemented", http.StatusNotImplemented)
 		return
 	}
@@ -524,12 +569,18 @@ func schemaHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid schema format", http.StatusInternalServerError)
 		return
 	}
-	definitions, ok := schemaMap["tables"].(map[string]interface{})
+	tableDefs, ok := schemaMap["tables"].(map[string]interface{})
 	if !ok {
 		http.Error(w, "Invalid tables schema", http.StatusInternalServerError)
 		return
 	}
-	swaggerSpec := buildSwaggerSpec(r, dbKey, definitions)
+	var rpcDefs map[string]interface{}
+	if raw, exists := schemaMap["rpc"]; exists && raw != nil {
+		if m, ok := raw.(map[string]interface{}); ok {
+			rpcDefs = m
+		}
+	}
+	swaggerSpec := buildSwaggerSpec(r, dbKey, tableDefs, rpcDefs)
 	respondJSON(w, http.StatusOK, swaggerSpec)
 }
 

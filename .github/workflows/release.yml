@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - '*'  # срабатывает на любой тег
+      - '*'
 
 jobs:
   release:
@@ -33,9 +33,18 @@ jobs:
             done; 
           done
 
+      - name: Get Commit Message (without first line)
+        id: commit
+        run: |
+          COMMIT_BODY=$(git log -1 --pretty=format:"%b")
+          echo "message<<EOF" >> $GITHUB_OUTPUT
+          echo "$COMMIT_BODY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
       - name: Create GitHub Release
         uses: ncipollo/release-action@v1
         with:
           tag: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
+          body: ${{ steps.commit.outputs.message }}
           artifacts: release/*
