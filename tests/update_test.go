@@ -9,7 +9,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/golang-jwt/jwt/v4"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -95,23 +97,22 @@ func TestUpdateAll(t *testing.T) {
 	}
 }
 
-// TestUpdateWhereLike updates rows where the name matches the LIKE condition.
+// TestUpdateWhereLike обновляет записи, где имя соответствует условию LIKE.
 func TestUpdateWhereLike(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
-	// Insert 4 records.
-	insertUser(t, dbPath, "Alice", "old")
-	insertUser(t, dbPath, "Alex", "old")
-	_ = insertUser(t, dbPath, "Bob", "old")
-	insertUser(t, dbPath, "Alicia", "old")
+	// Вставляем тестовые данные
+	insertUser(t, dbPath, "Alice", "test1")
+	insertUser(t, dbPath, "Alex", "test2")
+	insertUser(t, dbPath, "Bob", "test3")
+	insertUser(t, dbPath, "Alicia", "test4")
 
 	router := setupServerWithDB(t, dbPath)
 	tokenStr := generateToken(t)
-	// Request: update update_field to "like-update" for rows where name LIKE "Al%"
-	// URL encoding: "Al%" -> "Al%25"
-	url := "/api/test/users/?where.like.name=Al%25"
+
+	// PATCH запрос с условием LIKE
 	body := strings.NewReader(`{"update_field": "like-update"}`)
-	req, err := http.NewRequest("PATCH", url, body)
+	req, err := http.NewRequest("PATCH", "/api/test/users/?where.like.name=Al%25", body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,47 +121,48 @@ func TestUpdateWhereLike(t *testing.T) {
 	rr := httptest.NewRecorder()
 	router.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("Expected status 200, got %d, response: %s", rr.Code, rr.Body.String())
+		t.Fatalf("Ожидался статус 200, получен %d. Ответ: %s", rr.Code, rr.Body.String())
 	}
+
 	var resp map[string]int
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("Error parsing response: %v", err)
+		t.Fatalf("Ошибка разбора ответа: %v", err)
 	}
-	// Expect 3 rows to be updated: Alice, Alex, Alicia
 	if resp["updated"] != 3 {
-		t.Errorf("Expected 3 rows updated, got %d", resp["updated"])
+		t.Errorf("Ожидалось обновление 3 записей, получено %d", resp["updated"])
 	}
-	// Verify that only the intended rows are updated.
+
+	// Проверяем, что обновлены только записи, начинающиеся с "Al"
 	rows := getAllUsers(t, dbPath)
 	for _, row := range rows {
-		name, _ := row["name"].(string)
+		name := row["name"].(string)
 		if strings.HasPrefix(name, "Al") {
 			if row["update_field"] != "like-update" {
-				t.Errorf("For %s, expected update_field = 'like-update', got %v", name, row["update_field"])
+				t.Errorf("Для %s ожидалось update_field = 'like-update', получено %v", name, row["update_field"])
 			}
 		} else {
 			if row["update_field"] == "like-update" {
-				t.Errorf("For %s, update_field should not have changed", name)
+				t.Errorf("Для %s update_field не должен был измениться", name)
 			}
 		}
 	}
 }
 
-// TestUpdateWhereLt updates rows where id is less than a specified value.
+// TestUpdateWhereLt обновляет записи, где id меньше указанного значения.
 func TestUpdateWhereLt(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
-	// Insert 3 records and store their ids.
-	insertUser(t, dbPath, "Alice", "old")
-	insertUser(t, dbPath, "Bob", "old")
-	id3 := insertUser(t, dbPath, "Charlie", "old")
+	// Вставляем тестовые данные
+	insertUser(t, dbPath, "Alice", "test1")
+	insertUser(t, dbPath, "Bob", "test2")
+	id3 := insertUser(t, dbPath, "Charlie", "test3")
 
 	router := setupServerWithDB(t, dbPath)
 	tokenStr := generateToken(t)
-	// Request: update update_field to "lt-update" for rows with id < id3 (i.e., Alice and Bob).
-	url := "/api/test/users/?where.lt.id=" + strconv.Itoa(id3)
+
+	// PATCH запрос с условием lt
 	body := strings.NewReader(`{"update_field": "lt-update"}`)
-	req, err := http.NewRequest("PATCH", url, body)
+	req, err := http.NewRequest("PATCH", "/api/test/users/?where.lt.id="+strconv.Itoa(id3), body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,26 +171,28 @@ func TestUpdateWhereLt(t *testing.T) {
 	rr := httptest.NewRecorder()
 	router.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("Expected status 200, got %d, response: %s", rr.Code, rr.Body.String())
+		t.Fatalf("Ожидался статус 200, получен %d. Ответ: %s", rr.Code, rr.Body.String())
 	}
+
 	var resp map[string]int
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("Error parsing response: %v", err)
+		t.Fatalf("Ошибка разбора ответа: %v", err)
 	}
 	if resp["updated"] != 2 {
-		t.Errorf("Expected 2 rows updated, got %d", resp["updated"])
+		t.Errorf("Ожидалось обновление 2 записей, получено %d", resp["updated"])
 	}
-	// Verify that only rows with id < id3 are updated.
+
+	// Проверяем, что обновлены только записи с id < id3
 	rows := getAllUsers(t, dbPath)
 	for _, row := range rows {
 		id := int(row["id"].(int64))
 		if id < id3 {
 			if row["update_field"] != "lt-update" {
-				t.Errorf("For id %d, expected update_field = 'lt-update', got %v", id, row["update_field"])
+				t.Errorf("Для id %d ожидалось update_field = 'lt-update', получено %v", id, row["update_field"])
 			}
 		} else {
 			if row["update_field"] == "lt-update" {
-				t.Errorf("For id %d, update_field should not have changed", id)
+				t.Errorf("Для id %d update_field не должен был измениться", id)
 			}
 		}
 	}
@@ -227,15 +231,32 @@ func TestUpdateNoMatch(t *testing.T) {
 	}
 }
 
-// TestUpdateInvalidOperator verifies that using an unknown operator returns an error.
-func TestUpdateInvalidOperator(t *testing.T) {
+// TestUpdateWhereContext обновляет записи с использованием значений из контекста.
+func TestUpdateWhereContext(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
-	insertUser(t, dbPath, "Alice", "old")
+	// Вставляем тестовые данные
+	insertUser(t, dbPath, "testuser", "test1")   // Имя должно совпадать с sub в claims
+	insertUser(t, dbPath, "test_value", "test2") // Имя должно совпадать с custom в claims
+
 	router := setupServerWithDB(t, dbPath)
-	tokenStr := generateToken(t)
-	// Request with an invalid operator "unknown"
-	req, err := http.NewRequest("PATCH", "/api/test/users/?where.unknown.name=Alice", strings.NewReader(`{"update_field": "new"}`))
+
+	// Создаем токен с дополнительными claims
+	claims := jwt.MapClaims{
+		"sub":    "testuser",
+		"exp":    time.Now().Add(time.Hour).Unix(),
+		"scope":  "users-read users-write",
+		"custom": "test_value",
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenStr, err := token.SignedString([]byte("mytestsecret"))
+	if err != nil {
+		t.Fatalf("Ошибка подписи токена: %v", err)
+	}
+
+	// PATCH запрос с использованием значений из контекста
+	body := strings.NewReader(`{"update_field": "context-update"}`)
+	req, err := http.NewRequest("PATCH", "/api/test/users/?where.eq.name=request.claims.sub", body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,20 +264,45 @@ func TestUpdateInvalidOperator(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	router.ServeHTTP(rr, req)
-	// Expect status 400
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("Expected status 400 for invalid operator, got %d, response: %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Ожидался статус 200, получен %d. Ответ: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]int
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Ошибка разбора ответа: %v", err)
+	}
+	if resp["updated"] != 1 {
+		t.Errorf("Ожидалось обновление 1 записи, получено %d", resp["updated"])
+	}
+
+	// Проверяем, что обновлена только запись с именем из claims.sub
+	rows := getAllUsers(t, dbPath)
+	for _, row := range rows {
+		name := row["name"].(string)
+		if name == "testuser" {
+			if row["update_field"] != "context-update" {
+				t.Errorf("Для %s ожидалось update_field = 'context-update', получено %v", name, row["update_field"])
+			}
+		} else {
+			if row["update_field"] == "context-update" {
+				t.Errorf("Для %s update_field не должен был измениться", name)
+			}
+		}
 	}
 }
 
-// TestUpdateMalformedJSON verifies that malformed JSON in the request body returns an error.
-func TestUpdateMalformedJSON(t *testing.T) {
+// TestUpdateInvalidOperator проверяет, что использование неизвестного оператора возвращает ошибку.
+func TestUpdateInvalidOperator(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
-	insertUser(t, dbPath, "Alice", "old")
+	insertUser(t, dbPath, "Alice", "test1")
 	router := setupServerWithDB(t, dbPath)
 	tokenStr := generateToken(t)
-	req, err := http.NewRequest("PATCH", "/api/test/users/?select=id,name", strings.NewReader(`{"update_field": "new`)) // malformed JSON
+
+	// Запрос с недопустимым оператором "unknown"
+	body := strings.NewReader(`{"update_field": "new"}`)
+	req, err := http.NewRequest("PATCH", "/api/test/users/?where.unknown.name=Alice", body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +310,33 @@ func TestUpdateMalformedJSON(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	router.ServeHTTP(rr, req)
+
+	// Ожидаем статус 400 для недопустимого оператора
 	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("Expected status 400 for malformed JSON, got %d, response: %s", rr.Code, rr.Body.String())
+		t.Fatalf("Ожидался статус 400 для недопустимого оператора, получен %d. Ответ: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestUpdateMalformedJSON проверяет, что некорректный JSON в теле запроса возвращает ошибку.
+func TestUpdateMalformedJSON(t *testing.T) {
+	dbPath := setupTestDB(t)
+	defer os.Remove(dbPath)
+	insertUser(t, dbPath, "Alice", "test1")
+	router := setupServerWithDB(t, dbPath)
+	tokenStr := generateToken(t)
+
+	// Запрос с некорректным JSON
+	body := strings.NewReader(`{"update_field": "new`) // некорректный JSON
+	req, err := http.NewRequest("PATCH", "/api/test/users/?select=id,name", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tokenStr)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("Ожидался статус 400 для некорректного JSON, получен %d. Ответ: %s", rr.Code, rr.Body.String())
 	}
 }

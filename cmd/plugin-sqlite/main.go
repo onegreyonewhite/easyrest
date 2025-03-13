@@ -36,6 +36,26 @@ func (s *sqlitePlugin) InitConnection(uri string) error {
 	return s.db.Ping()
 }
 
+// convertILIKEtoLike converts ILIKE operator to LIKE with COLLATE NOCASE
+func convertILIKEtoLike(where map[string]interface{}) map[string]interface{} {
+	result := make(map[string]interface{})
+	for field, val := range where {
+		switch v := val.(type) {
+		case map[string]interface{}:
+			for op, operand := range v {
+				if op == "ILIKE" {
+					result[field+" COLLATE NOCASE"] = map[string]interface{}{"LIKE": operand}
+				} else {
+					result[field] = v
+				}
+			}
+		default:
+			result[field] = v
+		}
+	}
+	return result
+}
+
 // TableGet constructs and executes a SELECT query.
 func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, where map[string]interface{},
 	ordering []string, groupBy []string, limit, offset int, ctx map[string]interface{}) ([]map[string]interface{}, error) {
@@ -45,6 +65,9 @@ func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, whe
 		fields = strings.Join(selectFields, ", ")
 	}
 	query := fmt.Sprintf("SELECT %s FROM %s", fields, table)
+
+	// Convert ILIKE to LIKE COLLATE NOCASE before building where clause
+	where = convertILIKEtoLike(where)
 	whereClause, args, err := easyrest.BuildWhereClause(where)
 	if err != nil {
 		return nil, err
@@ -58,9 +81,11 @@ func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, whe
 	}
 	if limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", limit)
-	}
-	if offset > 0 {
-		query += fmt.Sprintf(" OFFSET %d", offset)
+		if offset > 0 {
+			query += fmt.Sprintf(" OFFSET %d", offset)
+		}
+	} else if offset > 0 {
+		query += fmt.Sprintf(" LIMIT -1 OFFSET %d", offset)
 	}
 
 	ctxQuery := context.WithValue(context.Background(), "USER_ID", userID)
@@ -146,6 +171,9 @@ func (s *sqlitePlugin) TableUpdate(userID, table string, data map[string]interfa
 		args = append(args, v)
 	}
 	baseQuery := fmt.Sprintf("UPDATE %s SET %s", table, strings.Join(setParts, ", "))
+
+	// Convert ILIKE to LIKE COLLATE NOCASE before building where clause
+	where = convertILIKEtoLike(where)
 	whereClause, whereArgs, err := easyrest.BuildWhereClause(where)
 	if err != nil {
 		tx.Rollback()
@@ -176,6 +204,9 @@ func (s *sqlitePlugin) TableDelete(userID, table string, where map[string]interf
 	if err != nil {
 		return 0, err
 	}
+
+	// Convert ILIKE to LIKE COLLATE NOCASE before building where clause
+	where = convertILIKEtoLike(where)
 	whereClause, whereArgs, err := easyrest.BuildWhereClause(where)
 	if err != nil {
 		tx.Rollback()

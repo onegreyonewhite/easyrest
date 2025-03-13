@@ -8,7 +8,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/golang-jwt/jwt/v4"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -164,5 +166,116 @@ func TestSelectInvalidOperator(t *testing.T) {
 	// Expect status 400 for invalid where key format.
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("Expected status 400 for invalid operator, got %d. Response: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestSelectAllOperators(t *testing.T) {
+	dbPath := setupTestDB(t)
+	defer os.Remove(dbPath)
+
+	// Вставляем тестовые данные с разным регистром
+	_ = insertUser(t, dbPath, "Alice", "test1")
+	id2 := insertUser(t, dbPath, "ALICE2", "test2")
+	_ = insertUser(t, dbPath, "Charlie", "test3")
+
+	router := setupServerWithDB(t, dbPath)
+	tokenStr := generateToken(t)
+
+	// Тесты для каждого оператора
+	tests := []struct {
+		name     string
+		query    string
+		expected int
+	}{
+		{"eq", "/api/test/users/?where.eq.name=Alice", 1},
+		{"neq", "/api/test/users/?where.neq.name=Alice", 2},
+		{"lt", "/api/test/users/?where.lt.id=" + strconv.Itoa(id2), 1},
+		{"lte", "/api/test/users/?where.lte.id=" + strconv.Itoa(id2), 2},
+		{"gt", "/api/test/users/?where.gt.id=" + strconv.Itoa(id2), 1},
+		{"gte", "/api/test/users/?where.gte.id=" + strconv.Itoa(id2), 2},
+		{"like", "/api/test/users/?where.like.name=Alice", 1},
+		{"ilike", "/api/test/users/?where.ilike.name=alice", 1},
+		{"is", "/api/test/users/?where.is.update_field=test1", 1},
+		{"in", "/api/test/users/?where.in.name=Alice,ALICE2", 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := http.NewRequest("GET", tt.query, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer "+tokenStr)
+			rr := httptest.NewRecorder()
+			router.ServeHTTP(rr, req)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("Expected status 200, got %d. Response: %s", rr.Code, rr.Body.String())
+			}
+			var result []map[string]interface{}
+			if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
+				t.Fatalf("Error parsing response: %v", err)
+			}
+			if len(result) != tt.expected {
+				t.Errorf("Expected %d rows, got %d for query %s", tt.expected, len(result), tt.query)
+			}
+		})
+	}
+}
+
+func TestContextSubstitution(t *testing.T) {
+	dbPath := setupTestDB(t)
+	defer os.Remove(dbPath)
+
+	// Вставляем тестовые данные
+	insertUser(t, dbPath, "testuser", "test1")   // Имя должно совпадать с sub в claims
+	insertUser(t, dbPath, "test_value", "test2") // Имя должно совпадать с custom в claims
+
+	router := setupServerWithDB(t, dbPath)
+
+	// Создаем токен с дополнительными claims
+	claims := jwt.MapClaims{
+		"sub":    "testuser",
+		"exp":    time.Now().Add(time.Hour).Unix(),
+		"scope":  "users-read users-write",
+		"custom": "test_value",
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenStr, err := token.SignedString([]byte("mytestsecret"))
+	if err != nil {
+		t.Fatalf("Failed to sign token: %v", err)
+	}
+
+	// Тесты подстановки контекстных значений
+	tests := []struct {
+		name     string
+		query    string
+		expected int
+	}{
+		{"select_context", "/api/test/users/?select=request.claims.sub", 2},
+		{"where_context", "/api/test/users/?where.eq.name=request.claims.custom", 1},
+		{"nested_context", "/api/test/users/?where.eq.name=request.claims.sub", 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := http.NewRequest("GET", tt.query, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer "+tokenStr)
+			req.Header.Set("Prefer", "timezone=UTC")
+			rr := httptest.NewRecorder()
+			router.ServeHTTP(rr, req)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("Expected status 200, got %d. Response: %s", rr.Code, rr.Body.String())
+			}
+			var result []map[string]interface{}
+			if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
+				t.Fatalf("Error parsing response: %v", err)
+			}
+			if len(result) != tt.expected {
+				t.Errorf("Expected %d rows, got %d", tt.expected, len(result))
+			}
+		})
 	}
 }

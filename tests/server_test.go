@@ -151,7 +151,7 @@ func TestBuildPluginContext(t *testing.T) {
 
 	// Attach mock claims to context.
 	claims := jwt.MapClaims{"sub": "Alice", "scope": "test-scope", "exp": time.Now().Add(time.Hour).Unix()}
-	ctx := context.WithValue(context.Background(), "tokenClaims", claims)
+	ctx := context.WithValue(context.Background(), server.TokenClaimsKey, claims)
 	req = req.WithContext(ctx)
 
 	os.Setenv("ER_DEFAULT_TIMEZONE", "GMT") // fallback if not found in Prefer
@@ -230,7 +230,7 @@ func TestRunMinimal(t *testing.T) {
 		server.Run()
 	}()
 	time.Sleep(200 * time.Millisecond)
-	// We can’t easily check coverage further. We kill the goroutine by exiting the test.
+	// We can't easily check coverage further. We kill the goroutine by exiting the test.
 }
 
 // TestLoadDBPlugins tries to cover loadDBPlugins by messing with environment variables.

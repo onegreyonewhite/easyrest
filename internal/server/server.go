@@ -26,6 +26,10 @@ import (
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
 
+type contextKey string
+
+const TokenClaimsKey contextKey = "tokenClaims"
+
 // Global configuration and dbPlugins loaded only once.
 var (
 	cfg        config.Config
@@ -58,12 +62,17 @@ var (
 	schemaCacheMutex sync.RWMutex
 )
 
-// getConfig loads configuration only once.
-func getConfig() config.Config {
+// GetConfig loads configuration only once.
+func GetConfig() config.Config {
 	cfgOnce.Do(func() {
 		cfg = config.Load()
 	})
 	return cfg
+}
+
+// SetConfig sets a new configuration.
+func SetConfig(newConfig config.Config) {
+	cfg = newConfig
 }
 
 // IsAllowedFunction checks if the provided function name is allowed.
@@ -201,7 +210,7 @@ func processSelectParam(param string, flatCtx map[string]string, pluginCtx map[s
 			}
 			expr = expr + " AS " + alias
 		} else {
-			// For plain fields – если значение является контекстным, подставляем его как литерал.
+			// For plain fields - if the value is contextual, substitute it as a literal
 			if strings.HasPrefix(raw, "erctx.") || strings.HasPrefix(raw, "request.") {
 				substituted := substitutePluginContext(raw, flatCtx, pluginCtx)
 				if alias == "" {
@@ -267,7 +276,7 @@ func ParseWhereClause(values map[string][]string, flatCtx map[string]string, plu
 
 // BuildPluginContext extracts context variables from the HTTP request.
 func BuildPluginContext(r *http.Request) map[string]interface{} {
-	cfg := getConfig()
+	cfg := GetConfig()
 	headers := make(map[string]interface{})
 	for k, vals := range r.Header {
 		lk := strings.ToLower(k)
@@ -364,7 +373,7 @@ func updateSwaggerSpecWithRPC(swaggerSpec map[string]interface{}, rpcDefinitions
 // buildSwaggerSpec constructs a Swagger 2.0 specification based on table definitions and RPC definitions.
 // dbKey is the current database key.
 func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs, viewDefs, rpcDefs map[string]interface{}) map[string]interface{} {
-	cfg := getConfig()
+	cfg := GetConfig()
 
 	// Merge tables and views into one definitions map.
 	mergedDefs := make(map[string]interface{})
@@ -697,7 +706,7 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	config := getConfig()
+	config := GetConfig()
 	var requiredScope string
 	if r.Method == http.MethodGet {
 		requiredScope = table + "-read"
@@ -810,7 +819,7 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	config := getConfig()
+	config := GetConfig()
 	if config.CheckScope {
 		requiredScope := funcName + "-write"
 		claims := getTokenClaims(r)
@@ -866,30 +875,30 @@ func Authenticate(r *http.Request) (string, *http.Request, error) {
 	if strings.HasPrefix(authHeader, "Bearer ") {
 		tokenStr = strings.TrimPrefix(authHeader, "Bearer ")
 	} else {
-		return "", r, errors.New("Missing Bearer token")
+		return "", r, errors.New("missing bearer token")
 	}
 
-	config := getConfig()
+	config := GetConfig()
 	if config.TokenSecret != "" {
 		parsed, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fmt.Errorf("Unexpected signing method: %v", token.Header["alg"])
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 			}
 			return []byte(config.TokenSecret), nil
 		})
 		if err != nil || !parsed.Valid {
-			return "", r, errors.New("Invalid token")
+			return "", r, errors.New("invalid token")
 		}
 		claims, ok := parsed.Claims.(jwt.MapClaims)
 		if !ok {
-			return "", r, errors.New("Invalid claims")
+			return "", r, errors.New("invalid claims")
 		}
 		if exp, ok := claims["exp"].(float64); ok {
 			if time.Unix(int64(exp), 0).Before(time.Now()) {
-				return "", r, errors.New("Token expired")
+				return "", r, errors.New("token expired")
 			}
 		}
-		r = r.WithContext(context.WithValue(r.Context(), "tokenClaims", claims))
+		r = r.WithContext(context.WithValue(r.Context(), TokenClaimsKey, claims))
 		return extractUserIDFromClaims(claims), r, nil
 	}
 
@@ -897,8 +906,15 @@ func Authenticate(r *http.Request) (string, *http.Request, error) {
 	if tokenURL != "" {
 		resp, err := http.Get(tokenURL + "?access_token=" + tokenStr)
 		if err != nil || resp.StatusCode != http.StatusOK {
-			return "", r, errors.New("Invalid token (via URL)")
+			return "", r, errors.New("invalid token (via URL)")
 		}
+		var authResponse map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&authResponse); err != nil {
+			return "", r, errors.New("invalid response from auth server")
+		}
+		resp.Body.Close()
+		r = r.WithContext(context.WithValue(r.Context(), TokenClaimsKey, jwt.MapClaims(authResponse)))
+		return extractUserIDFromClaims(jwt.MapClaims(authResponse)), r, nil
 	}
 	claims, err := DecodeTokenWithoutValidation(tokenStr)
 	if err != nil {
@@ -906,22 +922,22 @@ func Authenticate(r *http.Request) (string, *http.Request, error) {
 	}
 	if exp, ok := claims["exp"].(float64); ok {
 		if time.Unix(int64(exp), 0).Before(time.Now()) {
-			return "", r, errors.New("Token expired")
+			return "", r, errors.New("token expired")
 		}
 	}
-	r = r.WithContext(context.WithValue(r.Context(), "tokenClaims", claims))
+	r = r.WithContext(context.WithValue(r.Context(), TokenClaimsKey, claims))
 	return extractUserIDFromClaims(claims), r, nil
 }
 
 func getTokenClaims(r *http.Request) jwt.MapClaims {
-	if claims, ok := r.Context().Value("tokenClaims").(jwt.MapClaims); ok {
+	if claims, ok := r.Context().Value(TokenClaimsKey).(jwt.MapClaims); ok {
 		return claims
 	}
 	return nil
 }
 
 func extractUserIDFromClaims(claims jwt.MapClaims) string {
-	config := getConfig()
+	config := GetConfig()
 	searchPath := config.TokenUserSearch
 	if val, ok := claims[searchPath]; ok {
 		return fmt.Sprintf("%v", val)
@@ -931,13 +947,13 @@ func extractUserIDFromClaims(claims jwt.MapClaims) string {
 
 // DecodeTokenWithoutValidation decodes a JWT token without validating its signature.
 func DecodeTokenWithoutValidation(tokenStr string) (jwt.MapClaims, error) {
-	firstDot := strings.IndexByte(tokenStr, '.')
+	firstDot := strings.Index(tokenStr, ".")
 	if firstDot < 0 {
-		return nil, errors.New("Invalid token format")
+		return nil, errors.New("invalid token format")
 	}
-	secondDot := strings.IndexByte(tokenStr[firstDot+1:], '.')
+	secondDot := strings.Index(tokenStr[firstDot+1:], ".")
 	if secondDot < 0 {
-		return nil, errors.New("Invalid token format")
+		return nil, errors.New("invalid token format")
 	}
 	payload := tokenStr[firstDot+1 : firstDot+1+secondDot]
 	decoder := base64.URLEncoding.WithPadding(base64.NoPadding)
@@ -959,7 +975,7 @@ func CheckScope(claims jwt.MapClaims, required string) bool {
 	if !ok {
 		return false
 	}
-	scopes := strings.Split(scopesStr, " ")
+	scopes := strings.Fields(scopesStr)
 	for _, s := range scopes {
 		if s == required {
 			return true
@@ -985,7 +1001,7 @@ func SetupRouter() *mux.Router {
 
 // Run starts the HTTP server.
 func Run() {
-	config := getConfig()
+	config := GetConfig()
 	router := SetupRouter()
 	if config.AccessLogOn {
 		router.Use(AccessLogMiddleware)
@@ -1003,7 +1019,7 @@ func Run() {
 
 // LoadDBPlugins scans environment variables and initializes plugins.
 func LoadDBPlugins() {
-	config := getConfig()
+	config := GetConfig()
 	for _, env := range os.Environ() {
 		if strings.HasPrefix(env, "ER_DB_") {
 			parts := strings.SplitN(env, "=", 2)

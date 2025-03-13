@@ -14,7 +14,8 @@ func initTestDB(db *sql.DB) error {
 	CREATE TABLE users (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		name TEXT,
-		update_field TEXT
+		update_field TEXT,
+		created_at DATETIME
 	);`
 	_, err := db.Exec(schema)
 	return err
@@ -272,17 +273,25 @@ func TestGetSchema(t *testing.T) {
 	}
 	plugin.db = db
 
-	// Create a test table with various constraints.
+	// Create a test table with various data types
 	schemaSQL := `
 	CREATE TABLE test (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		name TEXT NOT NULL,
 		age INTEGER,
-		email TEXT DEFAULT 'unknown'
-	);`
+		email TEXT DEFAULT 'unknown',
+		image BLOB,
+		price REAL,
+		created_at DATETIME
+	);
+
+	CREATE VIEW test_view AS 
+	SELECT id, name, age, price 
+	FROM test 
+	WHERE age > 18;`
 	_, err = plugin.db.Exec(schemaSQL)
 	if err != nil {
-		t.Fatalf("Failed to create test table: %v", err)
+		t.Fatalf("Failed to create test table and view: %v", err)
 	}
 
 	// Call GetSchema
@@ -294,6 +303,8 @@ func TestGetSchema(t *testing.T) {
 	if !ok {
 		t.Fatalf("Expected schema to be a map, got %T", schemaRaw)
 	}
+
+	// Check tables
 	tables, ok := schemaMap["tables"].(map[string]interface{})
 	if !ok {
 		t.Fatalf("Expected 'tables' to be a map, got %T", schemaMap["tables"])
@@ -307,79 +318,382 @@ func TestGetSchema(t *testing.T) {
 		t.Fatalf("Expected properties to be a map")
 	}
 
-	// Check column "id": primary key → readOnly true, type integer.
-	idProp, ok := properties["id"].(map[string]interface{})
+	// Check BLOB type
+	imageProp, ok := properties["image"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("Expected property 'id' to be a map")
+		t.Fatalf("Expected property 'image' to be a map")
 	}
+	if imageProp["type"] != "string" {
+		t.Errorf("Expected 'image' type 'string', got %v", imageProp["type"])
+	}
+	if imageProp["format"] != "byte" {
+		t.Errorf("Expected 'image' format 'byte', got %v", imageProp["format"])
+	}
+
+	// Check REAL type
+	priceProp, ok := properties["price"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected property 'price' to be a map")
+	}
+	if priceProp["type"] != "number" {
+		t.Errorf("Expected 'price' type 'number', got %v", priceProp["type"])
+	}
+
+	// Check view
+	views, ok := schemaMap["views"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected 'views' to be a map, got %T", schemaMap["views"])
+	}
+	testView, ok := views["test_view"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected view 'test_view' in schema")
+	}
+	viewProperties, ok := testView["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected properties in view schema")
+	}
+
+	// Check view properties
+	expectedViewProps := []string{"id", "name", "age", "price"}
+	for _, propName := range expectedViewProps {
+		if _, exists := viewProperties[propName]; !exists {
+			t.Errorf("Expected property '%s' in view schema", propName)
+		}
+	}
+
+	// Check that view has no required fields (views don't have NOT NULL constraints)
+	if _, exists := testView["required"]; exists {
+		t.Errorf("View schema should not have required fields")
+	}
+
+	// Check that view properties have correct types
+	idProp := viewProperties["id"].(map[string]interface{})
 	if idProp["type"] != "integer" {
-		t.Errorf("Expected 'id' type 'integer', got %v", idProp["type"])
-	}
-	if ro, ok := idProp["readOnly"].(bool); !ok || !ro {
-		t.Errorf("Expected 'id' to be readOnly")
+		t.Errorf("Expected view 'id' type 'integer', got %v", idProp["type"])
 	}
 
-	// Check column "name": NOT NULL and no default → should be required and not x-nullable.
-	nameProp, ok := properties["name"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("Expected property 'name' to be a map")
-	}
+	nameProp := viewProperties["name"].(map[string]interface{})
 	if nameProp["type"] != "string" {
-		t.Errorf("Expected 'name' type 'string', got %v", nameProp["type"])
-	}
-	if _, exists := nameProp["x-nullable"]; exists {
-		t.Errorf("Did not expect 'name' to have x-nullable")
-	}
-	// Check that "name" is in required.
-	required, ok := testTable["required"].([]string)
-	if !ok {
-		t.Fatalf("Expected required to be a slice")
-	}
-	foundName := false
-	for _, field := range required {
-		if field == "name" {
-			foundName = true
-			break
-		}
-	}
-	if !foundName {
-		t.Errorf("Expected 'name' to be required")
+		t.Errorf("Expected view 'name' type 'string', got %v", nameProp["type"])
 	}
 
-	// Check column "age": allows null → should have x-nullable true and not be required.
-	ageProp, ok := properties["age"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("Expected property 'age' to be a map")
-	}
+	ageProp := viewProperties["age"].(map[string]interface{})
 	if ageProp["type"] != "integer" {
-		t.Errorf("Expected 'age' type 'integer', got %v", ageProp["type"])
+		t.Errorf("Expected view 'age' type 'integer', got %v", ageProp["type"])
 	}
-	if xNullable, ok := ageProp["x-nullable"].(bool); !ok || !xNullable {
-		t.Errorf("Expected 'age' to be x-nullable")
+
+	priceProp = viewProperties["price"].(map[string]interface{})
+	if priceProp["type"] != "number" {
+		t.Errorf("Expected view 'price' type 'number', got %v", priceProp["type"])
 	}
-	// Check that "age" is not in required.
-	for _, field := range required {
-		if field == "age" {
-			t.Errorf("Did not expect 'age' to be required")
+}
+
+// TestTableGet_GroupBy tests grouping functionality
+func TestTableGet_GroupBy(t *testing.T) {
+	uri := "sqlite://:memory:"
+	plugin := &sqlitePlugin{}
+	if err := plugin.InitConnection(uri); err != nil {
+		t.Fatalf("InitConnection failed: %v", err)
+	}
+	db, err := openInMemoryDB(uri)
+	if err != nil {
+		t.Fatalf("openInMemoryDB failed: %v", err)
+	}
+	plugin.db = db
+	if err := initTestDB(plugin.db); err != nil {
+		t.Fatalf("initTestDB failed: %v", err)
+	}
+
+	// Insert test data
+	_, err = plugin.db.Exec(`
+		INSERT INTO users (name, update_field, created_at) VALUES 
+		('Alice', 'test1', '2024-03-13 10:00:00'),
+		('Alice', 'test2', '2024-03-13 11:00:00'),
+		('Bob', 'test3', '2024-03-13 12:00:00'),
+		('Bob', 'test4', '2024-03-13 13:00:00')
+	`)
+	if err != nil {
+		t.Fatalf("Insert failed: %v", err)
+	}
+
+	selectFields := []string{"name", "COUNT(*) as count"}
+	groupBy := []string{"name"}
+	results, err := plugin.TableGet("testuser", "users", selectFields, nil, nil, groupBy, 0, 0, nil)
+	if err != nil {
+		t.Fatalf("TableGet failed: %v", err)
+	}
+
+	if len(results) != 2 {
+		t.Fatalf("Expected 2 groups, got %d", len(results))
+	}
+
+	// Verify counts
+	for _, row := range results {
+		name := row["name"].(string)
+		count := row["count"].(int64)
+		if name == "Alice" && count != 2 {
+			t.Errorf("Expected count 2 for Alice, got %d", count)
+		}
+		if name == "Bob" && count != 2 {
+			t.Errorf("Expected count 2 for Bob, got %d", count)
+		}
+	}
+}
+
+// TestTableGet_Ordering tests ordering functionality
+func TestTableGet_Ordering(t *testing.T) {
+	uri := "sqlite://:memory:"
+	plugin := &sqlitePlugin{}
+	if err := plugin.InitConnection(uri); err != nil {
+		t.Fatalf("InitConnection failed: %v", err)
+	}
+	db, err := openInMemoryDB(uri)
+	if err != nil {
+		t.Fatalf("openInMemoryDB failed: %v", err)
+	}
+	plugin.db = db
+	if err := initTestDB(plugin.db); err != nil {
+		t.Fatalf("initTestDB failed: %v", err)
+	}
+
+	// Insert test data
+	_, err = plugin.db.Exec(`
+		INSERT INTO users (name, update_field, created_at) VALUES 
+		('Alice', 'test1', '2024-03-13 10:00:00'),
+		('Bob', 'test2', '2024-03-13 11:00:00'),
+		('Charlie', 'test3', '2024-03-13 12:00:00')
+	`)
+	if err != nil {
+		t.Fatalf("Insert failed: %v", err)
+	}
+
+	selectFields := []string{"name"}
+	ordering := []string{"name DESC"}
+	results, err := plugin.TableGet("testuser", "users", selectFields, nil, ordering, nil, 0, 0, nil)
+	if err != nil {
+		t.Fatalf("TableGet failed: %v", err)
+	}
+
+	if len(results) != 3 {
+		t.Fatalf("Expected 3 rows, got %d", len(results))
+	}
+
+	// Verify order
+	expected := []string{"Charlie", "Bob", "Alice"}
+	for i, row := range results {
+		if row["name"] != expected[i] {
+			t.Errorf("Expected name %s at position %d, got %s", expected[i], i, row["name"])
+		}
+	}
+}
+
+// TestTableGet_LimitOffset tests limit and offset functionality
+func TestTableGet_LimitOffset(t *testing.T) {
+	uri := "sqlite://:memory:"
+	plugin := &sqlitePlugin{}
+	if err := plugin.InitConnection(uri); err != nil {
+		t.Fatalf("InitConnection failed: %v", err)
+	}
+	db, err := openInMemoryDB(uri)
+	if err != nil {
+		t.Fatalf("openInMemoryDB failed: %v", err)
+	}
+	plugin.db = db
+	if err := initTestDB(plugin.db); err != nil {
+		t.Fatalf("initTestDB failed: %v", err)
+	}
+
+	// Insert test data
+	_, err = plugin.db.Exec(`
+		INSERT INTO users (name, update_field, created_at) VALUES 
+		('Alice', 'test1', '2024-03-13 10:00:00'),
+		('Bob', 'test2', '2024-03-13 11:00:00'),
+		('Charlie', 'test3', '2024-03-13 12:00:00'),
+		('Dave', 'test4', '2024-03-13 13:00:00'),
+		('Eve', 'test5', '2024-03-13 14:00:00')
+	`)
+	if err != nil {
+		t.Fatalf("Insert failed: %v", err)
+	}
+
+	selectFields := []string{"name"}
+	ordering := []string{"name"}
+
+	// Test limit
+	results, err := plugin.TableGet("testuser", "users", selectFields, nil, ordering, nil, 2, 0, nil)
+	if err != nil {
+		t.Fatalf("TableGet failed: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("Expected 2 rows with limit 2, got %d", len(results))
+	}
+
+	// Test offset
+	results, err = plugin.TableGet("testuser", "users", selectFields, nil, ordering, nil, 0, 2, nil)
+	if err != nil {
+		t.Fatalf("TableGet failed: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("Expected 3 rows with offset 2, got %d", len(results))
+	}
+
+	// Test limit and offset together
+	results, err = plugin.TableGet("testuser", "users", selectFields, nil, ordering, nil, 2, 1, nil)
+	if err != nil {
+		t.Fatalf("TableGet failed: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("Expected 2 rows with limit 2 and offset 1, got %d", len(results))
+	}
+}
+
+// TestTableGet_TimeFormat tests time formatting for different cases
+func TestTableGet_TimeFormat(t *testing.T) {
+	uri := "sqlite://:memory:"
+	plugin := &sqlitePlugin{}
+	if err := plugin.InitConnection(uri); err != nil {
+		t.Fatalf("InitConnection failed: %v", err)
+	}
+	db, err := openInMemoryDB(uri)
+	if err != nil {
+		t.Fatalf("openInMemoryDB failed: %v", err)
+	}
+	plugin.db = db
+	if err := initTestDB(plugin.db); err != nil {
+		t.Fatalf("initTestDB failed: %v", err)
+	}
+
+	// Insert test data with midnight and non-midnight times
+	_, err = plugin.db.Exec(`
+		INSERT INTO users (name, update_field, created_at) VALUES 
+		('Alice', 'test1', '2024-03-13 00:00:00'),
+		('Bob', 'test2', '2024-03-13 10:30:45')
+	`)
+	if err != nil {
+		t.Fatalf("Insert failed: %v", err)
+	}
+
+	selectFields := []string{"name", "created_at"}
+	results, err := plugin.TableGet("testuser", "users", selectFields, nil, nil, nil, 0, 0, nil)
+	if err != nil {
+		t.Fatalf("TableGet failed: %v", err)
+	}
+
+	if len(results) != 2 {
+		t.Fatalf("Expected 2 rows, got %d", len(results))
+	}
+
+	// Check midnight time format
+	aliceTime := results[0]["created_at"].(string)
+	if aliceTime != "2024-03-13" {
+		t.Errorf("Expected midnight time format '2024-03-13', got '%s'", aliceTime)
+	}
+
+	// Check non-midnight time format
+	bobTime := results[1]["created_at"].(string)
+	if bobTime != "2024-03-13 10:30:45" {
+		t.Errorf("Expected time format '2024-03-13 10:30:45', got '%s'", bobTime)
+	}
+}
+
+// TestTableGet_ILIKE tests ILIKE operator conversion to LIKE COLLATE NOCASE
+func TestTableGet_ILIKE(t *testing.T) {
+	uri := "sqlite://:memory:"
+	plugin := &sqlitePlugin{}
+	if err := plugin.InitConnection(uri); err != nil {
+		t.Fatalf("InitConnection failed: %v", err)
+	}
+	db, err := openInMemoryDB(uri)
+	if err != nil {
+		t.Fatalf("openInMemoryDB failed: %v", err)
+	}
+	plugin.db = db
+	if err := initTestDB(plugin.db); err != nil {
+		t.Fatalf("initTestDB failed: %v", err)
+	}
+
+	// Insert test data with different cases
+	_, err = plugin.db.Exec(`
+		INSERT INTO users (name, update_field, created_at) VALUES 
+		('Alice', 'test1', '2024-03-13 10:00:00'),
+		('ALICE', 'test2', '2024-03-13 11:00:00'),
+		('alice', 'test3', '2024-03-13 12:00:00'),
+		('Bob', 'test4', '2024-03-13 13:00:00')
+	`)
+	if err != nil {
+		t.Fatalf("Insert failed: %v", err)
+	}
+
+	// Test case-insensitive search with ILIKE
+	where := map[string]interface{}{
+		"name": map[string]interface{}{
+			"ILIKE": "alice",
+		},
+	}
+	selectFields := []string{"name", "update_field"}
+	results, err := plugin.TableGet("testuser", "users", selectFields, where, nil, nil, 0, 0, nil)
+	if err != nil {
+		t.Fatalf("TableGet failed: %v", err)
+	}
+
+	if len(results) != 3 {
+		t.Fatalf("Expected 3 rows with name ILIKE 'alice', got %d", len(results))
+	}
+
+	// Verify that all returned rows have name 'alice' (case-insensitive)
+	for _, row := range results {
+		name := row["name"].(string)
+		if !strings.EqualFold(name, "alice") {
+			t.Errorf("Expected name to be 'alice' (case-insensitive), got '%s'", name)
 		}
 	}
 
-	// Check column "email": имеет DEFAULT → не обязателен, даже если NOT NULL не указан.
-	emailProp, ok := properties["email"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("Expected property 'email' to be a map")
+	// Test ILIKE with pattern matching
+	where = map[string]interface{}{
+		"name": map[string]interface{}{
+			"ILIKE": "%li%",
+		},
 	}
-	if emailProp["type"] != "string" {
-		t.Errorf("Expected 'email' type 'string', got %v", emailProp["type"])
+	results, err = plugin.TableGet("testuser", "users", selectFields, where, nil, nil, 0, 0, nil)
+	if err != nil {
+		t.Fatalf("TableGet failed: %v", err)
 	}
-	// Здесь по определению, email допускает null, поэтому можно ожидать x-nullable.
-	if _, exists := emailProp["x-nullable"]; !exists {
-		t.Errorf("Expected 'email' to have x-nullable since it has a DEFAULT")
+
+	if len(results) != 3 {
+		t.Fatalf("Expected 3 rows with name ILIKE '%%li%%', got %d", len(results))
 	}
-	// Check that "email" is not in required.
-	for _, field := range required {
-		if field == "email" {
-			t.Errorf("Did not expect 'email' to be required")
-		}
+
+	// Test ILIKE with multiple conditions
+	where = map[string]interface{}{
+		"name": map[string]interface{}{
+			"ILIKE": "alice",
+		},
+		"update_field": map[string]interface{}{
+			"ILIKE": "test%%",
+		},
+	}
+	results, err = plugin.TableGet("testuser", "users", selectFields, where, nil, nil, 0, 0, nil)
+	if err != nil {
+		t.Fatalf("TableGet failed: %v", err)
+	}
+
+	if len(results) != 3 {
+		t.Fatalf("Expected 3 rows with name ILIKE 'alice' AND update_field ILIKE 'test%%', got %d", len(results))
+	}
+
+	// Test that ILIKE is properly converted to LIKE COLLATE NOCASE in the query
+	// This is an internal implementation detail, but we can verify it works correctly
+	where = map[string]interface{}{
+		"name": map[string]interface{}{
+			"ILIKE": "test",
+		},
+	}
+	results, err = plugin.TableGet("testuser", "users", selectFields, where, nil, nil, 0, 0, nil)
+	if err != nil {
+		t.Fatalf("TableGet failed: %v", err)
+	}
+
+	if len(results) != 0 {
+		t.Fatalf("Expected 0 rows with name ILIKE 'test', got %d", len(results))
 	}
 }

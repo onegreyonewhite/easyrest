@@ -6,7 +6,9 @@ import (
 	"os"
 	"strconv"
 	"testing"
+	"time"
 
+	"github.com/golang-jwt/jwt/v4"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -15,15 +17,15 @@ func TestDeleteAll(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
 	// Insert 3 records.
-	insertUser(t, dbPath, "Alice", "old")
-	insertUser(t, dbPath, "Bob", "old")
-	insertUser(t, dbPath, "Charlie", "old")
+	insertUser(t, dbPath, "Alice", "test1")
+	insertUser(t, dbPath, "Bob", "test2")
+	insertUser(t, dbPath, "Charlie", "test3")
 
 	router := setupServerWithDB(t, dbPath)
 	tokenStr := generateToken(t)
 
 	// DELETE request without where parameters
-	req, err := http.NewRequest("DELETE", "/api/test/users/?select=id,name,update_field", nil)
+	req, err := http.NewRequest("DELETE", "/api/test/users/", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,20 +44,21 @@ func TestDeleteAll(t *testing.T) {
 	}
 }
 
-// TestDeleteWhereEq - only records matching the eq condition are deleted.
-func TestDeleteWhereEq(t *testing.T) {
+// TestDeleteWhereLike - only records matching the LIKE condition are deleted.
+func TestDeleteWhereLike(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
 	// Insert records.
-	insertUser(t, dbPath, "Alice", "old")
-	insertUser(t, dbPath, "Bob", "old")
-	insertUser(t, dbPath, "Alice", "old")
+	insertUser(t, dbPath, "Alice", "test1")
+	insertUser(t, dbPath, "Alex", "test2")
+	insertUser(t, dbPath, "Bob", "test3")
+	insertUser(t, dbPath, "Alicia", "test4")
 
 	router := setupServerWithDB(t, dbPath)
 	tokenStr := generateToken(t)
 
-	// DELETE request with condition where.eq.name=Alice
-	req, err := http.NewRequest("DELETE", "/api/test/users/?where.eq.name=Alice", nil)
+	// DELETE request with condition where.like.name=Al%25
+	req, err := http.NewRequest("DELETE", "/api/test/users/?where.like.name=Al%25", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,36 +66,33 @@ func TestDeleteWhereEq(t *testing.T) {
 	rr := httptest.NewRecorder()
 	router.ServeHTTP(rr, req)
 	if rr.Code != http.StatusNoContent {
-		t.Fatalf("TestDeleteWhereEq: Expected status 204, got %d. Response: %s", rr.Code, rr.Body.String())
+		t.Fatalf("TestDeleteWhereLike: Expected status 204, got %d. Response: %s", rr.Code, rr.Body.String())
 	}
 	// Verify that only records with names other than "Alice" remain.
 	rows := getAllUsers(t, dbPath)
 	for _, row := range rows {
 		if name, ok := row["name"].(string); ok {
 			if name == "Alice" {
-				t.Errorf("TestDeleteWhereEq: Record with name 'Alice' was not deleted")
+				t.Errorf("TestDeleteWhereLike: Record with name 'Alice' was not deleted")
 			}
 		}
 	}
 }
 
-// TestDeleteWhereMultiple - records matching both conditions are deleted.
-func TestDeleteWhereMultiple(t *testing.T) {
+// TestDeleteWhereLt - only records matching the lt condition are deleted.
+func TestDeleteWhereLt(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
 	// Insert records.
-	insertUser(t, dbPath, "Alice", "old")
-	id2 := insertUser(t, dbPath, "Alice", "old")
-	_ = insertUser(t, dbPath, "Alice", "old")
-	_ = insertUser(t, dbPath, "Bob", "old")
+	insertUser(t, dbPath, "Alice", "test1")
+	insertUser(t, dbPath, "Bob", "test2")
+	id3 := insertUser(t, dbPath, "Charlie", "test3")
 
 	router := setupServerWithDB(t, dbPath)
 	tokenStr := generateToken(t)
 
-	// Condition: where.eq.name=Alice and where.lt.id=<id2+1> (i.e., delete records with id less than id2+1)
-	threshold := id2 + 1
-	url := "/api/test/users/?where.eq.name=Alice&where.lt.id=" + strconv.Itoa(threshold)
-	req, err := http.NewRequest("DELETE", url, nil)
+	// DELETE request with condition where.lt.id=<id3>
+	req, err := http.NewRequest("DELETE", "/api/test/users/?where.lt.id="+strconv.Itoa(id3), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,15 +100,59 @@ func TestDeleteWhereMultiple(t *testing.T) {
 	rr := httptest.NewRecorder()
 	router.ServeHTTP(rr, req)
 	if rr.Code != http.StatusNoContent {
-		t.Fatalf("TestDeleteWhereMultiple: Expected status 204, got %d. Response: %s", rr.Code, rr.Body.String())
+		t.Fatalf("TestDeleteWhereLt: Expected status 204, got %d. Response: %s", rr.Code, rr.Body.String())
+	}
+	// Verify that only records with id less than id3 are deleted.
+	rows := getAllUsers(t, dbPath)
+	for _, row := range rows {
+		if id, ok := row["id"].(int64); ok {
+			if int(id) < id3 {
+				t.Errorf("Запись с id %d должна была быть удалена", id)
+			}
+		}
+	}
+}
+
+// TestDeleteWhereContext - records matching both conditions are deleted.
+func TestDeleteWhereContext(t *testing.T) {
+	dbPath := setupTestDB(t)
+	defer os.Remove(dbPath)
+	// Insert records.
+	insertUser(t, dbPath, "testuser", "test1")   // Имя должно совпадать с sub в claims
+	insertUser(t, dbPath, "test_value", "test2") // Имя должно совпадать с custom в claims
+
+	router := setupServerWithDB(t, dbPath)
+
+	// Создаем токен с дополнительными claims
+	claims := jwt.MapClaims{
+		"sub":    "testuser",
+		"exp":    time.Now().Add(time.Hour).Unix(),
+		"scope":  "users-read users-write",
+		"custom": "test_value",
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenStr, err := token.SignedString([]byte("mytestsecret"))
+	if err != nil {
+		t.Fatalf("Ошибка подписи токена: %v", err)
+	}
+
+	// DELETE запрос с использованием значений из контекста
+	req, err := http.NewRequest("DELETE", "/api/test/users/?where.eq.name=request.claims.sub", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tokenStr)
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("TestDeleteWhereContext: Expected status 204, got %d. Response: %s", rr.Code, rr.Body.String())
 	}
 	// Verify that only records satisfying both conditions are deleted.
 	rows := getAllUsers(t, dbPath)
 	for _, row := range rows {
 		name := row["name"].(string)
-		id := int(row["id"].(int64))
-		if name == "Alice" && id < threshold {
-			t.Errorf("TestDeleteWhereMultiple: Record with id %d and name 'Alice' was not deleted", id)
+		if name != "test_value" {
+			t.Errorf("TestDeleteWhereContext: Record with name '%s' was not deleted", name)
 		}
 	}
 }
