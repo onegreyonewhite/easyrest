@@ -203,34 +203,41 @@ func (s *sqlitePlugin) CallFunction(userID, funcName string, data map[string]int
 	return nil, http.ErrNotSupported
 }
 
-// GetSchema returns a schema object with two keys:
+// GetSchema returns a schema object with three keys:
 // "tables" is a map from table names to JSON schema (Swagger 2.0 compatible),
+// "views" is a map from view names to JSON schema,
 // "rpc" is nil since SQLite does not support stored procedures.
 func (s *sqlitePlugin) GetSchema(ctx map[string]interface{}) (interface{}, error) {
 	tables := make(map[string]interface{})
-	// Get list of tables excluding internal ones.
-	rows, err := s.db.Query("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+	views := make(map[string]interface{})
+	// Query for both tables and views, excluding internal objects.
+	rows, err := s.db.Query("SELECT name, type FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%'")
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var tableNames []string
+	var name, typ string
+	var items = make(map[string]string)
 	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
+		if err := rows.Scan(&name, &typ); err != nil {
 			return nil, err
 		}
-		tableNames = append(tableNames, name)
+		items[name] = typ
 	}
-	for _, tableName := range tableNames {
-		schema, err := s.getJSONSchemaForTable(tableName)
+	for name, typ := range items {
+		schema, err := s.getJSONSchemaForTable(name)
 		if err != nil {
 			return nil, err
 		}
-		tables[tableName] = schema
+		if typ == "table" {
+			tables[name] = schema
+		} else if typ == "view" {
+			views[name] = schema
+		}
 	}
 	result := map[string]interface{}{
 		"tables": tables,
+		"views":  views,
 		"rpc":    nil,
 	}
 	return result, nil

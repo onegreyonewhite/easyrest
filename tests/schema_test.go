@@ -32,7 +32,7 @@ func (f *fakeDBPluginWithRPC) CallFunction(userID, funcName string, data map[str
 	return nil, nil
 }
 func (f *fakeDBPluginWithRPC) GetSchema(ctx map[string]interface{}) (interface{}, error) {
-	// Return a fake schema with both tables and rpc.
+	// Return a fake schema with separate tables and views, plus an RPC.
 	return map[string]interface{}{
 		"tables": map[string]interface{}{
 			"myTable": map[string]interface{}{
@@ -47,6 +47,20 @@ func (f *fakeDBPluginWithRPC) GetSchema(ctx map[string]interface{}) (interface{}
 					},
 				},
 				"required": []interface{}{"name"},
+			},
+		},
+		"views": map[string]interface{}{
+			"myView": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"code": map[string]interface{}{
+						"type": "string",
+					},
+					"description": map[string]interface{}{
+						"type": "string",
+					},
+				},
+				"required": []interface{}{"code"},
 			},
 		},
 		"rpc": map[string]interface{}{
@@ -158,7 +172,7 @@ func TestSwaggerSchema(t *testing.T) {
 	if !ok {
 		t.Fatalf("securityDefinitions is not a map")
 	}
-	oauth2, ok := secDefs["oauth2"].(map[string]interface{})
+	oauth2, ok := secDefs["jwtToken"].(map[string]interface{})
 	if !ok {
 		t.Fatalf("securityDefinitions missing 'oauth2'")
 	}
@@ -233,7 +247,7 @@ func TestSwaggerSchema(t *testing.T) {
 }
 
 func TestSwaggerSchemaWithRPC(t *testing.T) {
-	// Unset ER_DB_TEST to prevent LoadDBPlugins from overriding our fake plugin.
+	// Unset ER_DB_TEST to avoid LoadDBPlugins overriding our fake plugin.
 	os.Unsetenv("ER_DB_TEST")
 	// Set the fake plugin for database "test".
 	server.DbPlugins["mock"] = &fakeDBPluginWithRPC{}
@@ -254,7 +268,7 @@ func TestSwaggerSchemaWithRPC(t *testing.T) {
 		t.Fatalf("Failed to unmarshal swagger spec: %v", err)
 	}
 
-	// Check that definitions contain the "myTable" model.
+	// Check that definitions contain both "myTable" and "myView".
 	definitions, ok := swaggerSpec["definitions"].(map[string]interface{})
 	if !ok {
 		t.Fatalf("definitions is not a map")
@@ -262,13 +276,19 @@ func TestSwaggerSchemaWithRPC(t *testing.T) {
 	if _, ok := definitions["myTable"]; !ok {
 		t.Errorf("Expected definitions to contain 'myTable'")
 	}
-	// Check that paths contain both "/myTable/" and "/rpc/myFunc/".
+	if _, ok := definitions["myView"]; !ok {
+		t.Errorf("Expected definitions to contain 'myView'")
+	}
+	// Check that paths contain both "/myTable/", "/myView/" and "/rpc/myFunc/".
 	paths, ok := swaggerSpec["paths"].(map[string]interface{})
 	if !ok {
 		t.Fatalf("paths is not a map")
 	}
 	if _, ok := paths["/myTable/"]; !ok {
 		t.Errorf("Expected paths to contain '/myTable/'")
+	}
+	if _, ok := paths["/myView/"]; !ok {
+		t.Errorf("Expected paths to contain '/myView/'")
 	}
 	if _, ok := paths["/rpc/myFunc/"]; !ok {
 		t.Errorf("Expected paths to contain '/rpc/myFunc/'")

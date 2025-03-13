@@ -233,11 +233,23 @@ func ParseWhereClause(values map[string][]string, flatCtx map[string]string, plu
 			}
 			opCode := strings.ToLower(parts[1])
 			field := parts[2]
+
 			if _, ok := AllowedOps[opCode]; !ok {
 				return nil, fmt.Errorf("Unknown operator: %s", opCode)
 			}
 			op := AllowedOps[opCode]
-			substituted := substitutePluginContext(vals[0], flatCtx, pluginCtx)
+
+			substituted := ""
+			if op == "IN" {
+				val_arr := strings.Split(vals[0], ",")
+				for idx, v := range val_arr {
+					val_arr[idx] = substitutePluginContext(v, flatCtx, pluginCtx)
+				}
+				substituted = strings.Join(val_arr, ",")
+			} else {
+				substituted = substitutePluginContext(vals[0], flatCtx, pluginCtx)
+			}
+
 			if existing, found := result[field]; found {
 				m, ok := existing.(map[string]interface{})
 				if !ok {
@@ -340,7 +352,7 @@ func updateSwaggerSpecWithRPC(swaggerSpec map[string]interface{}, rpcDefinitions
 				},
 			},
 			"security": []map[string]interface{}{
-				{"oauth2": []string{}},
+				{"jwtToken": []string{}},
 			},
 		}
 		paths[path] = map[string]interface{}{
@@ -351,49 +363,117 @@ func updateSwaggerSpecWithRPC(swaggerSpec map[string]interface{}, rpcDefinitions
 
 // buildSwaggerSpec constructs a Swagger 2.0 specification based on table definitions and RPC definitions.
 // dbKey is the current database key.
-func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs map[string]interface{}, rpcDefs map[string]interface{}) map[string]interface{} {
+func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs, viewDefs, rpcDefs map[string]interface{}) map[string]interface{} {
 	cfg := getConfig()
+
+	// Merge tables and views into one definitions map.
+	mergedDefs := make(map[string]interface{})
+	for k, v := range tableDefs {
+		mergedDefs[k] = v
+	}
+	for k, v := range viewDefs {
+		mergedDefs[k] = v
+	}
+
+	jwtTokenSecurity := make(map[string]interface{})
+	if cfg.TokenURL != "" {
+		jwtTokenSecurity = map[string]interface{}{
+			"type":     "oauth2",
+			"flow":     cfg.AuthFlow,
+			"tokenUrl": cfg.TokenURL,
+			"scopes":   map[string]interface{}{},
+		}
+	} else {
+		jwtTokenSecurity = map[string]interface{}{
+			"type":        "apiKey",
+			"name":        "Authorization",
+			"in":          "header",
+			"description": "Enter token in format 'Bearer {token}'",
+		}
+	}
+
 	swaggerDef := map[string]interface{}{
 		"swagger": "2.0",
 		"info": map[string]interface{}{
 			"title":   "EasyRest API",
-			"version": "v0.1.1",
+			"version": easyrest.Version,
 		},
 		"host":        r.Host,
 		"basePath":    "/api/" + dbKey,
 		"schemes":     []string{"http"},
 		"consumes":    []string{"application/json"},
 		"produces":    []string{"application/json"},
-		"definitions": tableDefs,
+		"definitions": mergedDefs,
 		"securityDefinitions": map[string]interface{}{
-			"oauth2": map[string]interface{}{
-				"type":     "oauth2",
-				"flow":     "password",
-				"tokenUrl": cfg.TokenURL,
-				"scopes":   map[string]interface{}{},
-			},
+			"jwtToken": jwtTokenSecurity,
 		},
 		"paths": map[string]interface{}{},
 	}
 	paths := swaggerDef["paths"].(map[string]interface{})
 
-	// For each table in tableDefs, build endpoints.
-	for tableName, modelSchemaRaw := range tableDefs {
+	for tableName, modelSchemaRaw := range mergedDefs {
 		modelSchema, ok := modelSchemaRaw.(map[string]interface{})
 		if !ok {
 			continue
 		}
-		// Get list of field names from the model schema.
-		properties, ok := modelSchema["properties"].(map[string]interface{})
-		var fieldNames []string
-		if ok {
-			for fieldName := range properties {
-				fieldNames = append(fieldNames, fieldName)
-			}
-		}
+		properties, _ := modelSchema["properties"].(map[string]interface{})
+		pathObject := make(map[string]interface{})
+		pathObject["get"] = buildGETEndpoint(tableName, properties)
 
-		// Common query parameters for GET.
-		getParams := []map[string]interface{}{
+		if _, ok := tableDefs[tableName]; ok {
+			// Build additional endpoints (POST, PATCH, DELETE)
+			// only for tables.
+			pathObject["post"] = buildPOSTEndpoint(tableName)
+			pathObject["patch"] = buildPATCHEndpoint(tableName, properties)
+			pathObject["delete"] = buildDELETEEndpoint(tableName, properties)
+		}
+		paths["/"+tableName+"/"] = pathObject
+	}
+
+	// If RPC definitions exist, add them to the swaggerSpec.
+	if rpcDefs != nil {
+		updateSwaggerSpecWithRPC(swaggerDef, rpcDefs)
+	}
+
+	return swaggerDef
+}
+
+// buildGETEndpoint constructs a GET operation map with query parameters for the given name and property set.
+func buildGETEndpoint(name string, properties map[string]interface{}) map[string]interface{} {
+	var fieldNames []string
+
+	for fieldName := range properties {
+		fieldNames = append(fieldNames, fieldName)
+	}
+
+	getParams := buildSchemaParams(fieldNames, properties, true)
+	return map[string]interface{}{
+		"summary":     fmt.Sprintf("Get %s", name),
+		"description": fmt.Sprintf("Retrieve rows from the %s", name),
+		"parameters":  getParams,
+		"responses": map[string]interface{}{
+			"200": map[string]interface{}{
+				"description": "Successful response",
+				"schema": map[string]interface{}{
+					"type":  "array",
+					"items": map[string]interface{}{"$ref": "#/definitions/" + name},
+				},
+			},
+		},
+		"security": []map[string]interface{}{
+			{"jwtToken": []string{}},
+		},
+	}
+}
+
+// buildGETParams creates the common query parameters (select, ordering, limit, offset)
+// plus where-filters based on the field types.
+func buildSchemaParams(fieldNames []string, properties map[string]interface{}, isGet bool) []map[string]interface{} {
+	var params []map[string]interface{}
+
+	if isGet {
+		// Basic query parameters: select, ordering, limit, offset.
+		params = append(params, []map[string]interface{}{
 			{
 				"name":             "select",
 				"in":               "query",
@@ -425,128 +505,130 @@ func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs map[string]interf
 				"type":        "integer",
 				"required":    false,
 			},
-		}
-		// For each field and for each allowed operator, add a query parameter.
-		for _, fieldName := range fieldNames {
-			prop, ok := properties[fieldName].(map[string]interface{})
-			var paramType string = "string"
-			if ok {
-				if t, exists := prop["type"].(string); exists {
-					paramType = t
-				}
-			}
-			for op := range AllowedOps {
-				// For string fields, skip lt, lte, gt, gte.
-				if paramType == "string" {
-					if op == "lt" || op == "lte" || op == "gt" || op == "gte" {
-						continue
-					}
-				}
-				// For numeric fields, skip like and ilike.
-				if paramType == "integer" || paramType == "number" {
-					if op == "like" || op == "ilike" {
-						continue
-					}
-				}
-				param := map[string]interface{}{
-					"name":        fmt.Sprintf("where.%s.%s", op, fieldName),
-					"in":          "query",
-					"description": fmt.Sprintf("Filter for field '%s' with operator %s", fieldName, op),
-					"type":        paramType,
-					"required":    false,
-				}
-				getParams = append(getParams, param)
-			}
-		}
+		}...)
+	}
 
-		path := "/" + tableName + "/"
-		paths[path] = map[string]interface{}{
-			"get": map[string]interface{}{
-				"summary":     fmt.Sprintf("Get %s", tableName),
-				"description": fmt.Sprintf("Retrieve rows from the %s table", tableName),
-				"parameters":  getParams,
-				"responses": map[string]interface{}{
-					"200": map[string]interface{}{
-						"description": "Successful response",
-						"schema": map[string]interface{}{
-							"type":  "array",
-							"items": map[string]interface{}{"$ref": "#/definitions/" + tableName},
-						},
-					},
-				},
-				"security": []map[string]interface{}{
-					{"oauth2": []string{}},
-				},
-			},
-			"post": map[string]interface{}{
-				"summary":     fmt.Sprintf("Create rows in %s", tableName),
-				"description": fmt.Sprintf("Insert new rows into the %s table", tableName),
-				"parameters": []map[string]interface{}{
-					{
-						"name":        "body",
-						"in":          "body",
-						"description": fmt.Sprintf("Array of %s objects", tableName),
-						"required":    true,
-						"schema": map[string]interface{}{
-							"type":  "array",
-							"items": map[string]interface{}{"$ref": "#/definitions/" + tableName},
-						},
-					},
-				},
-				"responses": map[string]interface{}{
-					"201": map[string]interface{}{
-						"description": "Rows created",
-					},
-				},
-				"security": []map[string]interface{}{
-					{"oauth2": []string{}},
-				},
-			},
-			"patch": map[string]interface{}{
-				"summary":     fmt.Sprintf("Update rows in %s", tableName),
-				"description": fmt.Sprintf("Update existing rows in the %s table", tableName),
-				"parameters": append(getParams, map[string]interface{}{
-					"name":        "body",
-					"in":          "body",
-					"description": fmt.Sprintf("Partial update of a %s object", tableName),
-					"required":    true,
-					"schema":      map[string]interface{}{"$ref": "#/definitions/" + tableName},
-				}),
-				"responses": map[string]interface{}{
-					"200": map[string]interface{}{
-						"description": "Rows updated",
-						"schema": map[string]interface{}{
-							"type": "object",
-							"properties": map[string]interface{}{
-								"updated": map[string]interface{}{"type": "integer"},
-							},
-						},
-					},
-				},
-				"security": []map[string]interface{}{
-					{"oauth2": []string{}},
-				},
-			},
-			"delete": map[string]interface{}{
-				"summary":     fmt.Sprintf("Delete rows from %s", tableName),
-				"description": fmt.Sprintf("Delete rows from the %s table", tableName),
-				"parameters":  getParams,
-				"responses": map[string]interface{}{
-					"204": map[string]interface{}{
-						"description": "Rows deleted",
-					},
-				},
-				"security": []map[string]interface{}{
-					{"oauth2": []string{}},
-				},
-			},
+	// Build where filters for each field and operator.
+	for _, fieldName := range fieldNames {
+		prop, _ := properties[fieldName].(map[string]interface{})
+		paramType := "string"
+		if propType, exists := prop["type"].(string); exists {
+			paramType = propType
+		}
+		for op := range AllowedOps {
+			// For string fields, skip lt, lte, gt, gte.
+			if paramType == "string" {
+				if op == "lt" || op == "lte" || op == "gt" || op == "gte" {
+					continue
+				}
+			}
+			// For numeric fields, skip like and ilike.
+			if paramType == "integer" || paramType == "number" {
+				if op == "like" || op == "ilike" {
+					continue
+				}
+			}
+			param := make(map[string]interface{})
+			param["name"] = fmt.Sprintf("where.%s.%s", op, fieldName)
+			param["description"] = fmt.Sprintf("Filter for field '%s' with operator %s", fieldName, op)
+			param["in"] = "query"
+			param["type"] = paramType
+			param["required"] = false
+			if op == "in" {
+				param["collectionFormat"] = "csv"
+			}
+			params = append(params, param)
 		}
 	}
-	// Add RPC paths once if rpcDefs is not nil.
-	if rpcDefs != nil {
-		updateSwaggerSpecWithRPC(swaggerDef, rpcDefs)
+
+	return params
+}
+
+// buildPOSTEndpoint returns a POST operation map for the given table name.
+func buildPOSTEndpoint(name string) map[string]interface{} {
+	return map[string]interface{}{
+		"summary":     fmt.Sprintf("Create rows in %s", name),
+		"description": fmt.Sprintf("Insert new rows into %s", name),
+		"parameters": []map[string]interface{}{
+			{
+				"name":        "body",
+				"in":          "body",
+				"description": fmt.Sprintf("Array of %s objects", name),
+				"required":    true,
+				"schema": map[string]interface{}{
+					"type":  "array",
+					"items": map[string]interface{}{"$ref": "#/definitions/" + name},
+				},
+			},
+		},
+		"responses": map[string]interface{}{
+			"201": map[string]interface{}{
+				"description": "Rows created",
+			},
+		},
+		"security": []map[string]interface{}{
+			{"jwtToken": []string{}},
+		},
 	}
-	return swaggerDef
+}
+
+// buildPATCHEndpoint returns a PATCH operation map for the given table name.
+func buildPATCHEndpoint(name string, properties map[string]interface{}) map[string]interface{} {
+	var fieldNames []string
+
+	for fieldName := range properties {
+		fieldNames = append(fieldNames, fieldName)
+	}
+	getParams := buildSchemaParams(fieldNames, properties, false)
+	return map[string]interface{}{
+		"summary":     fmt.Sprintf("Update rows in %s", name),
+		"description": fmt.Sprintf("Update existing rows in %s", name),
+		"parameters": append(getParams, map[string]interface{}{
+			"name":        "body",
+			"in":          "body",
+			"description": fmt.Sprintf("Partial update of a %s object", name),
+			"required":    true,
+			"schema":      map[string]interface{}{"$ref": "#/definitions/" + name},
+		}),
+		"responses": map[string]interface{}{
+			"200": map[string]interface{}{
+				"description": "Rows updated",
+				"schema": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"updated": map[string]interface{}{"type": "integer"},
+					},
+				},
+			},
+		},
+		"security": []map[string]interface{}{
+			{"jwtToken": []string{}},
+		},
+	}
+}
+
+// buildDELETEEndpoint returns a DELETE operation map for the given table name.
+func buildDELETEEndpoint(name string, properties map[string]interface{}) map[string]interface{} {
+	var fieldNames []string
+
+	for fieldName := range properties {
+		fieldNames = append(fieldNames, fieldName)
+	}
+	getParams := buildSchemaParams(fieldNames, properties, false)
+
+	return map[string]interface{}{
+		"summary":     fmt.Sprintf("Delete rows from %s", name),
+		"description": fmt.Sprintf("Delete rows from %s", name),
+		"parameters":  getParams,
+		"responses": map[string]interface{}{
+			"204": map[string]interface{}{
+				"description": "Rows deleted",
+			},
+		},
+		"security": []map[string]interface{}{
+			{"jwtToken": []string{}},
+		},
+	}
 }
 
 // schemaHandler now builds and returns a full swagger 2.0 spec.
@@ -558,29 +640,42 @@ func schemaHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "DB plugin not found", http.StatusNotFound)
 		return
 	}
-	pluginCtx := BuildPluginContext(r)
-	schemaRaw, err := dbPlug.GetSchema(pluginCtx)
-	if err != nil {
-		http.Error(w, "GetSchema not implemented", http.StatusNotImplemented)
-		return
-	}
-	schemaMap, ok := schemaRaw.(map[string]interface{})
+
+	swaggerSpec, ok := schemaCache[dbKey]
 	if !ok {
-		http.Error(w, "Invalid schema format", http.StatusInternalServerError)
-		return
-	}
-	tableDefs, ok := schemaMap["tables"].(map[string]interface{})
-	if !ok {
-		http.Error(w, "Invalid tables schema", http.StatusInternalServerError)
-		return
-	}
-	var rpcDefs map[string]interface{}
-	if raw, exists := schemaMap["rpc"]; exists && raw != nil {
-		if m, ok := raw.(map[string]interface{}); ok {
-			rpcDefs = m
+		pluginCtx := BuildPluginContext(r)
+		schemaRaw, err := dbPlug.GetSchema(pluginCtx)
+		if err != nil {
+			http.Error(w, "GetSchema not implemented", http.StatusNotImplemented)
+			return
 		}
+		schemaMap, ok := schemaRaw.(map[string]interface{})
+		if !ok {
+			http.Error(w, "Invalid schema format", http.StatusInternalServerError)
+			return
+		}
+		tableDefs, ok := schemaMap["tables"].(map[string]interface{})
+		if !ok {
+			http.Error(w, "Invalid tables schema", http.StatusInternalServerError)
+			return
+		}
+		var viewDefs map[string]interface{}
+		if raw, exists := schemaMap["views"]; exists && raw != nil {
+			if m, ok := raw.(map[string]interface{}); ok {
+				viewDefs = m
+			}
+		}
+		var rpcDefs map[string]interface{}
+		if raw, exists := schemaMap["rpc"]; exists && raw != nil {
+			if m, ok := raw.(map[string]interface{}); ok {
+				rpcDefs = m
+			}
+		}
+		schemaCacheMutex.Lock()
+		swaggerSpec = buildSwaggerSpec(r, dbKey, tableDefs, viewDefs, rpcDefs)
+		schemaCacheMutex.Unlock()
 	}
-	swaggerSpec := buildSwaggerSpec(r, dbKey, tableDefs, rpcDefs)
+
 	respondJSON(w, http.StatusOK, swaggerSpec)
 }
 

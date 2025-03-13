@@ -19,21 +19,33 @@ func BuildWhereClause(where map[string]interface{}) (string, []interface{}, erro
 		switch v := val.(type) {
 		case map[string]interface{}:
 			for op, operand := range v {
-				// If operand is a string and starts with "erctx.", inject it directly.
-				if s, ok := operand.(string); ok && strings.HasPrefix(s, "erctx.") {
-					conds = append(conds, fmt.Sprintf("%s %s %s", field, op, s))
+				if op == "IN" {
+					arr := strings.Split(operand.(string), ",")
+					for i := range arr {
+						arr[i] = strings.TrimSpace(arr[i])
+					}
+					if len(arr) == 0 {
+						conds = append(conds, fmt.Sprintf("%s IN (NULL)", field))
+					} else {
+						placeholders := make([]string, len(arr))
+						for i := range arr {
+							placeholders[i] = "?"
+						}
+						conds = append(conds, fmt.Sprintf("%s IN (%s)", field, strings.Join(placeholders, ",")))
+						inVals := make([]interface{}, len(arr))
+						for i, val := range arr {
+							inVals[i] = val
+						}
+						args = append(args, inVals...)
+					}
 				} else {
 					conds = append(conds, fmt.Sprintf("%s %s ?", field, op))
 					args = append(args, operand)
 				}
 			}
 		default:
-			if s, ok := v.(string); ok && strings.HasPrefix(s, "erctx.") {
-				conds = append(conds, fmt.Sprintf("%s = %s", field, s))
-			} else {
-				conds = append(conds, fmt.Sprintf("%s = ?", field))
-				args = append(args, v)
-			}
+			conds = append(conds, fmt.Sprintf("%s = ?", field))
+			args = append(args, v)
 		}
 	}
 	if len(conds) > 0 {
