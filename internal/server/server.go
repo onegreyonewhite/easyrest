@@ -294,6 +294,9 @@ func BuildPluginContext(r *http.Request) map[string]interface{} {
 		tokens := strings.Split(preferStr, " ")
 		for _, token := range tokens {
 			parts := strings.SplitN(token, "=", 2)
+			if len(parts) != 2 {
+				continue
+			}
 			key := strings.ToLower(parts[0])
 			val := parts[1]
 			if key == "timezone" {
@@ -895,7 +898,7 @@ func Authenticate(r *http.Request) (string, *http.Request, error) {
 		}
 		if exp, ok := claims["exp"].(float64); ok {
 			if time.Unix(int64(exp), 0).Before(time.Now()) {
-				return "", r, errors.New("token expired")
+			return "", r, errors.New("token expired")
 			}
 		}
 		r = r.WithContext(context.WithValue(r.Context(), TokenClaimsKey, claims))
@@ -922,7 +925,7 @@ func Authenticate(r *http.Request) (string, *http.Request, error) {
 	}
 	if exp, ok := claims["exp"].(float64); ok {
 		if time.Unix(int64(exp), 0).Before(time.Now()) {
-			return "", r, errors.New("token expired")
+		return "", r, errors.New("token expired")
 		}
 	}
 	r = r.WithContext(context.WithValue(r.Context(), TokenClaimsKey, claims))
