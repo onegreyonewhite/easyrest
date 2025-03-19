@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v4"
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 	"github.com/onegreyonewhite/easyrest/internal/server"
 )
 
@@ -26,7 +26,7 @@ func TestContextInQuery(t *testing.T) {
 	dbPath := tmpFile.Name()
 	tmpFile.Close()
 	defer os.Remove(dbPath)
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("Failed to open sqlite DB: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestContextInQuery(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("Expected status 200, got %d; body: %s", rr.Code, rr.Body.String())
 	}
-	var result []map[string]interface{}
+	var result []map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
 		t.Fatalf("Error parsing response: %v", err)
 	}

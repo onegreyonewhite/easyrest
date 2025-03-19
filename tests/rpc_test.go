@@ -14,34 +14,34 @@ import (
 )
 
 type mockDBPlugin struct {
-	callFunction func(userID, funcName string, data map[string]interface{}, ctx map[string]interface{}) (interface{}, error)
+	callFunction func(userID, funcName string, data map[string]any, ctx map[string]any) (any, error)
 }
 
 func (m *mockDBPlugin) InitConnection(uri string) error { return nil }
-func (m *mockDBPlugin) TableGet(userID, table string, selectFields []string, where map[string]interface{},
-	ordering []string, groupBy []string, limit, offset int, ctx map[string]interface{}) ([]map[string]interface{}, error) {
+func (m *mockDBPlugin) TableGet(userID, table string, selectFields []string, where map[string]any,
+	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, error) {
 	return nil, nil
 }
-func (m *mockDBPlugin) TableCreate(userID, table string, data []map[string]interface{}, ctx map[string]interface{}) ([]map[string]interface{}, error) {
+func (m *mockDBPlugin) TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, error) {
 	return nil, nil
 }
-func (m *mockDBPlugin) TableUpdate(userID, table string, data map[string]interface{}, where map[string]interface{}, ctx map[string]interface{}) (int, error) {
+func (m *mockDBPlugin) TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, error) {
 	return 0, nil
 }
-func (m *mockDBPlugin) TableDelete(userID, table string, where map[string]interface{}, ctx map[string]interface{}) (int, error) {
+func (m *mockDBPlugin) TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, error) {
 	return 0, nil
 }
-func (m *mockDBPlugin) CallFunction(userID, funcName string, data map[string]interface{}, ctx map[string]interface{}) (interface{}, error) {
+func (m *mockDBPlugin) CallFunction(userID, funcName string, data map[string]any, ctx map[string]any) (any, error) {
 	return m.callFunction(userID, funcName, data, ctx)
 }
-func (m *mockDBPlugin) GetSchema(ctx map[string]interface{}) (interface{}, error) {
+func (m *mockDBPlugin) GetSchema(ctx map[string]any) (any, error) {
 	return nil, nil
 }
 
 func TestRPCWithoutClaims(t *testing.T) {
 	// Create mock plugin that simply returns input data
 	mockPlugin := &mockDBPlugin{
-		callFunction: func(userID, funcName string, data map[string]interface{}, ctx map[string]interface{}) (interface{}, error) {
+		callFunction: func(userID, funcName string, data map[string]any, ctx map[string]any) (any, error) {
 			return data, nil
 		},
 	}
@@ -94,7 +94,7 @@ func TestRPCWithoutClaims(t *testing.T) {
 		t.Fatalf("Expected status 200, got %d, response: %s", rr.Code, rr.Body.String())
 	}
 
-	var response map[string]interface{}
+	var response map[string]any
 	if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
 		t.Fatalf("Failed to decode response: %v", err)
 	}

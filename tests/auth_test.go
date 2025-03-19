@@ -79,7 +79,7 @@ func TestEmptyTokenSecret(t *testing.T) {
 	// Test 2: RPC request
 	// Create mock plugin that simply returns input data
 	mockPlugin := &mockDBPlugin{
-		callFunction: func(userID, funcName string, data map[string]interface{}, ctx map[string]interface{}) (interface{}, error) {
+		callFunction: func(userID, funcName string, data map[string]any, ctx map[string]any) (any, error) {
 			return data, nil
 		},
 	}
@@ -100,7 +100,7 @@ func TestEmptyTokenSecret(t *testing.T) {
 	}
 
 	// Check response
-	var response map[string]interface{}
+	var response map[string]any
 	if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
 		t.Fatalf("Failed to decode response: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestEmptyTokenSecretWithoutToken(t *testing.T) {
 	// Test 2: RPC request without token
 	// Create mock plugin
 	mockPlugin := &mockDBPlugin{
-		callFunction: func(userID, funcName string, data map[string]interface{}, ctx map[string]interface{}) (interface{}, error) {
+		callFunction: func(userID, funcName string, data map[string]any, ctx map[string]any) (any, error) {
 			return data, nil
 		},
 	}
@@ -224,7 +224,7 @@ func TestTokenURL(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		json.NewEncoder(w).Encode(map[string]any{
 			"sub":   "testuser",
 			"exp":   time.Now().Add(time.Hour).Unix(),
 			"scope": "users-read users-write",
@@ -341,7 +341,7 @@ func TestTokenURLWithScopeCheck(t *testing.T) {
 		claims, err := server.DecodeTokenWithoutValidation(accessToken)
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			json.NewEncoder(w).Encode(map[string]any{
 				"error": err.Error(),
 			})
 			return
@@ -448,7 +448,7 @@ func TestTokenURLWithScopeCheck(t *testing.T) {
 		claims, err := server.DecodeTokenWithoutValidation(accessToken)
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			json.NewEncoder(w).Encode(map[string]any{
 				"error": err.Error(),
 			})
 			return
@@ -478,7 +478,7 @@ func TestTokenURLWithScopeCheck(t *testing.T) {
 	}
 
 	// Check RPC response
-	var response map[string]interface{}
+	var response map[string]any
 	if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
 		t.Fatalf("Failed to decode response: %v", err)
 	}

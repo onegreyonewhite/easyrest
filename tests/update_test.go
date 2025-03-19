@@ -12,13 +12,13 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v4"
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 // getAllUsers returns all rows from the 'users' table.
-func getAllUsers(t *testing.T, dbPath string) []map[string]interface{} {
+func getAllUsers(t *testing.T, dbPath string) []map[string]any {
 	t.Helper()
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("Error opening DB: %v", err)
 	}
@@ -30,23 +30,23 @@ func getAllUsers(t *testing.T, dbPath string) []map[string]interface{} {
 	}
 	defer rows.Close()
 
-	var result []map[string]interface{}
+	var result []map[string]any
 	cols, err := rows.Columns()
 	if err != nil {
 		t.Fatalf("Error getting columns: %v", err)
 	}
 	for rows.Next() {
-		columns := make([]interface{}, len(cols))
-		columnPointers := make([]interface{}, len(cols))
+		columns := make([]any, len(cols))
+		columnPointers := make([]any, len(cols))
 		for i := range columns {
 			columnPointers[i] = &columns[i]
 		}
 		if err := rows.Scan(columnPointers...); err != nil {
 			t.Fatalf("Error scanning row: %v", err)
 		}
-		row := make(map[string]interface{})
+		row := make(map[string]any)
 		for i, colName := range cols {
-			val := columnPointers[i].(*interface{})
+			val := columnPointers[i].(*any)
 			row[colName] = *val
 		}
 		result = append(result, row)

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 // initTestDB creates the "users" table in the given DB.
@@ -24,17 +24,17 @@ func initTestDB(db *sql.DB) error {
 // openInMemoryDB opens an in-memory SQLite database.
 func openInMemoryDB(uri string) (*sql.DB, error) {
 	dbPath := strings.TrimPrefix(uri, "sqlite://")
-	return sql.Open("sqlite3", dbPath)
+	return sql.Open("sqlite", dbPath)
 }
 
 // buildTestContext returns a sample context map for testing.
-func buildTestContext() map[string]interface{} {
-	return map[string]interface{}{
+func buildTestContext() map[string]any {
+	return map[string]any{
 		"timezone": "America/Los_Angeles",
-		"claims": map[string]interface{}{
+		"claims": map[string]any{
 			"sub": "Alice",
 		},
-		"headers": map[string]interface{}{
+		"headers": map[string]any{
 			"user-agent": "TestAgent",
 		},
 	}
@@ -61,8 +61,8 @@ func TestTableGet_NoContext(t *testing.T) {
 		t.Fatalf("Insert failed: %v", err)
 	}
 	selectFields := []string{"id", "name"}
-	where := map[string]interface{}{
-		"name": map[string]interface{}{"=": "Alice"},
+	where := map[string]any{
+		"name": map[string]any{"=": "Alice"},
 	}
 	results, err := plugin.TableGet("testuser", "users", selectFields, where, nil, nil, 0, 0, nil)
 	if err != nil {
@@ -99,8 +99,8 @@ func TestTableGet_WithContext(t *testing.T) {
 	}
 	selectFields := []string{"id", "name"}
 	// Instead of using a context reference, pass literal "Alice"
-	where := map[string]interface{}{
-		"name": map[string]interface{}{"=": "Alice"},
+	where := map[string]any{
+		"name": map[string]any{"=": "Alice"},
 	}
 	// Context is not used by the plugin now.
 	results, err := plugin.TableGet("testuser", "users", selectFields, where, nil, nil, 0, 0, nil)
@@ -132,7 +132,7 @@ func TestTableCreate_WithContext(t *testing.T) {
 		t.Fatalf("initTestDB failed: %v", err)
 	}
 	// Instead of passing "erctx.headers_user_agent", pass the substituted value "TestAgent".
-	data := []map[string]interface{}{
+	data := []map[string]any{
 		{
 			"name":         "Bob",
 			"update_field": "TestAgent",
@@ -147,8 +147,8 @@ func TestTableCreate_WithContext(t *testing.T) {
 	}
 	// Verify by selecting the inserted row.
 	selectFields := []string{"id", "name", "update_field"}
-	where := map[string]interface{}{
-		"name": map[string]interface{}{"=": "Bob"},
+	where := map[string]any{
+		"name": map[string]any{"=": "Bob"},
 	}
 	results, err := plugin.TableGet("testuser", "users", selectFields, where, nil, nil, 0, 0, nil)
 	if err != nil {
@@ -183,11 +183,11 @@ func TestTableUpdate_WithContext(t *testing.T) {
 		t.Fatalf("Insert failed: %v", err)
 	}
 	// Instead of passing "erctx.headers_user_agent", pass "TestAgent"
-	data := map[string]interface{}{
+	data := map[string]any{
 		"update_field": "TestAgent",
 	}
-	where := map[string]interface{}{
-		"name": map[string]interface{}{"=": "Charlie"},
+	where := map[string]any{
+		"name": map[string]any{"=": "Charlie"},
 	}
 	updated, err := plugin.TableUpdate("testuser", "users", data, where, nil)
 	if err != nil {
@@ -234,8 +234,8 @@ func TestTableDelete_WithContext(t *testing.T) {
 		t.Fatalf("Insert failed: %v", err)
 	}
 	// Instead of passing "erctx.claims.sub", pass literal "Dave"
-	where := map[string]interface{}{
-		"name": map[string]interface{}{"=": "Dave"},
+	where := map[string]any{
+		"name": map[string]any{"=": "Dave"},
 	}
 	deleted, err := plugin.TableDelete("testuser", "users", where, nil)
 	if err != nil {
@@ -254,7 +254,7 @@ func TestCallFunction_WithContext(t *testing.T) {
 		t.Fatalf("InitConnection failed: %v", err)
 	}
 	ctx := buildTestContext()
-	_, err := plugin.CallFunction("testuser", "myFunc", map[string]interface{}{"param": "value"}, ctx)
+	_, err := plugin.CallFunction("testuser", "myFunc", map[string]any{"param": "value"}, ctx)
 	if err == nil {
 		t.Fatalf("CallFunction is not supported for SQLite")
 	}
@@ -299,27 +299,27 @@ func TestGetSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSchema failed: %v", err)
 	}
-	schemaMap, ok := schemaRaw.(map[string]interface{})
+	schemaMap, ok := schemaRaw.(map[string]any)
 	if !ok {
 		t.Fatalf("Expected schema to be a map, got %T", schemaRaw)
 	}
 
 	// Check tables
-	tables, ok := schemaMap["tables"].(map[string]interface{})
+	tables, ok := schemaMap["tables"].(map[string]any)
 	if !ok {
 		t.Fatalf("Expected 'tables' to be a map, got %T", schemaMap["tables"])
 	}
-	testTable, ok := tables["test"].(map[string]interface{})
+	testTable, ok := tables["test"].(map[string]any)
 	if !ok {
 		t.Fatalf("Expected table 'test' in schema")
 	}
-	properties, ok := testTable["properties"].(map[string]interface{})
+	properties, ok := testTable["properties"].(map[string]any)
 	if !ok {
 		t.Fatalf("Expected properties to be a map")
 	}
 
 	// Check BLOB type
-	imageProp, ok := properties["image"].(map[string]interface{})
+	imageProp, ok := properties["image"].(map[string]any)
 	if !ok {
 		t.Fatalf("Expected property 'image' to be a map")
 	}
@@ -331,7 +331,7 @@ func TestGetSchema(t *testing.T) {
 	}
 
 	// Check REAL type
-	priceProp, ok := properties["price"].(map[string]interface{})
+	priceProp, ok := properties["price"].(map[string]any)
 	if !ok {
 		t.Fatalf("Expected property 'price' to be a map")
 	}
@@ -340,15 +340,15 @@ func TestGetSchema(t *testing.T) {
 	}
 
 	// Check view
-	views, ok := schemaMap["views"].(map[string]interface{})
+	views, ok := schemaMap["views"].(map[string]any)
 	if !ok {
 		t.Fatalf("Expected 'views' to be a map, got %T", schemaMap["views"])
 	}
-	testView, ok := views["test_view"].(map[string]interface{})
+	testView, ok := views["test_view"].(map[string]any)
 	if !ok {
 		t.Fatalf("Expected view 'test_view' in schema")
 	}
-	viewProperties, ok := testView["properties"].(map[string]interface{})
+	viewProperties, ok := testView["properties"].(map[string]any)
 	if !ok {
 		t.Fatalf("Expected properties in view schema")
 	}
@@ -367,22 +367,22 @@ func TestGetSchema(t *testing.T) {
 	}
 
 	// Check that view properties have correct types
-	idProp := viewProperties["id"].(map[string]interface{})
+	idProp := viewProperties["id"].(map[string]any)
 	if idProp["type"] != "integer" {
 		t.Errorf("Expected view 'id' type 'integer', got %v", idProp["type"])
 	}
 
-	nameProp := viewProperties["name"].(map[string]interface{})
+	nameProp := viewProperties["name"].(map[string]any)
 	if nameProp["type"] != "string" {
 		t.Errorf("Expected view 'name' type 'string', got %v", nameProp["type"])
 	}
 
-	ageProp := viewProperties["age"].(map[string]interface{})
+	ageProp := viewProperties["age"].(map[string]any)
 	if ageProp["type"] != "integer" {
 		t.Errorf("Expected view 'age' type 'integer', got %v", ageProp["type"])
 	}
 
-	priceProp = viewProperties["price"].(map[string]interface{})
+	priceProp = viewProperties["price"].(map[string]any)
 	if priceProp["type"] != "number" {
 		t.Errorf("Expected view 'price' type 'number', got %v", priceProp["type"])
 	}
@@ -625,8 +625,8 @@ func TestTableGet_ILIKE(t *testing.T) {
 	}
 
 	// Test case-insensitive search with ILIKE
-	where := map[string]interface{}{
-		"name": map[string]interface{}{
+	where := map[string]any{
+		"name": map[string]any{
 			"ILIKE": "alice",
 		},
 	}
@@ -649,8 +649,8 @@ func TestTableGet_ILIKE(t *testing.T) {
 	}
 
 	// Test ILIKE with pattern matching
-	where = map[string]interface{}{
-		"name": map[string]interface{}{
+	where = map[string]any{
+		"name": map[string]any{
 			"ILIKE": "%li%",
 		},
 	}
@@ -664,11 +664,11 @@ func TestTableGet_ILIKE(t *testing.T) {
 	}
 
 	// Test ILIKE with multiple conditions
-	where = map[string]interface{}{
-		"name": map[string]interface{}{
+	where = map[string]any{
+		"name": map[string]any{
 			"ILIKE": "alice",
 		},
-		"update_field": map[string]interface{}{
+		"update_field": map[string]any{
 			"ILIKE": "test%%",
 		},
 	}
@@ -683,8 +683,8 @@ func TestTableGet_ILIKE(t *testing.T) {
 
 	// Test that ILIKE is properly converted to LIKE COLLATE NOCASE in the query
 	// This is an internal implementation detail, but we can verify it works correctly
-	where = map[string]interface{}{
-		"name": map[string]interface{}{
+	where = map[string]any{
+		"name": map[string]any{
 			"ILIKE": "test",
 		},
 	}

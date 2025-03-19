@@ -15,71 +15,71 @@ import (
 type fakeDBPluginWithRPC struct{}
 
 func (f *fakeDBPluginWithRPC) InitConnection(uri string) error { return nil }
-func (f *fakeDBPluginWithRPC) TableGet(userID, table string, selectFields []string, where map[string]interface{},
-	ordering []string, groupBy []string, limit, offset int, ctx map[string]interface{}) ([]map[string]interface{}, error) {
+func (f *fakeDBPluginWithRPC) TableGet(userID, table string, selectFields []string, where map[string]any,
+	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, error) {
 	return nil, nil
 }
-func (f *fakeDBPluginWithRPC) TableCreate(userID, table string, data []map[string]interface{}, ctx map[string]interface{}) ([]map[string]interface{}, error) {
+func (f *fakeDBPluginWithRPC) TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, error) {
 	return nil, nil
 }
-func (f *fakeDBPluginWithRPC) TableUpdate(userID, table string, data map[string]interface{}, where map[string]interface{}, ctx map[string]interface{}) (int, error) {
+func (f *fakeDBPluginWithRPC) TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, error) {
 	return 0, nil
 }
-func (f *fakeDBPluginWithRPC) TableDelete(userID, table string, where map[string]interface{}, ctx map[string]interface{}) (int, error) {
+func (f *fakeDBPluginWithRPC) TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, error) {
 	return 0, nil
 }
-func (f *fakeDBPluginWithRPC) CallFunction(userID, funcName string, data map[string]interface{}, ctx map[string]interface{}) (interface{}, error) {
+func (f *fakeDBPluginWithRPC) CallFunction(userID, funcName string, data map[string]any, ctx map[string]any) (any, error) {
 	return nil, nil
 }
-func (f *fakeDBPluginWithRPC) GetSchema(ctx map[string]interface{}) (interface{}, error) {
+func (f *fakeDBPluginWithRPC) GetSchema(ctx map[string]any) (any, error) {
 	// Return a fake schema with separate tables and views, plus an RPC.
-	return map[string]interface{}{
-		"tables": map[string]interface{}{
-			"myTable": map[string]interface{}{
+	return map[string]any{
+		"tables": map[string]any{
+			"myTable": map[string]any{
 				"type": "object",
-				"properties": map[string]interface{}{
-					"id": map[string]interface{}{
+				"properties": map[string]any{
+					"id": map[string]any{
 						"type":     "integer",
 						"readOnly": true,
 					},
-					"name": map[string]interface{}{
+					"name": map[string]any{
 						"type": "string",
 					},
 				},
-				"required": []interface{}{"name"},
+				"required": []any{"name"},
 			},
 		},
-		"views": map[string]interface{}{
-			"myView": map[string]interface{}{
+		"views": map[string]any{
+			"myView": map[string]any{
 				"type": "object",
-				"properties": map[string]interface{}{
-					"code": map[string]interface{}{
+				"properties": map[string]any{
+					"code": map[string]any{
 						"type": "string",
 					},
-					"description": map[string]interface{}{
+					"description": map[string]any{
 						"type": "string",
 					},
 				},
-				"required": []interface{}{"code"},
+				"required": []any{"code"},
 			},
 		},
-		"rpc": map[string]interface{}{
-			"myFunc": []interface{}{
+		"rpc": map[string]any{
+			"myFunc": []any{
 				// Request schema
-				map[string]interface{}{
+				map[string]any{
 					"type": "object",
-					"properties": map[string]interface{}{
-						"param": map[string]interface{}{
+					"properties": map[string]any{
+						"param": map[string]any{
 							"type": "string",
 						},
 					},
-					"required": []interface{}{"param"},
+					"required": []any{"param"},
 				},
 				// Response schema
-				map[string]interface{}{
+				map[string]any{
 					"type": "object",
-					"properties": map[string]interface{}{
-						"result": map[string]interface{}{
+					"properties": map[string]any{
+						"result": map[string]any{
 							"type": "string",
 						},
 					},
@@ -93,7 +93,7 @@ func (f *fakeDBPluginWithRPC) GetSchema(ctx map[string]interface{}) (interface{}
 func setupTestDBForSchema(t *testing.T) string {
 	dbPath := setupTestDB(t)
 
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("Failed to open in-memory DB: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestSwaggerSchema(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("Expected status 200, got %d, body: %s", rr.Code, rr.Body.String())
 	}
-	var swaggerSpec map[string]interface{}
+	var swaggerSpec map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &swaggerSpec); err != nil {
 		t.Fatalf("Failed to unmarshal swagger spec: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestSwaggerSchema(t *testing.T) {
 		}
 	}
 	// Check that definitions contains the "test" model.
-	definitions, ok := swaggerSpec["definitions"].(map[string]interface{})
+	definitions, ok := swaggerSpec["definitions"].(map[string]any)
 	if !ok {
 		t.Fatalf("definitions is not a map")
 	}
@@ -160,7 +160,7 @@ func TestSwaggerSchema(t *testing.T) {
 		t.Errorf("Expected definitions to contain 'test'")
 	}
 	// Check that paths contains the "/test/" path.
-	paths, ok := swaggerSpec["paths"].(map[string]interface{})
+	paths, ok := swaggerSpec["paths"].(map[string]any)
 	if !ok {
 		t.Fatalf("paths is not a map")
 	}
@@ -168,11 +168,11 @@ func TestSwaggerSchema(t *testing.T) {
 		t.Errorf("Expected paths to contain '/test/'")
 	}
 	// Check that securityDefinitions contains oauth2 with the expected tokenUrl.
-	secDefs, ok := swaggerSpec["securityDefinitions"].(map[string]interface{})
+	secDefs, ok := swaggerSpec["securityDefinitions"].(map[string]any)
 	if !ok {
 		t.Fatalf("securityDefinitions is not a map")
 	}
-	oauth2, ok := secDefs["jwtToken"].(map[string]interface{})
+	oauth2, ok := secDefs["jwtToken"].(map[string]any)
 	if !ok {
 		t.Fatalf("securityDefinitions missing 'oauth2'")
 	}
@@ -180,11 +180,11 @@ func TestSwaggerSchema(t *testing.T) {
 		t.Errorf("Expected oauth2.tokenUrl to be 'http://auth.example.com/token', got '%v'", oauth2["tokenUrl"])
 	}
 	// Verify that the GET operation for the /test/ path includes the required query parameters: select, limit, offset.
-	getOp, ok := paths["/test/"].(map[string]interface{})["get"].(map[string]interface{})
+	getOp, ok := paths["/test/"].(map[string]any)["get"].(map[string]any)
 	if !ok {
 		t.Fatalf("Missing GET operation for path /test/")
 	}
-	params, ok := getOp["parameters"].([]interface{})
+	params, ok := getOp["parameters"].([]any)
 	if !ok {
 		t.Fatalf("GET parameters is not an array")
 	}
@@ -192,7 +192,7 @@ func TestSwaggerSchema(t *testing.T) {
 	for _, rp := range requiredParams {
 		found := false
 		for _, p := range params {
-			param, ok := p.(map[string]interface{})
+			param, ok := p.(map[string]any)
 			if ok {
 				if name, ok := param["name"].(string); ok && name == rp {
 					found = true
@@ -225,7 +225,7 @@ func TestSwaggerSchema(t *testing.T) {
 			paramName := "where." + op + "." + field
 			found := false
 			for _, p := range params {
-				param, ok := p.(map[string]interface{})
+				param, ok := p.(map[string]any)
 				if ok {
 					if name, ok := param["name"].(string); ok && name == paramName {
 						found = true
@@ -263,13 +263,13 @@ func TestSwaggerSchemaWithRPC(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("Expected status 200, got %d, body: %s", rr.Code, rr.Body.String())
 	}
-	var swaggerSpec map[string]interface{}
+	var swaggerSpec map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &swaggerSpec); err != nil {
 		t.Fatalf("Failed to unmarshal swagger spec: %v", err)
 	}
 
 	// Check that definitions contain both "myTable" and "myView".
-	definitions, ok := swaggerSpec["definitions"].(map[string]interface{})
+	definitions, ok := swaggerSpec["definitions"].(map[string]any)
 	if !ok {
 		t.Fatalf("definitions is not a map")
 	}
@@ -280,7 +280,7 @@ func TestSwaggerSchemaWithRPC(t *testing.T) {
 		t.Errorf("Expected definitions to contain 'myView'")
 	}
 	// Check that paths contain both "/myTable/", "/myView/" and "/rpc/myFunc/".
-	paths, ok := swaggerSpec["paths"].(map[string]interface{})
+	paths, ok := swaggerSpec["paths"].(map[string]any)
 	if !ok {
 		t.Fatalf("paths is not a map")
 	}

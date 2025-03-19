@@ -10,8 +10,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
-
+	_ "modernc.org/sqlite"
 	hplugin "github.com/hashicorp/go-plugin"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
@@ -29,7 +28,7 @@ func (s *sqlitePlugin) InitConnection(uri string) error {
 	}
 	dbPath := strings.TrimPrefix(uri, "sqlite://")
 	var err error
-	s.db, err = sql.Open("sqlite3", dbPath)
+	s.db, err = sql.Open("sqlite", dbPath)
 	if err != nil {
 		return err
 	}
@@ -37,14 +36,14 @@ func (s *sqlitePlugin) InitConnection(uri string) error {
 }
 
 // convertILIKEtoLike converts ILIKE operator to LIKE with COLLATE NOCASE
-func convertILIKEtoLike(where map[string]interface{}) map[string]interface{} {
-	result := make(map[string]interface{})
+func convertILIKEtoLike(where map[string]any) map[string]any {
+	result := make(map[string]any)
 	for field, val := range where {
 		switch v := val.(type) {
-		case map[string]interface{}:
+		case map[string]any:
 			for op, operand := range v {
 				if op == "ILIKE" {
-					result[field+" COLLATE NOCASE"] = map[string]interface{}{"LIKE": operand}
+					result[field+" COLLATE NOCASE"] = map[string]any{"LIKE": operand}
 				} else {
 					result[field] = v
 				}
@@ -57,8 +56,8 @@ func convertILIKEtoLike(where map[string]interface{}) map[string]interface{} {
 }
 
 // TableGet constructs and executes a SELECT query.
-func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, where map[string]interface{},
-	ordering []string, groupBy []string, limit, offset int, ctx map[string]interface{}) ([]map[string]interface{}, error) {
+func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, where map[string]any,
+	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, error) {
 
 	fields := "*"
 	if len(selectFields) > 0 {
@@ -99,17 +98,17 @@ func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, whe
 		return nil, err
 	}
 	numCols := len(cols)
-	columns := make([]interface{}, numCols)
-	columnPointers := make([]interface{}, numCols)
+	columns := make([]any, numCols)
+	columnPointers := make([]any, numCols)
 	for i := range columns {
 		columnPointers[i] = &columns[i]
 	}
-	var results []map[string]interface{}
+	var results []map[string]any
 	for rows.Next() {
 		if err := rows.Scan(columnPointers...); err != nil {
 			return nil, err
 		}
-		rowMap := make(map[string]interface{}, numCols)
+		rowMap := make(map[string]any, numCols)
 		for i, colName := range cols {
 			if t, ok := columns[i].(time.Time); ok {
 				if t.Hour() == 0 && t.Minute() == 0 && t.Second() == 0 && t.Nanosecond() == 0 {
@@ -127,17 +126,17 @@ func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, whe
 }
 
 // TableCreate builds and executes an INSERT query.
-func (s *sqlitePlugin) TableCreate(userID, table string, data []map[string]interface{}, ctx map[string]interface{}) ([]map[string]interface{}, error) {
+func (s *sqlitePlugin) TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, error) {
 	ctxQuery := context.WithValue(context.Background(), "USER_ID", userID)
 	tx, err := s.db.BeginTx(ctxQuery, nil)
 	if err != nil {
 		return nil, err
 	}
-	var results []map[string]interface{}
+	var results []map[string]any
 	for _, row := range data {
 		var cols []string
 		var placeholders []string
-		var args []interface{}
+		var args []any
 		for k, v := range row {
 			cols = append(cols, k)
 			placeholders = append(placeholders, "?")
@@ -158,14 +157,14 @@ func (s *sqlitePlugin) TableCreate(userID, table string, data []map[string]inter
 }
 
 // TableUpdate builds and executes an UPDATE query.
-func (s *sqlitePlugin) TableUpdate(userID, table string, data map[string]interface{}, where map[string]interface{}, ctx map[string]interface{}) (int, error) {
+func (s *sqlitePlugin) TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, error) {
 	ctxQuery := context.WithValue(context.Background(), "USER_ID", userID)
 	tx, err := s.db.BeginTx(ctxQuery, nil)
 	if err != nil {
 		return 0, err
 	}
 	var setParts []string
-	var args []interface{}
+	var args []any
 	for k, v := range data {
 		setParts = append(setParts, fmt.Sprintf("%s = ?", k))
 		args = append(args, v)
@@ -198,7 +197,7 @@ func (s *sqlitePlugin) TableUpdate(userID, table string, data map[string]interfa
 }
 
 // TableDelete builds and executes a DELETE query.
-func (s *sqlitePlugin) TableDelete(userID, table string, where map[string]interface{}, ctx map[string]interface{}) (int, error) {
+func (s *sqlitePlugin) TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, error) {
 	ctxQuery := context.WithValue(context.Background(), "USER_ID", userID)
 	tx, err := s.db.BeginTx(ctxQuery, nil)
 	if err != nil {
@@ -230,7 +229,7 @@ func (s *sqlitePlugin) TableDelete(userID, table string, where map[string]interf
 }
 
 // CallFunction returns an error since it is not supported.
-func (s *sqlitePlugin) CallFunction(userID, funcName string, data map[string]interface{}, ctx map[string]interface{}) (interface{}, error) {
+func (s *sqlitePlugin) CallFunction(userID, funcName string, data map[string]any, ctx map[string]any) (any, error) {
 	return nil, http.ErrNotSupported
 }
 
@@ -238,9 +237,9 @@ func (s *sqlitePlugin) CallFunction(userID, funcName string, data map[string]int
 // "tables" is a map from table names to JSON schema (Swagger 2.0 compatible),
 // "views" is a map from view names to JSON schema,
 // "rpc" is nil since SQLite does not support stored procedures.
-func (s *sqlitePlugin) GetSchema(ctx map[string]interface{}) (interface{}, error) {
-	tables := make(map[string]interface{})
-	views := make(map[string]interface{})
+func (s *sqlitePlugin) GetSchema(ctx map[string]any) (any, error) {
+	tables := make(map[string]any)
+	views := make(map[string]any)
 	// Query for both tables and views, excluding internal objects.
 	rows, err := s.db.Query("SELECT name, type FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%'")
 	if err != nil {
@@ -266,7 +265,7 @@ func (s *sqlitePlugin) GetSchema(ctx map[string]interface{}) (interface{}, error
 			views[name] = schema
 		}
 	}
-	result := map[string]interface{}{
+	result := map[string]any{
 		"tables": tables,
 		"views":  views,
 		"rpc":    nil,
@@ -275,14 +274,14 @@ func (s *sqlitePlugin) GetSchema(ctx map[string]interface{}) (interface{}, error
 }
 
 // getJSONSchemaForTable builds a JSON schema for a given table by querying PRAGMA table_info.
-func (s *sqlitePlugin) getJSONSchemaForTable(tableName string) (map[string]interface{}, error) {
+func (s *sqlitePlugin) getJSONSchemaForTable(tableName string) (map[string]any, error) {
 	query := fmt.Sprintf("PRAGMA table_info(%s)", tableName)
 	rows, err := s.db.Query(query)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	properties := make(map[string]interface{})
+	properties := make(map[string]any)
 	var required []string
 	for rows.Next() {
 		var cid int
@@ -294,7 +293,7 @@ func (s *sqlitePlugin) getJSONSchemaForTable(tableName string) (map[string]inter
 			return nil, err
 		}
 		jsType := mapSQLiteType(colType)
-		prop := map[string]interface{}{
+		prop := map[string]any{
 			"type": jsType,
 		}
 		// If BLOB type, add format "byte".
@@ -316,7 +315,7 @@ func (s *sqlitePlugin) getJSONSchemaForTable(tableName string) (map[string]inter
 		}
 	}
 	// Always include "required" key (even if empty).
-	schema := map[string]interface{}{
+	schema := map[string]any{
 		"type":       "object",
 		"properties": properties,
 	}

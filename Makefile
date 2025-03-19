@@ -10,6 +10,7 @@ export ER_TOKEN_USER_SEARCH := sub
 export ER_TOKEN_AUTHURL := http://auth.example.com/token
 export ER_PORT := 8080
 export ER_CHECK_SCOPE := 1
+export CGO_ENABLED := 0
 
 all: $(BIN_OUT)
 

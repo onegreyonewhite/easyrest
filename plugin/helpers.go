@@ -12,12 +12,12 @@ import (
 //
 // It returns the SQL string (starting with " WHERE ") and the list of arguments.
 // This is the original logic.
-func BuildWhereClause(where map[string]interface{}) (string, []interface{}, error) {
+func BuildWhereClause(where map[string]any) (string, []any, error) {
 	conds := make([]string, 0, len(where))
-	args := make([]interface{}, 0, len(where))
+	args := make([]any, 0, len(where))
 	for field, val := range where {
 		switch v := val.(type) {
-		case map[string]interface{}:
+		case map[string]any:
 			for op, operand := range v {
 				if op == "IN" {
 					arr := strings.Split(operand.(string), ",")
@@ -32,7 +32,7 @@ func BuildWhereClause(where map[string]interface{}) (string, []interface{}, erro
 							placeholders[i] = "?"
 						}
 						conds = append(conds, fmt.Sprintf("%s IN (%s)", field, strings.Join(placeholders, ",")))
-						inVals := make([]interface{}, len(arr))
+						inVals := make([]any, len(arr))
 						for i, val := range arr {
 							inVals[i] = val
 						}
@@ -58,12 +58,12 @@ func BuildWhereClause(where map[string]interface{}) (string, []interface{}, erro
 // It replaces dots and dashes with underscores and converts keys to lowercase.
 // For arrays, it uses the index as part of the key.
 // It also validates that the final values do not contain dangerous characters.
-func FormatToContext(input map[string]interface{}) (map[string]string, error) {
+func FormatToContext(input map[string]any) (map[string]string, error) {
 	output := make(map[string]string)
-	var flatten func(prefix string, val interface{}) error
-	flatten = func(prefix string, val interface{}) error {
+	var flatten func(prefix string, val any) error
+	flatten = func(prefix string, val any) error {
 		switch v := val.(type) {
-		case map[string]interface{}:
+		case map[string]any:
 			for k, v2 := range v {
 				normalizedKey := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(k, ".", "_"), "-", "_"))
 				var newPrefix string
@@ -76,7 +76,7 @@ func FormatToContext(input map[string]interface{}) (map[string]string, error) {
 					return err
 				}
 			}
-		case []interface{}:
+		case []any:
 			for i, item := range v {
 				newPrefix := fmt.Sprintf("%s_%d", prefix, i)
 				if err := flatten(newPrefix, item); err != nil {

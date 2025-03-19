@@ -124,13 +124,13 @@ func TestParseWhereClause(t *testing.T) {
 		"where.unknown.x": {"foo"},
 	}
 	// Pass empty flat and plugin contexts.
-	_, err := server.ParseWhereClause(values, map[string]string{}, map[string]interface{}{})
+	_, err := server.ParseWhereClause(values, map[string]string{}, map[string]any{})
 	if err == nil {
 		t.Error("Expected parseWhereClause to fail with unknown operator 'unknown'")
 	}
 	// Remove the unknown operator.
 	delete(values, "where.unknown.x")
-	whereMap, err2 := server.ParseWhereClause(values, map[string]string{}, map[string]interface{}{})
+	whereMap, err2 := server.ParseWhereClause(values, map[string]string{}, map[string]any{})
 	if err2 != nil {
 		t.Errorf("Unexpected error from parseWhereClause: %v", err2)
 	}
@@ -161,7 +161,7 @@ func TestBuildPluginContext(t *testing.T) {
 	if got["timezone"] != "America/Los_Angeles" {
 		t.Errorf("Expected timezone='America/Los_Angeles', got %v", got["timezone"])
 	}
-	headers, _ := got["headers"].(map[string]interface{})
+	headers, _ := got["headers"].(map[string]any)
 	if headers["x-custom"] != "Value1 Value2" {
 		t.Errorf("Expected x-custom='Value1 Value2', got %v", headers["x-custom"])
 	}
@@ -173,11 +173,11 @@ func TestBuildPluginContext(t *testing.T) {
 	if path != "/api/test/users/" {
 		t.Errorf("Expected path='/api/test/users/', got %v", path)
 	}
-	claimsMap, _ := got["claims"].(map[string]interface{})
+	claimsMap, _ := got["claims"].(map[string]any)
 	if claimsMap["sub"] != "Alice" {
 		t.Errorf("Expected claims.sub = 'Alice', got %v", claimsMap["sub"])
 	}
-	jwtClaimsMap, _ := got["jwt.claims"].(map[string]interface{})
+	jwtClaimsMap, _ := got["jwt.claims"].(map[string]any)
 	if jwtClaimsMap["sub"] != "Alice" {
 		t.Errorf("Expected jwt.claims.sub = 'Alice', got %v", jwtClaimsMap["sub"])
 	}
@@ -227,7 +227,7 @@ func TestRunMinimal(t *testing.T) {
 		defer func() {
 			// not a real approach for coverage but an example
 		}()
-		server.Run()
+		server.Run(config.Load())
 	}()
 	time.Sleep(200 * time.Millisecond)
 	// We can't easily check coverage further. We kill the goroutine by exiting the test.

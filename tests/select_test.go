@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v4"
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 func TestSelectBasic(t *testing.T) {
@@ -32,7 +32,7 @@ func TestSelectBasic(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("Expected status 200, got %d. Response: %s", rr.Code, rr.Body.String())
 	}
-	var result []map[string]interface{}
+	var result []map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
 		t.Fatalf("Error parsing response: %v. Response: %s", err, rr.Body.String())
 	}
@@ -66,7 +66,7 @@ func TestSelectWhereLike(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("Expected status 200, got %d. Response: %s", rr.Code, rr.Body.String())
 	}
-	var result []map[string]interface{}
+	var result []map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
 		t.Fatalf("Error parsing response: %v. Response: %s", err, rr.Body.String())
 	}
@@ -102,7 +102,7 @@ func TestSelectWhereLt(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("Expected status 200, got %d. Response: %s", rr.Code, rr.Body.String())
 	}
-	var result []map[string]interface{}
+	var result []map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
 		t.Fatalf("Error parsing response: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestSelectMultipleWhere(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("Expected status 200, got %d. Response: %s", rr.Code, rr.Body.String())
 	}
-	var result []map[string]interface{}
+	var result []map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
 		t.Fatalf("Error parsing response: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestSelectAllOperators(t *testing.T) {
 			if rr.Code != http.StatusOK {
 				t.Fatalf("Expected status 200, got %d. Response: %s", rr.Code, rr.Body.String())
 			}
-			var result []map[string]interface{}
+			var result []map[string]any
 			if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
 				t.Fatalf("Error parsing response: %v", err)
 			}
@@ -269,7 +269,7 @@ func TestContextSubstitution(t *testing.T) {
 			if rr.Code != http.StatusOK {
 				t.Fatalf("Expected status 200, got %d. Response: %s", rr.Code, rr.Body.String())
 			}
-			var result []map[string]interface{}
+			var result []map[string]any
 			if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
 				t.Fatalf("Error parsing response: %v", err)
 			}

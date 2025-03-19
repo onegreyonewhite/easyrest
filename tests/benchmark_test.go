@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v4"
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/onegreyonewhite/easyrest/internal/server"
+	_ "modernc.org/sqlite"
 )
 
 func BenchmarkTableGet(b *testing.B) {
@@ -32,7 +32,7 @@ func BenchmarkTableGet(b *testing.B) {
 	defer os.Remove(dbPath)
 
 	// Open the database and create the 'users' table
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		b.Fatalf("Failed to open sqlite DB: %v", err)
 	}
@@ -102,7 +102,7 @@ func BenchmarkTableCreate(b *testing.B) {
 	defer os.Remove(dbPath)
 
 	// Open the database and create the 'users' table
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		b.Fatalf("Failed to open sqlite DB: %v", err)
 	}
@@ -168,7 +168,7 @@ func BenchmarkTableUpdate(b *testing.B) {
 	defer os.Remove(dbPath)
 
 	// Open the database and create the 'users' table with an additional update_field column
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		b.Fatalf("Failed to open sqlite DB: %v", err)
 	}
@@ -239,7 +239,7 @@ func setupTempDBForSelect() (*sql.DB, string, error) {
 	dbPath := tmpFile.Name()
 	tmpFile.Close()
 
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, "", err
 	}
@@ -307,7 +307,7 @@ func setupTempDBForCreate() (*sql.DB, string, error) {
 	dbPath := tmpFile.Name()
 	tmpFile.Close()
 
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, "", err
 	}
@@ -350,7 +350,7 @@ func setupTempDBForUpdate() (*sql.DB, string, error) {
 	dbPath := tmpFile.Name()
 	tmpFile.Close()
 
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, "", err
 	}

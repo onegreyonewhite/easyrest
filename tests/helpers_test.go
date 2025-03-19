@@ -8,8 +8,9 @@ import (
 
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/gorilla/mux"
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 
+	"github.com/onegreyonewhite/easyrest/internal/config"
 	"github.com/onegreyonewhite/easyrest/internal/server"
 )
 
@@ -23,7 +24,7 @@ func setupTestDB(t *testing.T) string {
 	dbPath := tmpFile.Name()
 	tmpFile.Close()
 
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("Failed to open sqlite DB: %v", err)
 	}
@@ -43,7 +44,7 @@ func setupTestDB(t *testing.T) string {
 // insertUser inserts a row into the 'users' table and returns the generated id.
 func insertUser(t *testing.T, dbPath, name, updateField string) int {
 	t.Helper()
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("Failed to open sqlite DB: %v", err)
 	}
@@ -60,28 +61,29 @@ func insertUser(t *testing.T, dbPath, name, updateField string) int {
 	return int(id)
 }
 
-// setupServerWithDB configures the server by setting environment variables.
+// setupServerWithDB sets up a test server with the given database.
 func setupServerWithDB(t *testing.T, dbPath string) *mux.Router {
 	t.Helper()
 	os.Setenv("ER_DB_TEST", "sqlite://"+dbPath)
-	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
-	os.Setenv("ER_NO_PLUGIN_LOG", "1")
-	// Disable scope checking in tests.
 	os.Setenv("ER_CHECK_SCOPE", "0")
 	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
+	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
+	cfg := config.Load()
+	server.SetConfig(cfg)
 	return server.SetupRouter()
 }
 
 // generateToken generates a JWT token for testing.
 func generateToken(t *testing.T) string {
 	t.Helper()
+	cfg := server.GetConfig()
 	claims := jwt.MapClaims{
 		"sub":   "testuser",
 		"exp":   time.Now().Add(time.Hour).Unix(),
 		"scope": "users-read users-write",
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	tokenStr, err := token.SignedString([]byte("mytestsecret"))
+	tokenStr, err := token.SignedString([]byte(cfg.TokenSecret))
 	if err != nil {
 		t.Fatalf("Failed to sign token: %v", err)
 	}

@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v4"
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 	"github.com/onegreyonewhite/easyrest/internal/server"
 )
 
@@ -23,7 +23,7 @@ func setupOrdersTestDB(t *testing.T) string {
 	}
 	dbPath := tmpFile.Name()
 	tmpFile.Close()
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("Failed to open DB: %v", err)
 	}
@@ -44,7 +44,7 @@ func setupOrdersTestDB(t *testing.T) string {
 // insertOrder inserts a record into the orders table.
 func insertOrder(t *testing.T, dbPath string, items int, orderDate string, amount float64) int {
 	t.Helper()
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("Failed to open DB: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestOrdersSelectSum(t *testing.T) {
 		t.Fatalf("Expected status 200, got %d; body: %s", rr.Code, rr.Body.String())
 	}
 
-	var result []map[string]interface{}
+	var result []map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
 		t.Fatalf("Error parsing response: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestOrdersSelectGroupBy(t *testing.T) {
 		t.Fatalf("Expected status 200, got %d; body: %s", rr.Code, rr.Body.String())
 	}
 
-	var result []map[string]interface{}
+	var result []map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
 		t.Fatalf("Error parsing response: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestOrdersSelectCount(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("Expected status 200, got %d; body: %s", rr.Code, rr.Body.String())
 	}
-	var result []map[string]interface{}
+	var result []map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
 		t.Fatalf("Error parsing response: %v", err)
 	}
@@ -260,7 +260,7 @@ func TestOrdersSelectCount(t *testing.T) {
 	if rr2.Code != http.StatusOK {
 		t.Fatalf("Expected status 200, got %d; body: %s", rr2.Code, rr2.Body.String())
 	}
-	var result2 []map[string]interface{}
+	var result2 []map[string]any
 	if err := json.Unmarshal(rr2.Body.Bytes(), &result2); err != nil {
 		t.Fatalf("Error parsing response: %v", err)
 	}

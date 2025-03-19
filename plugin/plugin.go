@@ -11,18 +11,18 @@ import (
 )
 
 // Version is the plugin version.
-var Version = "v0.3.2"
+var Version = "v0.4.0"
 
 // DBPlugin – interface for DB access plugins.
 type DBPlugin interface {
 	InitConnection(uri string) error
-	TableGet(userID, table string, selectFields []string, where map[string]interface{},
-		ordering []string, groupBy []string, limit, offset int, ctx map[string]interface{}) ([]map[string]interface{}, error)
-	TableCreate(userID, table string, data []map[string]interface{}, ctx map[string]interface{}) ([]map[string]interface{}, error)
-	TableUpdate(userID, table string, data map[string]interface{}, where map[string]interface{}, ctx map[string]interface{}) (int, error)
-	TableDelete(userID, table string, where map[string]interface{}, ctx map[string]interface{}) (int, error)
-	CallFunction(userID, funcName string, data map[string]interface{}, ctx map[string]interface{}) (interface{}, error)
-	GetSchema(ctx map[string]interface{}) (interface{}, error)
+	TableGet(userID, table string, selectFields []string, where map[string]any,
+		ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, error)
+	TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, error)
+	TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, error)
+	TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, error)
+	CallFunction(userID, funcName string, data map[string]any, ctx map[string]any) (any, error)
+	GetSchema(ctx map[string]any) (any, error)
 }
 
 // RPC request/response structures.
@@ -38,37 +38,37 @@ type TableGetRequest struct {
 	UserID       string
 	Table        string
 	SelectFields []string
-	Where        map[string]interface{}
+	Where        map[string]any
 	Ordering     []string
 	GroupBy      []string
 	Limit        int
 	Offset       int
-	Ctx          map[string]interface{}
+	Ctx          map[string]any
 }
 
 type TableGetResponse struct {
-	Rows  []map[string]interface{}
+	Rows  []map[string]any
 	Error string
 }
 
 type TableCreateRequest struct {
 	UserID string
 	Table  string
-	Data   []map[string]interface{}
-	Ctx    map[string]interface{}
+	Data   []map[string]any
+	Ctx    map[string]any
 }
 
 type TableCreateResponse struct {
-	Rows  []map[string]interface{}
+	Rows  []map[string]any
 	Error string
 }
 
 type TableUpdateRequest struct {
 	UserID string
 	Table  string
-	Data   map[string]interface{}
-	Where  map[string]interface{}
-	Ctx    map[string]interface{}
+	Data   map[string]any
+	Where  map[string]any
+	Ctx    map[string]any
 }
 
 type TableUpdateResponse struct {
@@ -79,8 +79,8 @@ type TableUpdateResponse struct {
 type TableDeleteRequest struct {
 	UserID string
 	Table  string
-	Where  map[string]interface{}
-	Ctx    map[string]interface{}
+	Where  map[string]any
+	Ctx    map[string]any
 }
 
 type TableDeleteResponse struct {
@@ -91,34 +91,34 @@ type TableDeleteResponse struct {
 type CallFunctionRequest struct {
 	UserID   string
 	FuncName string
-	Data     map[string]interface{}
-	Ctx      map[string]interface{}
+	Data     map[string]any
+	Ctx      map[string]any
 }
 
 type CallFunctionResponse struct {
-	Result interface{}
+	Result any
 	Error  string
 }
 
 // New structures for GetSchema.
 type GetSchemaRequest struct {
-	Ctx map[string]interface{}
+	Ctx map[string]any
 }
 
 type GetSchemaResponse struct {
-	Schema interface{}
+	Schema any
 	Error  string
 }
 
 // Pools.
 var tableGetRequestPool = sync.Pool{
-	New: func() interface{} {
+	New: func() any {
 		return &TableGetRequest{}
 	},
 }
 
 var tableGetResponsePool = sync.Pool{
-	New: func() interface{} {
+	New: func() any {
 		return &TableGetResponse{}
 	},
 }
@@ -139,8 +139,8 @@ func (g *DBPluginRPC) InitConnection(uri string) error {
 	return nil
 }
 
-func (g *DBPluginRPC) TableGet(userID, table string, selectFields []string, where map[string]interface{},
-	ordering []string, groupBy []string, limit, offset int, ctx map[string]interface{}) ([]map[string]interface{}, error) {
+func (g *DBPluginRPC) TableGet(userID, table string, selectFields []string, where map[string]any,
+	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, error) {
 	req := tableGetRequestPool.Get().(*TableGetRequest)
 	req.UserID = userID
 	req.Table = table
@@ -180,7 +180,7 @@ func (g *DBPluginRPC) TableGet(userID, table string, selectFields []string, wher
 	return result, nil
 }
 
-func (g *DBPluginRPC) TableCreate(userID, table string, data []map[string]interface{}, ctx map[string]interface{}) ([]map[string]interface{}, error) {
+func (g *DBPluginRPC) TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, error) {
 	req := TableCreateRequest{
 		UserID: userID,
 		Table:  table,
@@ -198,7 +198,7 @@ func (g *DBPluginRPC) TableCreate(userID, table string, data []map[string]interf
 	return resp.Rows, nil
 }
 
-func (g *DBPluginRPC) TableUpdate(userID, table string, data map[string]interface{}, where map[string]interface{}, ctx map[string]interface{}) (int, error) {
+func (g *DBPluginRPC) TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, error) {
 	req := TableUpdateRequest{
 		UserID: userID,
 		Table:  table,
@@ -217,7 +217,7 @@ func (g *DBPluginRPC) TableUpdate(userID, table string, data map[string]interfac
 	return resp.Updated, nil
 }
 
-func (g *DBPluginRPC) TableDelete(userID, table string, where map[string]interface{}, ctx map[string]interface{}) (int, error) {
+func (g *DBPluginRPC) TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, error) {
 	req := TableDeleteRequest{
 		UserID: userID,
 		Table:  table,
@@ -235,7 +235,7 @@ func (g *DBPluginRPC) TableDelete(userID, table string, where map[string]interfa
 	return resp.Deleted, nil
 }
 
-func (g *DBPluginRPC) CallFunction(userID, funcName string, data map[string]interface{}, ctx map[string]interface{}) (interface{}, error) {
+func (g *DBPluginRPC) CallFunction(userID, funcName string, data map[string]any, ctx map[string]any) (any, error) {
 	req := CallFunctionRequest{
 		UserID:   userID,
 		FuncName: funcName,
@@ -254,7 +254,7 @@ func (g *DBPluginRPC) CallFunction(userID, funcName string, data map[string]inte
 }
 
 // New GetSchema method.
-func (g *DBPluginRPC) GetSchema(ctx map[string]interface{}) (interface{}, error) {
+func (g *DBPluginRPC) GetSchema(ctx map[string]any) (any, error) {
 	req := GetSchemaRequest{Ctx: ctx}
 	var resp GetSchemaResponse
 	err := g.client.Call("Plugin.GetSchema", req, &resp)
@@ -346,19 +346,19 @@ type DBPluginPlugin struct {
 	Impl DBPlugin
 }
 
-func (p *DBPluginPlugin) Server(broker *plugin.MuxBroker) (interface{}, error) {
+func (p *DBPluginPlugin) Server(broker *plugin.MuxBroker) (any, error) {
 	return &DBPluginRPCServer{Impl: p.Impl}, nil
 }
 
-func (p *DBPluginPlugin) Client(broker *plugin.MuxBroker, c *rpc.Client) (interface{}, error) {
+func (p *DBPluginPlugin) Client(broker *plugin.MuxBroker, c *rpc.Client) (any, error) {
 	return &DBPluginRPC{client: c}, nil
 }
 
 func init() {
-	gob.Register(map[string]interface{}(nil))
-	gob.Register([]map[string]interface{}{})
+	gob.Register(map[string]any(nil))
+	gob.Register([]map[string]any{})
 	gob.Register(time.Time{})
-	gob.Register([]interface{}{})
+	gob.Register([]any{})
 }
 
 // Handshake configuration for plugin security.
