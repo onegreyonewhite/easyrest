@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -15,6 +16,12 @@ type Config struct {
 	DefaultTimezone string
 	TokenURL        string
 	AuthFlow        string
+	// CORS settings
+	CORSEnabled bool
+	CORSOrigins []string
+	CORSMethods []string
+	CORSHeaders []string
+	CORSMaxAge  int
 }
 
 func Load() Config {
@@ -85,6 +92,31 @@ func Load() Config {
 		authFlow = "password"
 	}
 
+	// CORS configuration
+	corsEnabled := os.Getenv("ER_CORS_ENABLED") == "1"
+
+	corsOrigins := strings.Split(os.Getenv("ER_CORS_ORIGINS"), ",")
+	if len(corsOrigins) == 1 && corsOrigins[0] == "" {
+		corsOrigins = []string{"*"}
+	}
+
+	corsMethods := strings.Split(os.Getenv("ER_CORS_METHODS"), ",")
+	if len(corsMethods) == 1 && corsMethods[0] == "" {
+		corsMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}
+	}
+
+	corsHeaders := strings.Split(os.Getenv("ER_CORS_HEADERS"), ",")
+	if len(corsHeaders) == 1 && corsHeaders[0] == "" {
+		corsHeaders = []string{"Content-Type", "Authorization", "X-Requested-With"}
+	}
+
+	corsMaxAge := 86400 // 24 hours default
+	if maxAge := os.Getenv("ER_CORS_MAX_AGE"); maxAge != "" {
+		if age, err := strconv.Atoi(maxAge); err == nil {
+			corsMaxAge = age
+		}
+	}
+
 	return Config{
 		Port:            port,
 		CheckScope:      checkScope,
@@ -95,5 +127,11 @@ func Load() Config {
 		DefaultTimezone: defaultTimezone,
 		TokenURL:        tokenURL,
 		AuthFlow:        authFlow,
+		// CORS settings
+		CORSEnabled: corsEnabled,
+		CORSOrigins: corsOrigins,
+		CORSMethods: corsMethods,
+		CORSHeaders: corsHeaders,
+		CORSMaxAge:  corsMaxAge,
 	}
 }

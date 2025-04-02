@@ -118,12 +118,12 @@ func TestDeleteWhereContext(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
 	// Insert records.
-	insertUser(t, dbPath, "testuser", "test1")   // Имя должно совпадать с sub в claims
-	insertUser(t, dbPath, "test_value", "test2") // Имя должно совпадать с custom в claims
+	insertUser(t, dbPath, "testuser", "test1")   // Name must match sub in claims
+	insertUser(t, dbPath, "test_value", "test2") // Name must match custom in claims
 
 	router := setupServerWithDB(t, dbPath)
 
-	// Создаем токен с дополнительными claims
+	// Create token with additional claims
 	claims := jwt.MapClaims{
 		"sub":    "testuser",
 		"exp":    time.Now().Add(time.Hour).Unix(),
@@ -136,7 +136,7 @@ func TestDeleteWhereContext(t *testing.T) {
 		t.Fatalf("Ошибка подписи токена: %v", err)
 	}
 
-	// DELETE запрос с использованием значений из контекста
+	// DELETE request using context values
 	req, err := http.NewRequest("DELETE", "/api/test/users/?where.eq.name=request.claims.sub", nil)
 	if err != nil {
 		t.Fatal(err)

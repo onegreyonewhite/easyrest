@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -177,10 +178,82 @@ func Authenticate(r *http.Request) (string, *http.Request, error) {
 	return extractUserIDFromClaims(claims), r, nil
 }
 
+// proxyHeadersHandler wraps the original handler to process X-Forwarded-* headers
+func proxyHeadersHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Process X-Forwarded-* headers
+		if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+			r.URL.Scheme = proto
+		} else if proto := r.Header.Get("X-Forwarded-Protocol"); proto != "" {
+			r.URL.Scheme = proto
+		}
+		if host := r.Header.Get("X-Forwarded-Host"); host != "" {
+			r.Host = host
+		}
+		if ip := r.Header.Get("X-Forwarded-For"); ip != "" {
+			// Take the first IP if multiple are present
+			ips := strings.Split(ip, ",")
+			r.RemoteAddr = strings.TrimSpace(ips[0])
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// corsMiddleware handles CORS headers based on configuration
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cfg := GetConfig()
+		if !cfg.CORSEnabled {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Check if origin is allowed
+		allowed := false
+		for _, allowedOrigin := range cfg.CORSOrigins {
+			if allowedOrigin == "*" || allowedOrigin == origin {
+				allowed = true
+				break
+			}
+		}
+
+		if allowed {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", strings.Join(cfg.CORSMethods, ", "))
+			w.Header().Set("Access-Control-Allow-Headers", strings.Join(cfg.CORSHeaders, ", "))
+			w.Header().Set("Access-Control-Max-Age", strconv.Itoa(cfg.CORSMaxAge))
+		}
+
+		// Handle preflight requests
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
 // SetupRouter initializes the router and endpoints.
 func SetupRouter() *mux.Router {
 	LoadDBPlugins()
 	r := mux.NewRouter()
+
+	// Add CORS middleware first
+	cfg := GetConfig()
+	if cfg.CORSEnabled {
+		r.Use(corsMiddleware)
+	}
+
+	// Add proxy headers handler
+	r.Use(proxyHeadersHandler)
+
 	// Schema endpoint.
 	r.HandleFunc("/api/{db}/", schemaHandler).Methods("GET")
 	// Call RPC function endpoint.

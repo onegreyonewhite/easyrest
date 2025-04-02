@@ -173,7 +173,7 @@ func TestSelectAllOperators(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
 
-	// Вставляем тестовые данные с разным регистром
+	// Insert test data with different cases
 	_ = insertUser(t, dbPath, "Alice", "test1")
 	id2 := insertUser(t, dbPath, "ALICE2", "test2")
 	_ = insertUser(t, dbPath, "Charlie", "test3")
@@ -181,7 +181,7 @@ func TestSelectAllOperators(t *testing.T) {
 	router := setupServerWithDB(t, dbPath)
 	tokenStr := generateToken(t)
 
-	// Тесты для каждого оператора
+	// Tests for each operator
 	tests := []struct {
 		name     string
 		query    string
@@ -226,13 +226,13 @@ func TestContextSubstitution(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
 
-	// Вставляем тестовые данные
-	insertUser(t, dbPath, "testuser", "test1")   // Имя должно совпадать с sub в claims
-	insertUser(t, dbPath, "test_value", "test2") // Имя должно совпадать с custom в claims
+	// Insert test data
+	insertUser(t, dbPath, "testuser", "test1")   // Name must match sub in claims
+	insertUser(t, dbPath, "test_value", "test2") // Name must match custom in claims
 
 	router := setupServerWithDB(t, dbPath)
 
-	// Создаем токен с дополнительными claims
+	// Create token with additional claims
 	claims := jwt.MapClaims{
 		"sub":    "testuser",
 		"exp":    time.Now().Add(time.Hour).Unix(),
@@ -245,7 +245,7 @@ func TestContextSubstitution(t *testing.T) {
 		t.Fatalf("Failed to sign token: %v", err)
 	}
 
-	// Тесты подстановки контекстных значений
+	// Tests for context value substitution
 	tests := []struct {
 		name     string
 		query    string
