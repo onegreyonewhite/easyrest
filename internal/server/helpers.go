@@ -17,7 +17,7 @@ import (
 	"sync"
 
 	"github.com/goccy/go-json"
-	"github.com/golang-jwt/jwt/v4"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/hashicorp/go-hclog"
 	hplugin "github.com/hashicorp/go-plugin"
 	"github.com/onegreyonewhite/easyrest/internal/config"

@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/golang-jwt/jwt/v4"
-	_ "modernc.org/sqlite"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/onegreyonewhite/easyrest/internal/server"
+	_ "modernc.org/sqlite"
 )
 
 // setupOrdersTestDB creates a temporary SQLite database with an orders table.

@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/goccy/go-json"
-	"github.com/golang-jwt/jwt/v4"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/mux"
 	"github.com/onegreyonewhite/easyrest/internal/config"
 )
@@ -123,11 +123,12 @@ func Authenticate(r *http.Request) (string, *http.Request, error) {
 		if !ok {
 			return "", r, errors.New("invalid claims")
 		}
-		if exp, ok := claims["exp"].(float64); ok {
-			if time.Unix(int64(exp), 0).Before(time.Now()) {
-				return "", r, errors.New("token expired")
-			}
+
+		expTime, err := claims.GetExpirationTime()
+		if err == nil && expTime != nil && expTime.Before(time.Now()) {
+			return "", r, errors.New("token expired")
 		}
+
 		r = r.WithContext(context.WithValue(r.Context(), TokenClaimsKey, claims))
 		return extractUserIDFromClaims(claims), r, nil
 	}
@@ -166,11 +167,12 @@ func Authenticate(r *http.Request) (string, *http.Request, error) {
 	if err != nil {
 		return "", r, err
 	}
-	if exp, ok := claims["exp"].(float64); ok {
-		if time.Unix(int64(exp), 0).Before(time.Now()) {
-			return "", r, errors.New("token expired")
-		}
+
+	expTime, err := claims.GetExpirationTime()
+	if err == nil && expTime != nil && expTime.Before(time.Now()) {
+		return "", r, errors.New("token expired")
 	}
+
 	r = r.WithContext(context.WithValue(r.Context(), TokenClaimsKey, claims))
 	return extractUserIDFromClaims(claims), r, nil
 }
