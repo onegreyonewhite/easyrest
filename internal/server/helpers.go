@@ -170,26 +170,23 @@ func ParseCSV(s string) []string {
 	return parts
 }
 
-// respondJSON writes a JSON response with the given status code and data.
-func respondJSON(w http.ResponseWriter, status int, data any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-
-	// Get buffer from pool
+// respondJSON serializes v to JSON and writes it to w with Content-Type header.
+func respondJSON(w http.ResponseWriter, status int, v interface{}) {
 	buf := jsonBufferPool.Get().(*bytes.Buffer)
-	defer jsonBufferPool.Put(buf)
 	buf.Reset()
+	defer jsonBufferPool.Put(buf)
 
-	// Use optimized encoder
+	// Use goccy/go-json with optimized settings
 	enc := json.NewEncoder(buf)
-	enc.SetEscapeHTML(false) // Disable HTML escaping for better performance
+	enc.SetEscapeHTML(false)
 
-	if err := enc.Encode(data); err != nil {
-		w.Write([]byte("{}"))
+	if err := enc.Encode(v); err != nil {
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
 
-	// Copy data from buffer to ResponseWriter
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
 	w.Write(buf.Bytes())
 }
 

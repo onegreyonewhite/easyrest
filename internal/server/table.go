@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/goccy/go-json"
 	"github.com/gorilla/mux"
@@ -171,26 +172,36 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		selectParam := r.URL.Query().Get("select")
+		queryValues := r.URL.Query()
+
 		selectFields, groupBy, err := processSelectParam(selectParam, flatCtx, pluginCtx)
 		if err != nil {
 			http.Error(w, "Error processing select parameter: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		where, err := ParseWhereClause(r.URL.Query(), flatCtx, pluginCtx)
+
+		where, err := ParseWhereClause(queryValues, flatCtx, pluginCtx)
 		if err != nil {
 			http.Error(w, "Error processing where clause: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		ordering := ParseCSV(r.URL.Query().Get("ordering"))
-		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 
+		ordering := ParseCSV(queryValues.Get("ordering"))
+		limit, _ := strconv.Atoi(queryValues.Get("limit"))
+		offset, _ := strconv.Atoi(queryValues.Get("offset"))
+
+		startTime := time.Now()
 		rows, err := dbPlug.TableGet(userID, table, selectFields, where, ordering, groupBy, limit, offset, pluginCtx)
+		queryTime := time.Since(startTime)
+
+		w.Header().Set("Server-Timing", fmt.Sprintf("db;dur=%.3f", float64(queryTime.Milliseconds())))
+
 		if err != nil {
 			http.Error(w, "Error in TableGet: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		respondJSON(w, http.StatusOK, rows)
+
 	case http.MethodPost:
 		var data []map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
@@ -200,7 +211,10 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 		for i, row := range data {
 			data[i] = substituteValue(row, flatCtx, pluginCtx).(map[string]any)
 		}
+		startTime := time.Now()
 		rows, err := dbPlug.TableCreate(userID, table, data, pluginCtx)
+		queryTime := time.Since(startTime)
+		w.Header().Set("Server-Timing", fmt.Sprintf("db;dur=%.3f", float64(queryTime.Milliseconds())))
 		if err != nil {
 			http.Error(w, "Error in TableCreate: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -218,24 +232,32 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Error processing where clause: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		startTime := time.Now()
 		updated, err := dbPlug.TableUpdate(userID, table, data, where, pluginCtx)
+		queryTime := time.Since(startTime)
+		w.Header().Set("Server-Timing", fmt.Sprintf("db;dur=%.3f", float64(queryTime.Milliseconds())))
 		if err != nil {
 			http.Error(w, "Error in TableUpdate: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		respondJSON(w, http.StatusOK, map[string]int{"updated": updated})
+
 	case http.MethodDelete:
 		where, err := ParseWhereClause(r.URL.Query(), flatCtx, pluginCtx)
 		if err != nil {
 			http.Error(w, "Error processing where clause: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		startTime := time.Now()
 		_, err = dbPlug.TableDelete(userID, table, where, pluginCtx)
+		queryTime := time.Since(startTime)
+		w.Header().Set("Server-Timing", fmt.Sprintf("db;dur=%.3f", float64(queryTime.Milliseconds())))
 		if err != nil {
 			http.Error(w, "Error in TableDelete: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
+
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}

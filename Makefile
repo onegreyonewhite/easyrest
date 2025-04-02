@@ -37,4 +37,11 @@ run: plugin-sqlite
 	export ER_CHECK_SCOPE=1
 	go run cmd/server/main.go
 
+run-perf: all
+	export ER_DB_TEST=sqlite://./test.db
+	export ER_TOKEN_USER_SEARCH=sub
+	export ER_PORT=8080
+	export ER_CHECK_SCOPE=1
+	perf record -g ./bin/easyrest-server
+
 .PHONY: all clean test

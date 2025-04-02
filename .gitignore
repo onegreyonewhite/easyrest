@@ -1,6 +1,10 @@
 bin
 test.db
+test.db-*
 release
 cover.out
 structure.txt
 .history
+perf_report.txt
+perf.data
+perf.data.old

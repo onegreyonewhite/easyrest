@@ -10,21 +10,25 @@ import (
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
 	hplugin "github.com/hashicorp/go-plugin"
+	lru "github.com/hashicorp/golang-lru/v2"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
+	"golang.org/x/sync/singleflight"
+	_ "modernc.org/sqlite"
 )
 
 // sqlitePlugin implements easyrest.DBPlugin for SQLite.
 type sqlitePlugin struct {
-	db *sql.DB
+	db            *sql.DB
+	preparedStmts *lru.Cache[string, *sql.Stmt]
+	stmtGroup     singleflight.Group
 }
 
 // InitConnection opens the SQLite database based on the provided URI.
 func (s *sqlitePlugin) InitConnection(uri string) error {
 	// Expected format: sqlite://<path>
 	if !strings.HasPrefix(uri, "sqlite://") {
-		return errors.New("Invalid sqlite URI")
+		return errors.New("invalid sqlite URI")
 	}
 	dbPath := strings.TrimPrefix(uri, "sqlite://")
 	var err error
@@ -32,7 +36,61 @@ func (s *sqlitePlugin) InitConnection(uri string) error {
 	if err != nil {
 		return err
 	}
+
+	// Initialize LRU cache for prepared statements
+	s.preparedStmts, err = lru.New[string, *sql.Stmt](1000)
+	if err != nil {
+		return fmt.Errorf("failed to create LRU cache: %w", err)
+	}
+
+	// SQLite settings optimization
+	s.db.SetMaxOpenConns(25)
+	s.db.SetMaxIdleConns(5)
+	s.db.SetConnMaxLifetime(30 * time.Minute)
+
+	// Enable WAL mode for better performance
+	_, err = s.db.Exec("PRAGMA journal_mode=WAL")
+	if err != nil {
+		return err
+	}
+
+	// Increase cache size for better performance
+	_, err = s.db.Exec("PRAGMA cache_size=10000")
+	if err != nil {
+		return err
+	}
+
 	return s.db.Ping()
+}
+
+// Get prepared statement from cache or create new
+func (s *sqlitePlugin) getPreparedStmt(query string, ctx context.Context) (*sql.Stmt, error) {
+	// Try to get from cache first
+	if stmt, exists := s.preparedStmts.Get(query); exists {
+		return stmt, nil
+	}
+
+	// If not in cache, create using singleflight to prevent races
+	v, err, _ := s.stmtGroup.Do(query, func() (interface{}, error) {
+		// Check cache again in case another goroutine has created it
+		if stmt, exists := s.preparedStmts.Get(query); exists {
+			return stmt, nil
+		}
+
+		stmt, err := s.db.PrepareContext(ctx, query)
+		if err != nil {
+			return nil, err
+		}
+
+		s.preparedStmts.Add(query, stmt)
+		return stmt, nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return v.(*sql.Stmt), nil
 }
 
 // convertILIKEtoLike converts ILIKE operator to LIKE with COLLATE NOCASE
@@ -88,26 +146,39 @@ func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, whe
 	}
 
 	ctxQuery := context.WithValue(context.Background(), "USER_ID", userID)
-	rows, err := s.db.QueryContext(ctxQuery, query, args...)
+
+	// Use prepared statement for better performance
+	stmt, err := s.getPreparedStmt(query, ctxQuery)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := stmt.QueryContext(ctxQuery, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+
 	cols, err := rows.Columns()
 	if err != nil {
 		return nil, err
 	}
 	numCols := len(cols)
-	columns := make([]any, numCols)
-	columnPointers := make([]any, numCols)
-	for i := range columns {
-		columnPointers[i] = &columns[i]
-	}
+
+	// Pre-allocate memory for results
 	var results []map[string]any
 	for rows.Next() {
+		// Use pointer scanning for better performance
+		columns := make([]any, numCols)
+		columnPointers := make([]any, numCols)
+		for i := range columns {
+			columnPointers[i] = &columns[i]
+		}
+
 		if err := rows.Scan(columnPointers...); err != nil {
 			return nil, err
 		}
+
 		rowMap := make(map[string]any, numCols)
 		for i, colName := range cols {
 			if t, ok := columns[i].(time.Time); ok {
@@ -122,6 +193,7 @@ func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, whe
 		}
 		results = append(results, rowMap)
 	}
+
 	return results, nil
 }
 

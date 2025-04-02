@@ -10,6 +10,8 @@ require (
 	github.com/gorilla/mux v1.8.1
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/go-plugin v1.6.3
+	github.com/hashicorp/golang-lru/v2 v2.0.7
+	golang.org/x/sync v0.12.0
 	modernc.org/sqlite v1.37.0
 )
 
