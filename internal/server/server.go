@@ -304,9 +304,16 @@ func Run(config config.Config) {
 
 	// Run server in a goroutine
 	go func() {
-		stdlog.Printf("Server listening on port %s...", config.Port)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			stdlog.Fatalf("Server error: %v", err)
+		if config.TLSEnabled {
+			stdlog.Printf("TLS server listening on port %s...", config.Port)
+			if err := srv.ListenAndServeTLS(config.TLSCertFile, config.TLSKeyFile); err != nil && err != http.ErrServerClosed {
+				stdlog.Fatalf("Server error: %v", err)
+			}
+		} else {
+			stdlog.Printf("Server listening on port %s...", config.Port)
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				stdlog.Fatalf("Server error: %v", err)
+			}
 		}
 	}()
 

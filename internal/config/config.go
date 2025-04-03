@@ -22,6 +22,10 @@ type Config struct {
 	CORSMethods []string
 	CORSHeaders []string
 	CORSMaxAge  int
+	// TLS settings
+	TLSEnabled  bool
+	TLSCertFile string
+	TLSKeyFile  string
 }
 
 func Load() Config {
@@ -117,6 +121,14 @@ func Load() Config {
 		}
 	}
 
+	// Load TLS settings
+	tlsCertFile := os.Getenv("ER_TLS_CERT_FILE")
+	tlsKeyFile := os.Getenv("ER_TLS_KEY_FILE")
+	tlsEnabled := false
+	if tlsCertFile != "" && tlsKeyFile != "" {
+		tlsEnabled = true
+	}
+
 	return Config{
 		Port:            port,
 		CheckScope:      checkScope,
@@ -133,5 +145,8 @@ func Load() Config {
 		CORSMethods: corsMethods,
 		CORSHeaders: corsHeaders,
 		CORSMaxAge:  corsMaxAge,
+		TLSEnabled:  tlsEnabled,
+		TLSCertFile: tlsCertFile,
+		TLSKeyFile:  tlsKeyFile,
 	}
 }

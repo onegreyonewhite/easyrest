@@ -39,6 +39,11 @@ func main() {
 	flag.StringVar(&corsHeaders, "cors-headers", "", "Comma-separated list of allowed CORS headers (requires --cors-enabled)")
 	flag.IntVar(&corsMaxAge, "cors-max-age", 86400, "Maximum age for CORS preflight requests in seconds (requires --cors-enabled)")
 
+	// TLS flags
+	var tlsCertFile, tlsKeyFile string
+	flag.StringVar(&tlsCertFile, "tls-cert-file", "", "Path to TLS certificate file")
+	flag.StringVar(&tlsKeyFile, "tls-key-file", "", "Path to TLS key file")
+
 	// Parse flags
 	flag.Parse()
 
@@ -101,6 +106,19 @@ func main() {
 		if corsOrigins != "" || corsMethods != "" || corsHeaders != "" {
 			fmt.Println("Warning: CORS-related flags were ignored because --cors-enabled is not set")
 		}
+	}
+
+	// Update TLS configuration from flags
+	if tlsCertFile != "" {
+		cfg.TLSCertFile = tlsCertFile
+	}
+	if tlsKeyFile != "" {
+		cfg.TLSKeyFile = tlsKeyFile
+	}
+
+	// Automatically enable TLS if both certificate and key are provided
+	if tlsCertFile != "" && tlsKeyFile != "" {
+		cfg.TLSEnabled = true
 	}
 
 	// Run server
