@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/goccy/go-json"
 	"github.com/gorilla/mux"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
@@ -169,10 +168,11 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	queryValues := r.URL.Query()
+
 	switch r.Method {
 	case http.MethodGet:
 		selectParam := r.URL.Query().Get("select")
-		queryValues := r.URL.Query()
 
 		selectFields, groupBy, err := processSelectParam(selectParam, flatCtx, pluginCtx)
 		if err != nil {
@@ -200,14 +200,21 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Error in TableGet: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		respondJSON(w, http.StatusOK, rows)
+		makeResponse(w, r, http.StatusOK, rows)
 
 	case http.MethodPost:
-		var data []map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
-			http.Error(w, "JSON parse error: "+err.Error(), http.StatusBadRequest)
+		parsedData, err := parseRequest(r, true)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+
+		data, ok := parsedData.([]map[string]any)
+		if !ok {
+			http.Error(w, "Invalid data format", http.StatusBadRequest)
+			return
+		}
+
 		for i, row := range data {
 			data[i] = substituteValue(row, flatCtx, pluginCtx).(map[string]any)
 		}
@@ -219,15 +226,22 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Error in TableCreate: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		respondJSON(w, http.StatusCreated, rows)
+		makeResponse(w, r, http.StatusCreated, rows)
 	case http.MethodPatch:
-		var data map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
-			http.Error(w, "JSON parse error: "+err.Error(), http.StatusBadRequest)
+		parsedData, err := parseRequest(r, false)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+
+		data, ok := parsedData.(map[string]any)
+		if !ok {
+			http.Error(w, "Invalid data format", http.StatusBadRequest)
+			return
+		}
+
 		data = substituteValue(data, flatCtx, pluginCtx).(map[string]any)
-		where, err := ParseWhereClause(r.URL.Query(), flatCtx, pluginCtx)
+		where, err := ParseWhereClause(queryValues, flatCtx, pluginCtx)
 		if err != nil {
 			http.Error(w, "Error processing where clause: "+err.Error(), http.StatusBadRequest)
 			return
@@ -240,10 +254,10 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Error in TableUpdate: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		respondJSON(w, http.StatusOK, map[string]int{"updated": updated})
+		makeResponse(w, r, http.StatusOK, map[string]int{"updated": updated})
 
 	case http.MethodDelete:
-		where, err := ParseWhereClause(r.URL.Query(), flatCtx, pluginCtx)
+		where, err := ParseWhereClause(queryValues, flatCtx, pluginCtx)
 		if err != nil {
 			http.Error(w, "Error processing where clause: "+err.Error(), http.StatusBadRequest)
 			return

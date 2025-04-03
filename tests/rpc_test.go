@@ -123,3 +123,86 @@ func TestRPCWithoutClaims(t *testing.T) {
 		t.Errorf("Expected test value to be 'testuser', got '%v'", response["test"])
 	}
 }
+
+func TestRPCWithFormData(t *testing.T) {
+	// Create mock plugin that simply returns input data
+	mockPlugin := &mockDBPlugin{
+		callFunction: func(userID, funcName string, data map[string]any, ctx map[string]any) (any, error) {
+			return data, nil
+		},
+	}
+	server.DbPlugins["mock"] = mockPlugin
+
+	// Setup server
+	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
+	router := server.SetupRouter()
+
+	// Disable scope checking for test
+	config := server.GetConfig()
+	config.CheckScope = false
+	server.SetConfig(config)
+
+	// Generate token
+	claims := jwt.MapClaims{
+		"sub":   "testuser",
+		"exp":   time.Now().Add(time.Hour).Unix(),
+		"scope": "test-write",
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenStr, err := token.SignedString([]byte("mytestsecret"))
+	if err != nil {
+		t.Fatalf("Failed to sign token: %v", err)
+	}
+
+	// Test 1: With token and erctx.claims_sub using form-urlencoded
+	body := strings.NewReader("test=erctx.claims_sub&another=value")
+	req, err := http.NewRequest("POST", "/api/mock/rpc/test/", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tokenStr)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d, response: %s", rr.Code, rr.Body.String())
+	}
+
+	var response map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
+		// Assuming the default response is JSON
+		t.Fatalf("Failed to decode JSON response: %v. Response: %s", err, rr.Body.String())
+	}
+	if response["test"] != "testuser" {
+		t.Errorf("Expected test value to be 'testuser', got '%v'", response["test"])
+	}
+	if response["another"] != "value" {
+		t.Errorf("Expected another value to be 'value', got '%v'", response["another"])
+	}
+
+	// Test 2: With token and request.claims.sub using form-urlencoded
+	body = strings.NewReader("test=request.claims.sub&extra=param")
+	req, err = http.NewRequest("POST", "/api/mock/rpc/test/", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tokenStr)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	rr = httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d, response: %s", rr.Code, rr.Body.String())
+	}
+
+	if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
+		t.Fatalf("Failed to decode JSON response: %v. Response: %s", err, rr.Body.String())
+	}
+	if response["test"] != "testuser" {
+		t.Errorf("Expected test value to be 'testuser', got '%v'", response["test"])
+	}
+	if response["extra"] != "param" {
+		t.Errorf("Expected extra value to be 'param', got '%v'", response["extra"])
+	}
+}

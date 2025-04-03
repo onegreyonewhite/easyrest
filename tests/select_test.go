@@ -279,3 +279,60 @@ func TestContextSubstitution(t *testing.T) {
 		})
 	}
 }
+
+func TestSelectResponseFormats(t *testing.T) {
+	dbPath := setupTestDB(t)
+	defer os.Remove(dbPath)
+
+	// Insert test data.
+	insertUser(t, dbPath, "Alice", "")
+	insertUser(t, dbPath, "Bob", "")
+
+	router := setupServerWithDB(t, dbPath)
+	tokenStr := generateToken(t)
+
+	// Test CSV response using Accept header.
+	reqCSV, err := http.NewRequest("GET", "/api/test/users/?select=id,name", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqCSV.Header.Set("Authorization", "Bearer "+tokenStr)
+	reqCSV.Header.Set("Accept", "text/csv")
+	rrCSV := httptest.NewRecorder()
+	router.ServeHTTP(rrCSV, reqCSV)
+	if rrCSV.Code != http.StatusOK {
+		t.Fatalf("Expected status 200 for CSV, got %d. Response: %s", rrCSV.Code, rrCSV.Body.String())
+	}
+	contentTypeCSV := rrCSV.Result().Header.Get("Content-Type")
+	if !strings.Contains(contentTypeCSV, "text/csv") {
+		t.Errorf("Expected Content-Type to include 'text/csv', got %s", contentTypeCSV)
+	}
+	csvOutput := rrCSV.Body.String()
+	if !strings.Contains(csvOutput, "id") || !strings.Contains(csvOutput, "name") {
+		t.Errorf("CSV output does not contain expected headers. Output: %s", csvOutput)
+	}
+
+	// Test XML response using Accept header.
+	reqXML, err := http.NewRequest("GET", "/api/test/users/?select=id,name", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqXML.Header.Set("Authorization", "Bearer "+tokenStr)
+	reqXML.Header.Set("Accept", "application/xml")
+	rrXML := httptest.NewRecorder()
+	router.ServeHTTP(rrXML, reqXML)
+	if rrXML.Code != http.StatusOK {
+		t.Fatalf("Expected status 200 for XML, got %d. Response: %s", rrXML.Code, rrXML.Body.String())
+	}
+	contentTypeXML := rrXML.Result().Header.Get("Content-Type")
+	if !strings.Contains(contentTypeXML, "application/xml") {
+		t.Errorf("Expected Content-Type to include 'application/xml', got %s", contentTypeXML)
+	}
+	xmlOutput := rrXML.Body.String()
+	if !strings.Contains(xmlOutput, "<?xml") {
+		t.Errorf("Expected XML output to contain the XML declaration. Output: %s", xmlOutput)
+	}
+	if !strings.Contains(xmlOutput, "<items>") && !strings.Contains(xmlOutput, "<item>") {
+		t.Errorf("Expected XML output to contain <items> or <item> tags. Output: %s", xmlOutput)
+	}
+}

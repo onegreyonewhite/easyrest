@@ -3,11 +3,14 @@ package server
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/csv"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
 	stdlog "log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -188,6 +191,277 @@ func respondJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	w.Write(buf.Bytes())
+}
+
+// parseRequest parses the request body according to the Content-Type.
+// The parameter expectArray indicates whether an array of objects (true) or a single object (false) is expected.
+func parseRequest(r *http.Request, expectArray bool) (interface{}, error) {
+	contentType := r.Header.Get("Content-Type")
+	if idx := strings.Index(contentType, ";"); idx != -1 {
+		contentType = contentType[:idx]
+	}
+	contentType = strings.TrimSpace(contentType)
+
+	switch contentType {
+	case "application/json", "":
+		// By default, use JSON.
+		if expectArray {
+			var data []map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+				return nil, fmt.Errorf("JSON parse error: %w", err)
+			}
+			return data, nil
+		} else {
+			var data map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+				return nil, fmt.Errorf("JSON parse error: %w", err)
+			}
+			return data, nil
+		}
+
+	case "text/csv":
+		reader := csv.NewReader(r.Body)
+		records, err := reader.ReadAll()
+		if err != nil {
+			return nil, fmt.Errorf("CSV parse error: %w", err)
+		}
+
+		if len(records) < 1 {
+			return nil, fmt.Errorf("empty CSV data")
+		}
+
+		headers := records[0]
+		result := make([]map[string]any, 0, len(records)-1)
+
+		for i := 1; i < len(records); i++ {
+			row := make(map[string]any)
+			for j, header := range headers {
+				if j < len(records[i]) {
+					row[header] = records[i][j]
+				} else {
+					row[header] = ""
+				}
+			}
+			result = append(result, row)
+		}
+
+		// If only a single object is expected, but CSV typically represents an array.
+		if !expectArray && len(result) > 0 {
+			return result[0], nil
+		}
+		return result, nil
+
+	case "application/x-www-form-urlencoded":
+		if err := r.ParseForm(); err != nil {
+			return nil, fmt.Errorf("form parse error: %w", err)
+		}
+
+		if expectArray {
+			// It is difficult to represent an array of objects for form-urlencoded.
+			// Return an array with a single object if an array is expected.
+			result := make([]map[string]any, 1)
+			data := make(map[string]any)
+			for key, values := range r.Form {
+				if len(values) == 1 {
+					data[key] = values[0]
+				} else {
+					data[key] = values
+				}
+			}
+			result[0] = data
+			return result, nil
+		} else {
+			data := make(map[string]any)
+			for key, values := range r.Form {
+				if len(values) == 1 {
+					data[key] = values[0]
+				} else {
+					data[key] = values
+				}
+			}
+			return data, nil
+		}
+
+	case "application/xml":
+		if expectArray {
+			// XML does not have a standard representation for an array of objects.
+			// Expect something like <items><item>...</item><item>...</item></items>.
+			var result struct {
+				Items []map[string]interface{} `xml:"item"`
+			}
+			if err := xml.NewDecoder(r.Body).Decode(&result); err != nil {
+				return nil, fmt.Errorf("XML parse error: %w", err)
+			}
+			return result.Items, nil
+		} else {
+			// For XML, a root element is required.
+			var wrapper struct {
+				Data map[string]interface{} `xml:",any"`
+			}
+			if err := xml.NewDecoder(r.Body).Decode(&wrapper); err != nil {
+				return nil, fmt.Errorf("XML parse error: %w", err)
+			}
+			return wrapper.Data, nil
+		}
+
+	default:
+		return nil, fmt.Errorf("unsupported Content-Type: %s", contentType)
+	}
+}
+
+// makeResponse transforms the data according to the Accept header and sends the response.
+func makeResponse(w http.ResponseWriter, r *http.Request, status int, v interface{}) {
+	// Determine output format based on the Accept header
+	acceptHeader := r.Header.Get("Accept")
+	contentType := r.Header.Get("Content-Type")
+
+	// If Accept is not set or equals */*, use Content-Type
+	if acceptHeader == "" || acceptHeader == "*/*" {
+		acceptHeader = contentType
+	}
+
+	// If Accept contains multiple types, take the first
+	if idx := strings.Index(acceptHeader, ","); idx != -1 {
+		acceptHeader = acceptHeader[:idx]
+	}
+	// Remove parameters like charset
+	if idx := strings.Index(acceptHeader, ";"); idx != -1 {
+		acceptHeader = acceptHeader[:idx]
+	}
+	acceptHeader = strings.TrimSpace(acceptHeader)
+
+	switch acceptHeader {
+	case "application/json", "":
+		// By default, use JSON.
+		respondJSON(w, status, v)
+		return
+
+	case "text/csv":
+		w.Header().Set("Content-Type", "text/csv")
+		w.WriteHeader(status)
+
+		writer := csv.NewWriter(w)
+
+		// Convert the data into the required format for CSV.
+		var records [][]string
+
+		// Handle the case of an array of objects.
+		if data, ok := v.([]map[string]any); ok && len(data) > 0 {
+			// Collect all headers from all objects.
+			headers := make(map[string]bool)
+			for _, item := range data {
+				for key := range item {
+					headers[key] = true
+				}
+			}
+
+			// Convert the header map into a slice.
+			headerSlice := make([]string, 0, len(headers))
+			for header := range headers {
+				headerSlice = append(headerSlice, header)
+			}
+
+			// Add the header row.
+			records = append(records, headerSlice)
+
+			// Add the data rows.
+			for _, item := range data {
+				row := make([]string, len(headerSlice))
+				for i, header := range headerSlice {
+					if val, ok := item[header]; ok {
+						row[i] = fmt.Sprintf("%v", val)
+					}
+				}
+				records = append(records, row)
+			}
+		} else if data, ok := v.(map[string]any); ok {
+			// Handle the case of a single object.
+			headers := make([]string, 0, len(data))
+			values := make([]string, 0, len(data))
+
+			for key, val := range data {
+				headers = append(headers, key)
+				values = append(values, fmt.Sprintf("%v", val))
+			}
+
+			records = append(records, headers, values)
+		} else {
+			// If the data type is not suitable for CSV.
+			http.Error(w, "Data format not suitable for CSV", http.StatusInternalServerError)
+			return
+		}
+
+		if err := writer.WriteAll(records); err != nil {
+			http.Error(w, "Error writing CSV", http.StatusInternalServerError)
+			return
+		}
+
+		return
+
+	case "application/xml":
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(status)
+
+		encoder := xml.NewEncoder(w)
+		encoder.Indent("", "  ")
+
+		// Wrap the data in a root element.
+		fmt.Fprintf(w, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
+
+		// Handle different types of data.
+		if data, ok := v.([]map[string]any); ok {
+			// For an array of objects.
+			fmt.Fprintf(w, "<items>\n")
+			for _, item := range data {
+				fmt.Fprintf(w, "  <item>\n")
+				for key, val := range item {
+					fmt.Fprintf(w, "    <%s>%v</%s>\n", key, val, key)
+				}
+				fmt.Fprintf(w, "  </item>\n")
+			}
+			fmt.Fprintf(w, "</items>")
+		} else if data, ok := v.(map[string]any); ok {
+			// For a single object.
+			fmt.Fprintf(w, "<item>\n")
+			for key, val := range data {
+				fmt.Fprintf(w, "  <%s>%v</%s>\n", key, val, key)
+			}
+			fmt.Fprintf(w, "</item>")
+		} else {
+			// If the data type is unknown.
+			http.Error(w, "Data format not suitable for XML", http.StatusInternalServerError)
+			return
+		}
+
+		return
+
+	case "application/x-www-form-urlencoded":
+		w.Header().Set("Content-Type", "application/x-www-form-urlencoded")
+		w.WriteHeader(status)
+
+		var values url.Values = make(url.Values)
+
+		if data, ok := v.(map[string]any); ok {
+			for key, val := range data {
+				values.Set(key, fmt.Sprintf("%v", val))
+			}
+		} else if data, ok := v.([]map[string]any); ok && len(data) > 0 {
+			// For an array, take only the first object.
+			for key, val := range data[0] {
+				values.Set(key, fmt.Sprintf("%v", val))
+			}
+		} else {
+			http.Error(w, "Data format not suitable for form-urlencoded", http.StatusInternalServerError)
+			return
+		}
+
+		w.Write([]byte(values.Encode()))
+		return
+
+	default:
+		// If the format is not supported, use JSON.
+		respondJSON(w, status, v)
+	}
 }
 
 // DecodeTokenWithoutValidation decodes a JWT token without validating its signature.

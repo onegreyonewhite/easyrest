@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/goccy/go-json"
 	"github.com/gorilla/mux"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
@@ -81,9 +80,17 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var data map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
-		http.Error(w, "JSON parse error: "+err.Error(), http.StatusBadRequest)
+	// Using parseRequest to handle different formats of incoming data
+	parsedData, err := parseRequest(r, false) // ожидаем один объект
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Casting to the expected type
+	data, ok := parsedData.(map[string]any)
+	if !ok {
+		http.Error(w, "Invalid data format", http.StatusBadRequest)
 		return
 	}
 
@@ -99,5 +106,5 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Error in CallFunction: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	respondJSON(w, http.StatusOK, result)
+	makeResponse(w, r, http.StatusOK, result)
 }
