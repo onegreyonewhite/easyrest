@@ -274,6 +274,7 @@ func TestRPCHandler(t *testing.T) {
 	os.Setenv("ER_DB_TEST", "sqlite://:memory:")
 	defer os.Unsetenv("ER_DB_TEST")
 
+	server.ReloadConfig()
 	router := server.SetupRouter()
 	tokenStr := generateTestToken(t, "mytestsecret", "funcA-write")
 

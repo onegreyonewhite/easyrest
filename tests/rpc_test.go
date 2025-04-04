@@ -45,16 +45,17 @@ func TestRPCWithoutClaims(t *testing.T) {
 			return data, nil
 		},
 	}
-	server.DbPlugins["mock"] = mockPlugin
 
 	// Setup server
 	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
+	server.ReloadConfig()
 	router := server.SetupRouter()
 
 	// Disable scope checking for test
 	config := server.GetConfig()
 	config.CheckScope = false
 	server.SetConfig(config)
+	server.DbPlugins["mock"] = mockPlugin
 
 	// Test 1: Without token
 	body := strings.NewReader(`{"test": "value"}`)
@@ -131,11 +132,13 @@ func TestRPCWithFormData(t *testing.T) {
 			return data, nil
 		},
 	}
-	server.DbPlugins["mock"] = mockPlugin
 
 	// Setup server
 	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
+	server.ReloadConfig()
 	router := server.SetupRouter()
+
+	server.DbPlugins["mock"] = mockPlugin
 
 	// Disable scope checking for test
 	config := server.GetConfig()

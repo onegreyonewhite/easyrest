@@ -173,7 +173,7 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		selectParam := r.URL.Query().Get("select")
+		selectParam := queryValues.Get("select")
 
 		selectFields, groupBy, err := processSelectParam(selectParam, flatCtx, pluginCtx)
 		if err != nil {

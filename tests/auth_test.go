@@ -132,6 +132,7 @@ func TestEmptyTokenSecretWithoutToken(t *testing.T) {
 	defer os.Remove(dbPath)
 
 	// Setup server
+	server.ReloadConfig()
 	router := server.SetupRouter()
 
 	// Test 1: POST request to table without token
@@ -463,6 +464,11 @@ func TestTokenURLWithScopeCheck(t *testing.T) {
 
 	os.Setenv("ER_TOKEN_URL", mockServer.URL)
 	server.SetConfig(server.GetConfig())
+	server.DbPlugins["mock"] = &mockDBPlugin{
+		callFunction: func(userID, funcName string, data map[string]any, ctx map[string]any) (any, error) {
+			return data, nil
+		},
+	}
 
 	body = strings.NewReader(`{"test": "value"}`)
 	req, err = http.NewRequest("POST", "/api/mock/rpc/test/", body)

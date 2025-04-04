@@ -1,0 +1,26 @@
+port: 8080
+token_user_search: sub
+token_url: https://auth.example.com/token
+auth_flow: password
+check_scope: true
+cors:
+  enabled: true
+  allow_origin:
+    - "*"
+  methods:
+    - "GET"
+    - "POST"
+    - "PUT"
+    - "DELETE"
+    - "OPTIONS"
+  headers:
+    - "Accept"
+    - "Content-Type"
+    - "Authorization"
+    - "X-Requested-With"
+  max_age: 86400
+plugin_configs:
+  - ./test.yaml
+plugins:
+  test:
+    uri: sqlite://./test.db

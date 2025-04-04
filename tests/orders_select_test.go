@@ -95,6 +95,7 @@ func TestOrdersSelectSum(t *testing.T) {
 
 	tokenStr := generateTestToken(t, secret, "read")
 
+	server.ReloadConfig()
 	router := server.SetupRouter()
 	// Perform the GET request.
 	req, err := http.NewRequest("GET", "/api/test/orders/?select=amount.sum()", nil)
@@ -150,6 +151,7 @@ func TestOrdersSelectGroupBy(t *testing.T) {
 
 	tokenStr := generateTestToken(t, secret, "read")
 
+	server.ReloadConfig()
 	router := server.SetupRouter()
 	// Perform the GET request.
 	req, err := http.NewRequest("GET", "/api/test/orders/?select=total:amount.sum(),amount.avg(),order_date", nil)
@@ -222,6 +224,7 @@ func TestOrdersSelectCount(t *testing.T) {
 
 	tokenStr := generateTestToken(t, secret, "read")
 
+	server.ReloadConfig()
 	router := server.SetupRouter()
 	// First query: without where clause.
 	req, err := http.NewRequest("GET", "/api/test/orders/?select=count()", nil)

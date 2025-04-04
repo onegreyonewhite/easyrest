@@ -35,7 +35,7 @@ EasyREST's design emphasizes simplicity, extensibility, and security. It follows
 
 - **Authentication & Authorization:** Validates JWT tokens and verifies scopes.
 - **Parameter Validation:** Ensures that all parameters (select, where, ordering, etc.) are safe before forwarding to the plugins.
-- **Plugin Orchestration:** Loads and manages DB plugins based on environment configuration.  
+- **Plugin Orchestration:** Loads and manages DB plugins based on YAML configuration.
 - **Context Propagation:** Extracts contextual information (e.g., timezone, HTTP headers, JWT claims) from each request and passes them to plugins.
 
 ### Overall Architecture Diagram
@@ -63,7 +63,7 @@ flowchart TD
 
 ### Plugin Communication
 
-- **RPC Communication:** EasyREST uses Hashicorp's [go-plugin](https://github.com/hashicorp/go-plugin) system to load and communicate with plugins. The server launches plugin processes based on environment variables (e.g. `ER_DB_TEST`) and establishes an RPC connection.
+- **RPC Communication:** EasyREST uses Hashicorp's [go-plugin](https://github.com/hashicorp/go-plugin) system to load and communicate with plugins. The server launches plugin processes based on the `plugins` section in the YAML configuration file and establishes an RPC connection.
 - **Data Exchange:** The server sends validated and sanitized SQL expressions and additional context data to the plugin. Context variables are directly substituted into the query.
 - **Type Registration:** For secure and reliable encoding/decoding over RPC, custom types (e.g., `time.Time` and flattened JWT claims) are registered with the gob package.
 
@@ -188,32 +188,83 @@ Prefer: timezone=UTC param1=value1 param2=value2
 
 ## Configuration Parameters
 
-EasyREST is configured via environment variables. The primary configuration parameters include:
+EasyREST is configured primarily using a YAML file or environment variables. You can specify a different path using the `-config` command-line flag:
 
-- **ER_PORT:**  
-  The port on which the server listens (default: `8080`).
+```bash
+./easyrest-server -config /path/to/your/custom-config.yaml
+```
 
-- **ER_CHECK_SCOPE:**  
-  Enables or disables scope checking. When set to `"1"`, the server verifies that the JWT token has the proper scopes (e.g., `users-read` for GET and `users-write` for modifications). If unset or any other value, scope checking is disabled (default: enabled).
+Alternatively, the path can be set using the `ER_CONFIG_FILE` environment variable. Environment variables (`ER_*`) can also be used to override specific settings, but the YAML file is the recommended approach.
 
-- **ER_TOKEN_SECRET:**  
-  The secret used to sign/verify JWT tokens.
+**YAML Configuration Structure:**
 
-- **ER_TOKEN_USER_SEARCH:**  
-  The claim key used to extract the user ID from the JWT token (default: `"sub"`).
+```yaml
+# Server settings
+port: 8080 # Default: 8080
+default_timezone: "GMT" # Default: "GMT" or system timezone
+access_log: false # Enable access logging (default: false)
 
-- **ER_NO_PLUGIN_LOG:**  
-  Controls plugin logging. When set to `"1"`, plugin logging is enabled; otherwise, it is disabled.
+# Authentication & Authorization
+check_scope: true # Enable JWT scope checking (default: true)
+token_secret: "your-jwt-secret" # REQUIRED: Secret for JWT verification
+token_user_search: "sub" # JWT claim for user ID (default: "sub")
+token_url: "" # Optional: URL for external token validation/retrieval
+auth_flow: "password" # Optional: OAuth flow type (default: "password")
 
-- **ER_DEFAULT_TIMEZONE:**  
-  The default timezone to use if none is provided via the `Prefer` header (e.g., `"GMT"` or `"America/New_York"`).
+# CORS settings (optional)
+cors:
+  enabled: true # Enable CORS headers (default: false)
+  origins: ["*"] # List of allowed origins
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"] # Allowed HTTP methods
+  headers: ["Content-Type", "Authorization", "X-Requested-With"] # Allowed headers
+  max_age: 86400 # Cache duration for preflight requests
 
-- **ER_DB_<NAME>:**  
-  For each database connection, you set an environment variable in the form `ER_DB_TEST`, `ER_DB_PROD`, etc. The value should be in the format:  
-  ```
-  sqlite://path/to/database.db
-  ```
-  or for other plugins, a URI scheme that the plugin understands.
+# TLS settings (optional)
+tls_enabled: false
+tls_cert_file: "/path/to/cert.pem"
+tls_key_file: "/path/to/key.pem"
+
+# Plugin settings
+plugin_log: true # Enable logging from plugins (default: false). Set to false to disable.
+
+# --- Plugin Definitions ---
+
+# Option 1: Include external YAML files containing plugin definitions
+plugin_configs:
+  - ./plugins/database1.yaml
+  - /etc/easyrest/shared_plugins.yaml
+
+# Option 2: Define plugins directly in the main config file
+plugins:
+  # The key ('test', 'orders') becomes the API path segment (/api/test/, /api/orders/)
+  test:
+    # URI format: <plugin_type>://<connection_details>
+    # The plugin_type (e.g., 'sqlite') determines the executable name (easyrest-plugin-sqlite)
+    uri: "sqlite://./test.db"
+  orders:
+    uri: "sqlite:///data/orders.db"
+  # Example for a postgres plugin:
+  # postgres_db:
+  #   uri: "postgres://user:password@host:port/database?sslmode=disable"
+
+# --- Example External Plugin File (e.g., ./plugins/database1.yaml) ---
+# - name: test # Must match the key used in the API path
+#   uri: "sqlite://./test.db"
+#   path: "/usr/local/bin/easyrest-plugin-sqlite" # Optional: Explicit path to plugin binary
+```
+
+**Key Configuration Sections:**
+
+- **Server Settings**: Basic server parameters like `port`, `default_timezone`.
+- **Authentication & Authorization**: JWT settings (`token_secret` is mandatory), scope checking.
+- **CORS**: Cross-Origin Resource Sharing settings.
+- **TLS**: Enable HTTPS by providing certificate and key files.
+- **Plugin Settings**:
+    - `plugin_log`: Controls whether plugin logs are captured by the server.
+    - `plugin_configs`: A list of paths to external YAML files. Each file can define one or more plugins using the structure shown in the example (with `name`, `uri`, and optional `path`).
+    - `plugins`: A map for defining plugins directly. The map key (e.g., `test`) is used as the database identifier in API requests (`/api/test/`). The value must contain a `uri` field.
+    - **Plugin URI**: The `uri` specifies both the plugin type (which maps to the executable name, e.g., `sqlite` -> `easyrest-plugin-sqlite`) and the connection details (DSN) for that plugin.
+- The server merges plugin definitions from `plugin_configs` files and the inline `plugins` map. Definitions in the inline map take precedence if names conflict.
 
 ---
 
@@ -233,13 +284,18 @@ Imagine you have two SQLite databases:
    - **Table:** `orders`  
      Structure: `id` (auto-increment), `items` (integer), `order_date` (date), `amount` (real)
 
-Set environment variables:
-```bash
-export ER_DB_TEST="sqlite://./test.db"
-export ER_DB_ORDERS="sqlite://./orders.db"
-export ER_TOKEN_SECRET="your-secret"
-export ER_TOKEN_USER_SEARCH="sub"
-export ER_DEFAULT_TIMEZONE="GMT"
+Create a `config.yaml` file (or specify a different one with `-config`):
+
+```yaml
+port: 8080
+token_secret: "your-secret"
+token_user_search: "sub"
+default_timezone: "America/Los_Angeles"
+plugins:
+  test:
+    uri: "sqlite://./test.db"
+  orders:
+    uri: "sqlite://./orders.db"
 ```
 
 **Query Examples:**

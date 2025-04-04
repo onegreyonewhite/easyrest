@@ -60,6 +60,7 @@ func TestContextInQuery(t *testing.T) {
 		t.Fatalf("Failed to sign token: %v", err)
 	}
 
+	server.ReloadConfig()
 	router := server.SetupRouter()
 	// In the query, we use where.eq.name=erctx_claims_sub. The context CTE will include a column
 	// named "claims_sub" (flattened from CLAIMS.sub) if the claims map is passed.

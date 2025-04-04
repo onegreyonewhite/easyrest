@@ -70,6 +70,7 @@ func setupServerWithDB(t *testing.T, dbPath string) *mux.Router {
 	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
 	cfg := config.Load()
 	server.SetConfig(cfg)
+	server.ReloadConfig()
 	return server.SetupRouter()
 }
 

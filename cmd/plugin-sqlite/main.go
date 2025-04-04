@@ -428,6 +428,6 @@ func main() {
 		Plugins: map[string]hplugin.Plugin{
 			"db": &easyrest.DBPluginPlugin{Impl: impl},
 		},
-		GRPCServer: hplugin.DefaultGRPCServer,
+		Test: nil,
 	})
 }

@@ -1,19 +1,27 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
+	"os"
 	"strings"
 
-	"github.com/onegreyonewhite/easyrest/internal/config"
 	"github.com/onegreyonewhite/easyrest/internal/server"
 	"github.com/onegreyonewhite/easyrest/plugin"
 )
 
-func main() {
-	// Load base configuration from environment variables
-	cfg := config.Load()
+type pluginsFlag []string
 
+func (p *pluginsFlag) String() string {
+	return strings.Join(*p, ",")
+}
+func (p *pluginsFlag) Set(value string) error {
+	*p = append(*p, value)
+	return nil
+}
+
+func main() {
 	// Define command line flags
 	showVersion := flag.Bool("version", false, "Show version and exit")
 	port := flag.String("port", "", "Server port")
@@ -25,6 +33,9 @@ func main() {
 	defaultTimezone := flag.String("timezone", "", "Default timezone")
 	tokenURL := flag.String("token-url", "", "Token validation URL")
 	authFlow := flag.String("auth-flow", "", "Authentication flow type")
+
+	// Define configuration flags
+	configFile := flag.String("config", "", "Path to configuration file")
 
 	// CORS flags
 	corsEnabled := flag.Bool("cors-enabled", false, "Enable CORS support")
@@ -44,6 +55,10 @@ func main() {
 	flag.StringVar(&tlsCertFile, "tls-cert-file", "", "Path to TLS certificate file")
 	flag.StringVar(&tlsKeyFile, "tls-key-file", "", "Path to TLS key file")
 
+	// Plugin configuration flags
+	var plugins pluginsFlag
+	flag.Var(&plugins, "plugin", "Config for plugins to load (can be specified multiple times)")
+
 	// Parse flags
 	flag.Parse()
 
@@ -52,6 +67,24 @@ func main() {
 		fmt.Println(plugin.Version)
 		return
 	}
+
+	// Load plugins
+	if len(plugins) > 0 {
+		os.Setenv("ER_PLUGINS", strings.Join(plugins, ","))
+	}
+
+	if *configFile != "" {
+		fstat, err := os.Stat(*configFile)
+		if err != nil && errors.Is(err, os.ErrNotExist) {
+			fmt.Println("Config file does not exist:", *configFile)
+		}
+		if !fstat.IsDir() {
+			os.Setenv("ER_CONFIG_FILE", *configFile)
+		}
+	}
+
+	// Load base configuration from environment variables
+	cfg := server.GetConfig()
 
 	// Update configuration with values from flags if they are set
 	if *port != "" {
@@ -84,22 +117,22 @@ func main() {
 
 	// Update CORS configuration from flags
 	if flag.Lookup("cors-enabled").Value.String() != "" {
-		cfg.CORSEnabled = *corsEnabled
+		cfg.CORS.Enabled = *corsEnabled
 	}
 
 	// Only process other CORS flags if CORS is enabled
-	if cfg.CORSEnabled {
+	if cfg.CORS.Enabled {
 		if corsOrigins != "" {
-			cfg.CORSOrigins = strings.Split(corsOrigins, ",")
+			cfg.CORS.Origins = strings.Split(corsOrigins, ",")
 		}
 		if corsMethods != "" {
-			cfg.CORSMethods = strings.Split(corsMethods, ",")
+			cfg.CORS.Methods = strings.Split(corsMethods, ",")
 		}
 		if corsHeaders != "" {
-			cfg.CORSHeaders = strings.Split(corsHeaders, ",")
+			cfg.CORS.Headers = strings.Split(corsHeaders, ",")
 		}
 		if flag.Lookup("cors-max-age").Value.String() != "" {
-			cfg.CORSMaxAge = corsMaxAge
+			cfg.CORS.MaxAge = corsMaxAge
 		}
 	} else {
 		// If CORS is disabled, show warning if other CORS flags were used

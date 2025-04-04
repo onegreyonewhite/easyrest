@@ -1,31 +1,99 @@
 package config
 
 import (
+	"bytes" // Required for yaml.Decoder
+	"io"    // Required for yaml.Decoder EOF check
+	"log"
 	"os"
 	"strconv"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
+type PluginConfig struct {
+	Name string `yaml:"name"`
+	Uri  string `yaml:"uri"`
+	Path string `yaml:"path"`
+}
+
+type CORSConfig struct {
+	Enabled bool     `yaml:"enabled"`
+	Origins []string `yaml:"origins"`
+	Methods []string `yaml:"methods"`
+	Headers []string `yaml:"headers"`
+	MaxAge  int      `yaml:"max_age"`
+}
+
 type Config struct {
-	Port            string
-	CheckScope      bool
-	TokenSecret     string
-	TokenUserSearch string
-	NoPluginLog     bool
-	AccessLogOn     bool
-	DefaultTimezone string
-	TokenURL        string
-	AuthFlow        string
+	Port            string `yaml:"port"`
+	CheckScope      bool   `yaml:"check_scope"`
+	TokenSecret     string `yaml:"token_secret"`
+	TokenUserSearch string `yaml:"token_user_search"`
+	NoPluginLog     bool   `yaml:"plugin_log"`
+	AccessLogOn     bool   `yaml:"access_log"`
+	DefaultTimezone string `yaml:"default_timezone"`
+	TokenURL        string `yaml:"token_url"`
+	AuthFlow        string `yaml:"auth_flow"`
 	// CORS settings
-	CORSEnabled bool
-	CORSOrigins []string
-	CORSMethods []string
-	CORSHeaders []string
-	CORSMaxAge  int
+	CORS CORSConfig `yaml:"cors"`
+
 	// TLS settings
-	TLSEnabled  bool
-	TLSCertFile string
-	TLSKeyFile  string
+	TLSEnabled  bool   `yaml:"tls_enabled"`
+	TLSCertFile string `yaml:"tls_cert_file"`
+	TLSKeyFile  string `yaml:"tls_key_file"`
+	// Plugin settings
+	Plugins   []string                `yaml:"plugin_configs"`
+	PluginMap map[string]PluginConfig `yaml:"plugins"`
+}
+
+func LoadPluginConfigs(configs []string) map[string]PluginConfig {
+	plugins := make(map[string]PluginConfig)
+	for _, env := range os.Environ() {
+		if strings.HasPrefix(env, "ER_DB_") {
+			parts := strings.SplitN(env, "=", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			envName := parts[0]
+			connName := strings.ToLower(strings.TrimPrefix(envName, "ER_DB_"))
+			plugins[connName] = PluginConfig{
+				Name: connName,
+				Uri:  parts[1],
+			}
+		}
+	}
+	for _, path := range configs {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			log.Printf("ERROR: can't read file %s: %v", path, err)
+			continue // Skip to the next file on read error
+		}
+
+		decoder := yaml.NewDecoder(bytes.NewReader(data))
+		for {
+			var cfg PluginConfig
+			// Decode one YAML document.
+			if err := decoder.Decode(&cfg); err != nil {
+				// Check if we reached the end of the file stream.
+				if err == io.EOF {
+					break // End of YAML stream for this file
+				}
+				// Log other decoding errors.
+				log.Printf("ERROR: can't parse document in file %s: %v", path, err)
+				// Stop processing this file on the first parse error to avoid potential issues.
+				break
+			}
+			// Ensure plugin name is not empty before adding to the map.
+			if cfg.Name == "" {
+				log.Printf("WARN: skipping plugin config in file %s with empty name", path)
+				continue // Skip this document and proceed to the next
+			}
+			// Add the successfully parsed config to the map.
+			plugins[cfg.Name] = cfg
+		}
+	}
+	return plugins
 }
 
 func Load() Config {
@@ -129,7 +197,13 @@ func Load() Config {
 		tlsEnabled = true
 	}
 
-	return Config{
+	pluginsList := []string{}
+	if plugins := os.Getenv("ER_PLUGINS"); plugins != "" {
+		// Split the plugins by comma and trim whitespace
+		pluginsList = strings.Split(plugins, ",")
+	}
+
+	cfg := Config{
 		Port:            port,
 		CheckScope:      checkScope,
 		TokenSecret:     tokenSecret,
@@ -140,13 +214,48 @@ func Load() Config {
 		TokenURL:        tokenURL,
 		AuthFlow:        authFlow,
 		// CORS settings
-		CORSEnabled: corsEnabled,
-		CORSOrigins: corsOrigins,
-		CORSMethods: corsMethods,
-		CORSHeaders: corsHeaders,
-		CORSMaxAge:  corsMaxAge,
+		CORS: CORSConfig{
+			Enabled: corsEnabled,
+			Origins: corsOrigins,
+			Methods: corsMethods,
+			Headers: corsHeaders,
+			MaxAge:  corsMaxAge,
+		},
+		// TLS settings
 		TLSEnabled:  tlsEnabled,
 		TLSCertFile: tlsCertFile,
 		TLSKeyFile:  tlsKeyFile,
+		// Plugin settings
+		Plugins:   pluginsList,
+		PluginMap: make(map[string]PluginConfig),
 	}
+
+	// Load config from environment variable
+	configFile := os.Getenv("ER_CONFIG_FILE")
+	if configFile != "" {
+		data, err := os.ReadFile(configFile)
+		if err == nil {
+			log.Printf("Loading config from %s\n", configFile)
+			yaml.Unmarshal(data, &cfg)
+		}
+	}
+	for name, plcfg := range LoadPluginConfigs(cfg.Plugins) {
+		if _, exists := cfg.PluginMap[name]; !exists {
+			cfg.PluginMap[name] = plcfg
+		}
+	}
+	log.Printf("Loaded %d plugins\n", len(cfg.PluginMap))
+	if cfg.CORS.Enabled {
+		log.Printf(
+			"CORS enabled with settings:\nOrigins = %v\nMethods = %v\nHeaders = %v\nMax_age = %d\n",
+			strings.Join(cfg.CORS.Origins, ","),
+			strings.Join(cfg.CORS.Methods, ","),
+			strings.Join(cfg.CORS.Headers, ","),
+			cfg.CORS.MaxAge,
+		)
+	}
+	if cfg.TLSEnabled {
+		log.Printf("TLS enabled with cert %s and key %s\n", cfg.TLSCertFile, cfg.TLSKeyFile)
+	}
+	return cfg
 }

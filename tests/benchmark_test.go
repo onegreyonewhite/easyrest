@@ -69,6 +69,7 @@ func BenchmarkTableGet(b *testing.B) {
 	}
 
 	// Initialize the server router
+	server.ReloadConfig()
 	router := server.SetupRouter()
 
 	b.ResetTimer()
@@ -132,6 +133,7 @@ func BenchmarkTableCreate(b *testing.B) {
 	}
 
 	// Initialize the server router
+	server.ReloadConfig()
 	router := server.SetupRouter()
 
 	// JSON body for inserting a record
@@ -209,6 +211,7 @@ func BenchmarkTableUpdate(b *testing.B) {
 	}
 
 	// Initialize the server router
+	server.ReloadConfig()
 	router := server.SetupRouter()
 
 	b.ResetTimer()

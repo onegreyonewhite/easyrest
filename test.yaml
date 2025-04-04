@@ -1,0 +1,3 @@
+---
+name: test2
+uri: sqlite://./test.db

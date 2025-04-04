@@ -79,6 +79,10 @@ func SetConfig(newConfig config.Config) {
 	cfg = newConfig
 }
 
+func ReloadConfig() {
+	cfg = config.Load()
+}
+
 // IsAllowedFunction checks if the provided function name is allowed.
 func IsAllowedFunction(item string) bool {
 	for _, v := range allowedFuncs {
@@ -589,70 +593,78 @@ func findPluginPath(pluginExec string) (string, error) {
 // LoadDBPlugins loads all configured database plugins.
 func LoadDBPlugins() {
 	cfg := GetConfig()
-	for _, env := range os.Environ() {
-		if strings.HasPrefix(env, "ER_DB_") {
-			parts := strings.SplitN(env, "=", 2)
-			if len(parts) != 2 {
-				continue
+	DbPlugins = make(map[string]easyrest.DBPlugin)
+	for connName, pluginCfg := range cfg.PluginMap {
+		splitURI := strings.SplitN(pluginCfg.Uri, "://", 2)
+		if len(splitURI) != 2 {
+			stdlog.Printf("Invalid URI for %s: %s", connName, pluginCfg.Uri)
+			continue
+		}
+		pluginType := splitURI[0]
+		pluginExec := "easyrest-plugin-" + pluginType
+		var pluginPath string
+		if pluginCfg.Path != "" {
+			pluginPath = pluginCfg.Path
+			stdlog.Printf("Plugin path from config: %s\n", pluginPath)
+			if strings.HasPrefix(pluginPath, "~/") {
+				homeDir, err := os.UserHomeDir()
+				if err != nil {
+					stdlog.Printf("Error getting home directory: %v", err)
+					continue
+				}
+				pluginPath = filepath.Join(homeDir, pluginPath[2:])
 			}
-			envName := parts[0]
-			uri := parts[1]
-			connName := strings.ToLower(strings.TrimPrefix(envName, "ER_DB_"))
-			splitURI := strings.SplitN(uri, "://", 2)
-			if len(splitURI) != 2 {
-				stdlog.Printf("Invalid URI for %s: %s", connName, uri)
-				continue
-			}
-			pluginType := splitURI[0]
-			pluginExec := "easyrest-plugin-" + pluginType
-			pluginPath, err := findPluginPath(pluginExec)
+		} else {
+			pluginFindedPath, err := findPluginPath(pluginExec)
+
 			if err != nil {
 				stdlog.Printf("Plugin %s not found: %v", pluginExec, err)
 				continue
+			} else {
+				pluginPath = pluginFindedPath
 			}
-
-			absPluginPath, err := filepath.Abs(pluginPath)
-			if err != nil {
-				stdlog.Printf("Error getting absolute path for plugin %s: %v", pluginExec, err)
-				continue
-			}
-
-			pluginConfig := hplugin.ClientConfig{
-				HandshakeConfig: easyrest.Handshake,
-				Plugins: map[string]hplugin.Plugin{
-					"db": &easyrest.DBPluginPlugin{},
-				},
-				Cmd:              exec.Command(absPluginPath),
-				AllowedProtocols: []hplugin.Protocol{hplugin.ProtocolNetRPC},
-			}
-			if cfg.NoPluginLog {
-				pluginConfig.Logger = hclog.New(&hclog.LoggerOptions{
-					Output: io.Discard,
-				})
-			}
-			client := hplugin.NewClient(&pluginConfig)
-			rpcClient, err := client.Client()
-			if err != nil {
-				stdlog.Printf("Error creating RPC client for plugin %s: %v", connName, err)
-				continue
-			}
-			raw, err := rpcClient.Dispense("db")
-			if err != nil {
-				stdlog.Printf("Error dispensing plugin %s: %v", connName, err)
-				continue
-			}
-			dbPlug, ok := raw.(easyrest.DBPlugin)
-			if !ok {
-				stdlog.Printf("Error: plugin %s does not implement DBPlugin interface", connName)
-				continue
-			}
-			err = dbPlug.InitConnection(uri)
-			if err != nil {
-				stdlog.Printf("Error initializing connection for plugin %s: %v", connName, err)
-				continue
-			}
-			DbPlugins[connName] = dbPlug
-			stdlog.Printf("Connection %s initialized using plugin %s", connName, pluginExec)
 		}
+
+		absPluginPath, err := filepath.Abs(pluginPath)
+		if err != nil {
+			stdlog.Printf("Error getting absolute path for plugin %s: %v", pluginExec, err)
+			continue
+		}
+		pluginConfig := hplugin.ClientConfig{
+			HandshakeConfig: easyrest.Handshake,
+			Plugins: map[string]hplugin.Plugin{
+				"db": &easyrest.DBPluginPlugin{},
+			},
+			Cmd:              exec.Command(absPluginPath),
+			AllowedProtocols: []hplugin.Protocol{hplugin.ProtocolNetRPC},
+		}
+		if cfg.NoPluginLog {
+			pluginConfig.Logger = hclog.New(&hclog.LoggerOptions{
+				Output: io.Discard,
+			})
+		}
+		client := hplugin.NewClient(&pluginConfig)
+		rpcClient, err := client.Client()
+		if err != nil {
+			stdlog.Printf("Error creating RPC client for plugin %s: %v", connName, err)
+			continue
+		}
+		raw, err := rpcClient.Dispense("db")
+		if err != nil {
+			stdlog.Printf("Error dispensing plugin %s: %v", connName, err)
+			continue
+		}
+		dbPlug, ok := raw.(easyrest.DBPlugin)
+		if !ok {
+			stdlog.Printf("Error: plugin %s does not implement DBPlugin interface", connName)
+			continue
+		}
+		err = dbPlug.InitConnection(pluginCfg.Uri)
+		if err != nil {
+			stdlog.Printf("Error initializing connection for plugin %s: %v", connName, err)
+			continue
+		}
+		DbPlugins[connName] = dbPlug
+		stdlog.Printf("Connection %s initialized using plugin %s", connName, pluginExec)
 	}
 }

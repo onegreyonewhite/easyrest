@@ -203,11 +203,6 @@ func proxyHeadersHandler(next http.Handler) http.Handler {
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg := GetConfig()
-		if !cfg.CORSEnabled {
-			next.ServeHTTP(w, r)
-			return
-		}
-
 		origin := r.Header.Get("Origin")
 		if origin == "" {
 			next.ServeHTTP(w, r)
@@ -216,7 +211,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 
 		// Check if origin is allowed
 		allowed := false
-		for _, allowedOrigin := range cfg.CORSOrigins {
+		for _, allowedOrigin := range cfg.CORS.Origins {
 			if allowedOrigin == "*" || allowedOrigin == origin {
 				allowed = true
 				break
@@ -225,9 +220,9 @@ func corsMiddleware(next http.Handler) http.Handler {
 
 		if allowed {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Methods", strings.Join(cfg.CORSMethods, ", "))
-			w.Header().Set("Access-Control-Allow-Headers", strings.Join(cfg.CORSHeaders, ", "))
-			w.Header().Set("Access-Control-Max-Age", strconv.Itoa(cfg.CORSMaxAge))
+			w.Header().Set("Access-Control-Allow-Methods", strings.Join(cfg.CORS.Methods, ", "))
+			w.Header().Set("Access-Control-Allow-Headers", strings.Join(cfg.CORS.Headers, ", "))
+			w.Header().Set("Access-Control-Max-Age", strconv.Itoa(cfg.CORS.MaxAge))
 		}
 
 		// Handle preflight requests
@@ -247,7 +242,7 @@ func SetupRouter() *mux.Router {
 
 	// Add CORS middleware first
 	cfg := GetConfig()
-	if cfg.CORSEnabled {
+	if cfg.CORS.Enabled {
 		r.Use(corsMiddleware)
 	}
 
@@ -264,16 +259,16 @@ func SetupRouter() *mux.Router {
 }
 
 // Run starts the HTTP server.
-func Run(config config.Config) {
-	SetConfig(config)
+func Run(conf config.Config) {
+	SetConfig(conf)
 	router := SetupRouter()
-	if config.AccessLogOn {
+	if conf.AccessLogOn {
 		router.Use(AccessLogMiddleware)
 	}
 
 	// Create server with optimized settings
 	srv := &http.Server{
-		Addr:              ":" + config.Port,
+		Addr:              ":" + conf.Port,
 		Handler:           router,
 		ReadTimeout:       5 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -304,27 +299,35 @@ func Run(config config.Config) {
 
 	// Run server in a goroutine
 	go func() {
-		if config.TLSEnabled {
-			stdlog.Printf("TLS server listening on port %s...", config.Port)
-			if err := srv.ListenAndServeTLS(config.TLSCertFile, config.TLSKeyFile); err != nil && err != http.ErrServerClosed {
+		if conf.TLSEnabled {
+			stdlog.Printf("TLS server listening on port %s...", conf.Port)
+			if err := srv.ListenAndServeTLS(conf.TLSCertFile, conf.TLSKeyFile); err != nil && err != http.ErrServerClosed {
 				stdlog.Fatalf("Server error: %v", err)
 			}
 		} else {
-			stdlog.Printf("Server listening on port %s...", config.Port)
+			stdlog.Printf("Server listening on port %s...", conf.Port)
 			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				stdlog.Fatalf("Server error: %v", err)
 			}
 		}
 	}()
 
-	// Wait for signal for graceful shutdown
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
-	// Perform graceful shutdown
-	if err := srv.Shutdown(ctx); err != nil {
-		stdlog.Printf("Server forced to shutdown: %v", err)
+	for {
+		sig := <-sigChan
+		if sig == syscall.SIGHUP {
+			stdlog.Println("Received SIGHUP - reloading configuration")
+			ReloadConfig()
+			LoadDBPlugins()
+		} else {
+			stdlog.Printf("Received signal %v - shutting down the server", sig)
+			if err := srv.Shutdown(ctx); err != nil {
+				stdlog.Printf("Forced server shutdown due to error: %v", err)
+			}
+			break
+		}
 	}
 
 	stdlog.Println("Server exiting")

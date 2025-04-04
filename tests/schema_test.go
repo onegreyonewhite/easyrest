@@ -126,6 +126,7 @@ func TestSwaggerSchema(t *testing.T) {
 	os.Setenv("ER_NO_PLUGIN_LOG", "1")
 
 	// Use SetupRouter to obtain the router.
+	server.ReloadConfig()
 	router := server.SetupRouter()
 
 	// Create a request to /api/test/
@@ -258,7 +259,12 @@ func TestSwaggerSchemaWithRPC(t *testing.T) {
 		t.Fatalf("Failed to create request: %v", err)
 	}
 	rr := httptest.NewRecorder()
+	server.ReloadConfig()
+	server.LoadDBPlugins()
+
 	router := server.SetupRouter()
+
+	server.DbPlugins["mock"] = &fakeDBPluginWithRPC{}
 	router.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("Expected status 200, got %d, body: %s", rr.Code, rr.Body.String())
