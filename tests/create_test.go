@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/onegreyonewhite/easyrest/internal/server"
 )
 
 // TestCreateWithContextValues creates records using context values
@@ -16,7 +17,7 @@ func TestCreateWithContextValues(t *testing.T) {
 	// Create test database
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
-
+	defer server.StopDBPlugins()
 	// Setup server with database
 	router := setupServerWithDB(t, dbPath)
 
@@ -98,6 +99,7 @@ func TestCreateWithInvalidJSON(t *testing.T) {
 	// Create test database
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
 
 	// Setup server with database
 	router := setupServerWithDB(t, dbPath)
@@ -143,6 +145,7 @@ func TestCreateWithoutAuth(t *testing.T) {
 	// Create test database
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
 
 	// Setup server with database
 	router := setupServerWithDB(t, dbPath)

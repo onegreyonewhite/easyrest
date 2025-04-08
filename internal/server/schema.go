@@ -283,7 +283,11 @@ func buildDELETEEndpoint(name string, properties map[string]any) map[string]any 
 func schemaHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	dbKey := strings.ToLower(vars["db"])
-	dbPlug, ok := DbPlugins[dbKey]
+
+	// Get current plugins map
+	currentDbPlugins := *DbPlugins.Load()
+	// Get the specific plugin
+	dbPlug, ok := currentDbPlugins[dbKey]
 	if !ok {
 		http.Error(w, "DB plugin not found", http.StatusNotFound)
 		return

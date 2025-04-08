@@ -81,6 +81,8 @@ func generateTestToken(t *testing.T, secret string, scope string) string {
 func TestOrdersSelectSum(t *testing.T) {
 	dbPath := setupOrdersTestDB(t)
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
+
 	// Insert sample orders with amounts: 10.5, 20.0, 30.0 (total = 60.5)
 	insertOrder(t, dbPath, 1, "2023-03-01", 10.5)
 	insertOrder(t, dbPath, 2, "2023-03-01", 20.0)
@@ -134,6 +136,8 @@ func TestOrdersSelectSum(t *testing.T) {
 func TestOrdersSelectGroupBy(t *testing.T) {
 	dbPath := setupOrdersTestDB(t)
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
+
 	// Insert sample orders:
 	// For order_date "2023-03-01": two orders with amounts 10 and 20 (total = 30, avg = 15)
 	// For order_date "2023-03-02": three orders with amounts 5, 15 and 25 (total = 45, avg = 15)
@@ -210,6 +214,8 @@ func TestOrdersSelectGroupBy(t *testing.T) {
 func TestOrdersSelectCount(t *testing.T) {
 	dbPath := setupOrdersTestDB(t)
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
+
 	// Insert 4 orders.
 	insertOrder(t, dbPath, 1, "2023-03-01", 10)
 	insertOrder(t, dbPath, 2, "2023-03-01", 20)

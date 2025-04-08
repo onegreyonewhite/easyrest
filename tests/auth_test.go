@@ -12,6 +12,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/onegreyonewhite/easyrest/internal/config"
 	"github.com/onegreyonewhite/easyrest/internal/server"
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
 
 // TestEmptyTokenSecret checks behavior when TokenSecret is empty
@@ -19,6 +20,7 @@ func TestEmptyTokenSecret(t *testing.T) {
 	// Create test database
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
 
 	// Setup server with database
 	router := setupServerWithDB(t, dbPath)
@@ -83,7 +85,8 @@ func TestEmptyTokenSecret(t *testing.T) {
 			return data, nil
 		},
 	}
-	server.DbPlugins["mock"] = mockPlugin
+	newPluginsMap1 := map[string]easyrest.DBPlugin{"mock": mockPlugin}
+	server.DbPlugins.Store(&newPluginsMap1)
 
 	// RPC request
 	body = strings.NewReader(`{"test": "value"}`)
@@ -130,6 +133,7 @@ func TestEmptyTokenSecretWithoutToken(t *testing.T) {
 	// Create test database
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
 
 	// Setup server
 	server.ReloadConfig()
@@ -160,7 +164,8 @@ func TestEmptyTokenSecretWithoutToken(t *testing.T) {
 			return data, nil
 		},
 	}
-	server.DbPlugins["mock"] = mockPlugin
+	newPluginsMap2 := map[string]easyrest.DBPlugin{"mock": mockPlugin}
+	server.DbPlugins.Store(&newPluginsMap2)
 
 	body = strings.NewReader(`{"test": "value"}`)
 	req, err = http.NewRequest("POST", "/api/mock/rpc/test/", body)
@@ -180,6 +185,7 @@ func TestTokenURL(t *testing.T) {
 	// Create test database
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
 
 	// Setup server with database
 	router := setupServerWithDB(t, dbPath)
@@ -285,6 +291,7 @@ func TestTokenURLWithScopeCheck(t *testing.T) {
 	// Create test database
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
 
 	// Setup server with database
 	router := setupServerWithDB(t, dbPath)
@@ -464,11 +471,12 @@ func TestTokenURLWithScopeCheck(t *testing.T) {
 
 	os.Setenv("ER_TOKEN_URL", mockServer.URL)
 	server.SetConfig(server.GetConfig())
-	server.DbPlugins["mock"] = &mockDBPlugin{
+	newPluginsMap3 := map[string]easyrest.DBPlugin{"mock": &mockDBPlugin{
 		callFunction: func(userID, funcName string, data map[string]any, ctx map[string]any) (any, error) {
 			return data, nil
 		},
-	}
+	}}
+	server.DbPlugins.Store(&newPluginsMap3)
 
 	body = strings.NewReader(`{"test": "value"}`)
 	req, err = http.NewRequest("POST", "/api/mock/rpc/test/", body)

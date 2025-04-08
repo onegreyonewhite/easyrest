@@ -9,6 +9,8 @@ import (
 
 	"github.com/onegreyonewhite/easyrest/internal/server"
 	"github.com/onegreyonewhite/easyrest/plugin"
+
+	_ "go.uber.org/automaxprocs"
 )
 
 type pluginsFlag []string

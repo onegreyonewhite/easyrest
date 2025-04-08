@@ -58,7 +58,11 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 	dbKey := strings.ToLower(vars["db"])
 	funcName := vars["func"]
 
-	dbPlug, ok := DbPlugins[dbKey]
+	// Get current plugins map
+	currentDbPlugins := *DbPlugins.Load()
+
+	// Get the specific plugin
+	dbPlug, ok := currentDbPlugins[dbKey]
 	if !ok {
 		http.Error(w, "DB plugin not found", http.StatusNotFound)
 		return

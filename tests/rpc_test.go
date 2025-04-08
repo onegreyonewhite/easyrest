@@ -11,6 +11,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/onegreyonewhite/easyrest/internal/server"
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
 
 type mockDBPlugin struct {
@@ -55,7 +56,8 @@ func TestRPCWithoutClaims(t *testing.T) {
 	config := server.GetConfig()
 	config.CheckScope = false
 	server.SetConfig(config)
-	server.DbPlugins["mock"] = mockPlugin
+	newPluginsMap1 := map[string]easyrest.DBPlugin{"mock": mockPlugin}
+	server.DbPlugins.Store(&newPluginsMap1)
 
 	// Test 1: Without token
 	body := strings.NewReader(`{"test": "value"}`)
@@ -138,12 +140,12 @@ func TestRPCWithFormData(t *testing.T) {
 	server.ReloadConfig()
 	router := server.SetupRouter()
 
-	server.DbPlugins["mock"] = mockPlugin
-
 	// Disable scope checking for test
 	config := server.GetConfig()
 	config.CheckScope = false
 	server.SetConfig(config)
+	newPluginsMap2 := map[string]easyrest.DBPlugin{"mock": mockPlugin}
+	server.DbPlugins.Store(&newPluginsMap2)
 
 	// Generate token
 	claims := jwt.MapClaims{

@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/goccy/go-json"
 	"github.com/golang-jwt/jwt/v5"
@@ -29,10 +30,11 @@ import (
 
 // Global configuration and dbPlugins loaded only once.
 var (
-	cfg        config.Config
-	cfgOnce    sync.Once
-	DbPlugins  = make(map[string]easyrest.DBPlugin)
-	AllowedOps = map[string]string{
+	cfg           config.Config
+	cfgOnce       sync.Once
+	DbPlugins     atomic.Pointer[map[string]easyrest.DBPlugin]
+	pluginClients atomic.Pointer[map[string]*hplugin.Client]
+	AllowedOps    = map[string]string{
 		"eq":    "=",
 		"neq":   "!=",
 		"lt":    "<",
@@ -66,6 +68,14 @@ var jsonBufferPool = sync.Pool{
 	},
 }
 
+func init() {
+	// Initialize atomic pointers with empty maps
+	emptyDbPlugins := make(map[string]easyrest.DBPlugin)
+	DbPlugins.Store(&emptyDbPlugins)
+	emptyPluginClients := make(map[string]*hplugin.Client)
+	pluginClients.Store(&emptyPluginClients)
+}
+
 // GetConfig loads configuration only once.
 func GetConfig() config.Config {
 	cfgOnce.Do(func() {
@@ -81,6 +91,26 @@ func SetConfig(newConfig config.Config) {
 
 func ReloadConfig() {
 	cfg = config.Load()
+}
+
+func StopDBPlugins() {
+	// Get the current clients map pointer
+	oldClientsPtr := pluginClients.Load()
+
+	// Atomically set empty maps
+	emptyDbPlugins := make(map[string]easyrest.DBPlugin)
+	DbPlugins.Store(&emptyDbPlugins)
+	emptyPluginClients := make(map[string]*hplugin.Client)
+	pluginClients.Store(&emptyPluginClients)
+
+	// Kill clients from the old map
+	if oldClientsPtr != nil {
+		oldClients := *oldClientsPtr
+		for connName, client := range oldClients {
+			stdlog.Printf("Stopping plugin client for connection: %s", connName)
+			client.Kill()
+		}
+	}
 }
 
 // IsAllowedFunction checks if the provided function name is allowed.
@@ -593,7 +623,10 @@ func findPluginPath(pluginExec string) (string, error) {
 // LoadDBPlugins loads all configured database plugins.
 func LoadDBPlugins() {
 	cfg := GetConfig()
-	DbPlugins = make(map[string]easyrest.DBPlugin)
+	// Create new maps for the plugins and clients
+	newDbPlugins := make(map[string]easyrest.DBPlugin)
+	newPluginClients := make(map[string]*hplugin.Client)
+
 	for connName, pluginCfg := range cfg.PluginMap {
 		splitURI := strings.SplitN(pluginCfg.Uri, "://", 2)
 		if len(splitURI) != 2 {
@@ -630,11 +663,20 @@ func LoadDBPlugins() {
 			stdlog.Printf("Error getting absolute path for plugin %s: %v", pluginExec, err)
 			continue
 		}
-		pluginConfig := hplugin.ClientConfig{
-			HandshakeConfig: easyrest.Handshake,
-			Plugins: map[string]hplugin.Plugin{
+
+		var Plugins map[string]hplugin.Plugin
+		if pluginCfg.Type == "db" {
+			Plugins = map[string]hplugin.Plugin{
 				"db": &easyrest.DBPluginPlugin{},
-			},
+			}
+		} else {
+			stdlog.Printf("Plugin type %s not supported", pluginCfg.Type)
+			continue
+		}
+
+		pluginConfig := hplugin.ClientConfig{
+			HandshakeConfig:  easyrest.Handshake,
+			Plugins:          Plugins,
 			Cmd:              exec.Command(absPluginPath),
 			AllowedProtocols: []hplugin.Protocol{hplugin.ProtocolNetRPC},
 		}
@@ -647,24 +689,49 @@ func LoadDBPlugins() {
 		rpcClient, err := client.Client()
 		if err != nil {
 			stdlog.Printf("Error creating RPC client for plugin %s: %v", connName, err)
+			client.Kill()
 			continue
 		}
 		raw, err := rpcClient.Dispense("db")
 		if err != nil {
 			stdlog.Printf("Error dispensing plugin %s: %v", connName, err)
+			client.Kill()
 			continue
 		}
 		dbPlug, ok := raw.(easyrest.DBPlugin)
 		if !ok {
 			stdlog.Printf("Error: plugin %s does not implement DBPlugin interface", connName)
+			client.Kill()
 			continue
 		}
 		err = dbPlug.InitConnection(pluginCfg.Uri)
 		if err != nil {
 			stdlog.Printf("Error initializing connection for plugin %s: %v", connName, err)
+			client.Kill()
 			continue
 		}
-		DbPlugins[connName] = dbPlug
+		newDbPlugins[connName] = dbPlug
+		newPluginClients[connName] = client
 		stdlog.Printf("Connection %s initialized using plugin %s", connName, pluginExec)
+	}
+
+	// Get the pointer to the old clients map *before* swapping
+	oldClientsPtr := pluginClients.Load()
+
+	// Atomically swap to the new maps
+	DbPlugins.Store(&newDbPlugins)
+	pluginClients.Store(&newPluginClients)
+
+	// Kill the old clients *after* the swap
+	if oldClientsPtr != nil {
+		oldClients := *oldClientsPtr
+		if len(oldClients) > 0 {
+			stdlog.Printf("Stopping %d old plugin client(s)...", len(oldClients))
+			for connName, client := range oldClients {
+				stdlog.Printf("Stopping old plugin client for connection: %s", connName)
+				client.Kill()
+			}
+			stdlog.Printf("Finished stopping old plugin clients.")
+		}
 	}
 }

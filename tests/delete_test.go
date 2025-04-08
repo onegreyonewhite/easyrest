@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/onegreyonewhite/easyrest/internal/server"
 	_ "modernc.org/sqlite"
 )
 
@@ -16,6 +17,7 @@ import (
 func TestDeleteAll(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
 	// Insert 3 records.
 	insertUser(t, dbPath, "Alice", "test1")
 	insertUser(t, dbPath, "Bob", "test2")
@@ -48,6 +50,8 @@ func TestDeleteAll(t *testing.T) {
 func TestDeleteWhereLike(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
+
 	// Insert records.
 	insertUser(t, dbPath, "Alice", "test1")
 	insertUser(t, dbPath, "Alex", "test2")
@@ -83,6 +87,8 @@ func TestDeleteWhereLike(t *testing.T) {
 func TestDeleteWhereLt(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
+
 	// Insert records.
 	insertUser(t, dbPath, "Alice", "test1")
 	insertUser(t, dbPath, "Bob", "test2")
@@ -117,6 +123,8 @@ func TestDeleteWhereLt(t *testing.T) {
 func TestDeleteWhereContext(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
+
 	// Insert records.
 	insertUser(t, dbPath, "testuser", "test1")   // Name must match sub in claims
 	insertUser(t, dbPath, "test_value", "test2") // Name must match custom in claims
@@ -161,6 +169,8 @@ func TestDeleteWhereContext(t *testing.T) {
 func TestDeleteNoMatch(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
+
 	// Insert 2 records.
 	insertUser(t, dbPath, "Alice", "old")
 	insertUser(t, dbPath, "Bob", "old")
@@ -190,6 +200,8 @@ func TestDeleteNoMatch(t *testing.T) {
 func TestDeleteInvalidOperator(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
+
 	insertUser(t, dbPath, "Alice", "old")
 	router := setupServerWithDB(t, dbPath)
 	tokenStr := generateToken(t)
@@ -211,6 +223,7 @@ func TestDeleteInvalidOperator(t *testing.T) {
 func TestDeleteMalformedWhere(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
 	insertUser(t, dbPath, "Alice", "old")
 	router := setupServerWithDB(t, dbPath)
 	tokenStr := generateToken(t)

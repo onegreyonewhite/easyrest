@@ -249,11 +249,13 @@ func TestLoadDBPlugins(t *testing.T) {
 
 	// Reset dbPlugins and call loadDBPlugins
 	server.LoadDBPlugins()
+	defer server.StopDBPlugins()
 	// We expect it to attempt to look up easyrest-plugin-xyz and easyrest-plugin-sqlite
 	// For coverage, we at least ensure it doesn't panic.
 
-	if len(server.DbPlugins) > 0 {
-		t.Logf("Plugins loaded: %+v", server.DbPlugins)
+	currentDbPlugins := *server.DbPlugins.Load()
+	if len(currentDbPlugins) > 0 {
+		t.Logf("Plugins loaded: %+v", currentDbPlugins) // Log the loaded map content
 		// Possibly check if "test" is in the map but not truly connected since no binary is found.
 	} else {
 		t.Logf("No plugins loaded (as expected if no plugin binaries are found).")
@@ -275,6 +277,8 @@ func TestRPCHandler(t *testing.T) {
 	defer os.Unsetenv("ER_DB_TEST")
 
 	server.ReloadConfig()
+	defer server.StopDBPlugins()
+
 	router := server.SetupRouter()
 	tokenStr := generateTestToken(t, "mytestsecret", "funcA-write")
 

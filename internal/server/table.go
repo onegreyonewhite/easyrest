@@ -134,7 +134,10 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 	dbKey := strings.ToLower(vars["db"])
 	table := vars["table"]
 
-	dbPlug, ok := DbPlugins[dbKey]
+	// Get current plugins map
+	currentDbPlugins := *DbPlugins.Load()
+	// Get the specific plugin
+	dbPlug, ok := currentDbPlugins[dbKey]
 	if !ok {
 		http.Error(w, "DB plugin not found", http.StatusNotFound)
 		return

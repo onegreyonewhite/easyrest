@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/onegreyonewhite/easyrest/internal/server"
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
 
 // fakeDBPluginWithRPC is a fake implementation of DBPlugin for testing GetSchema with RPC.
@@ -251,7 +252,9 @@ func TestSwaggerSchemaWithRPC(t *testing.T) {
 	// Unset ER_DB_TEST to avoid LoadDBPlugins overriding our fake plugin.
 	os.Unsetenv("ER_DB_TEST")
 	// Set the fake plugin for database "test".
-	server.DbPlugins["mock"] = &fakeDBPluginWithRPC{}
+	mockPluginInstance1 := &fakeDBPluginWithRPC{}
+	newPluginsMap1 := map[string]easyrest.DBPlugin{"mock": mockPluginInstance1}
+	server.DbPlugins.Store(&newPluginsMap1)
 
 	// Create a fake HTTP request to /api/test/
 	req, err := http.NewRequest("GET", "/api/mock/", nil)
@@ -264,7 +267,9 @@ func TestSwaggerSchemaWithRPC(t *testing.T) {
 
 	router := server.SetupRouter()
 
-	server.DbPlugins["mock"] = &fakeDBPluginWithRPC{}
+	mockPluginInstance2 := &fakeDBPluginWithRPC{}
+	newPluginsMap2 := map[string]easyrest.DBPlugin{"mock": mockPluginInstance2}
+	server.DbPlugins.Store(&newPluginsMap2)
 	router.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("Expected status 200, got %d, body: %s", rr.Code, rr.Body.String())

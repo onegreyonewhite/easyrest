@@ -13,6 +13,7 @@ import (
 	hplugin "github.com/hashicorp/go-plugin"
 	lru "github.com/hashicorp/golang-lru/v2"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
+	_ "go.uber.org/automaxprocs"
 	"golang.org/x/sync/singleflight"
 	_ "modernc.org/sqlite"
 )

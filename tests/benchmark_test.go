@@ -30,6 +30,7 @@ func BenchmarkTableGet(b *testing.B) {
 	dbPath := tmpFile.Name()
 	tmpFile.Close()
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
 
 	// Open the database and create the 'users' table
 	db, err := sql.Open("sqlite", dbPath)
@@ -101,6 +102,7 @@ func BenchmarkTableCreate(b *testing.B) {
 	dbPath := tmpFile.Name()
 	tmpFile.Close()
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
 
 	// Open the database and create the 'users' table
 	db, err := sql.Open("sqlite", dbPath)
@@ -168,7 +170,7 @@ func BenchmarkTableUpdate(b *testing.B) {
 	dbPath := tmpFile.Name()
 	tmpFile.Close()
 	defer os.Remove(dbPath)
-
+	defer server.StopDBPlugins()
 	// Open the database and create the 'users' table with an additional update_field column
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {

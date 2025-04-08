@@ -11,12 +11,15 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/onegreyonewhite/easyrest/internal/server"
 	_ "modernc.org/sqlite"
 )
 
 func TestSelectBasic(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
+
 	// Insert a single user.
 	insertUser(t, dbPath, "Alice", "")
 
@@ -47,6 +50,8 @@ func TestSelectBasic(t *testing.T) {
 func TestSelectWhereLike(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
+
 	// Insert several users.
 	insertUser(t, dbPath, "Alice", "")
 	insertUser(t, dbPath, "Alex", "")
@@ -85,6 +90,8 @@ func TestSelectWhereLike(t *testing.T) {
 func TestSelectWhereLt(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
+
 	// Insert two users.
 	id1 := insertUser(t, dbPath, "Alice", "")
 	id2 := insertUser(t, dbPath, "Bob", "")
@@ -117,6 +124,8 @@ func TestSelectWhereLt(t *testing.T) {
 func TestSelectMultipleWhere(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
+
 	// Insert several users.
 	id1 := insertUser(t, dbPath, "Alice", "")
 	id2 := insertUser(t, dbPath, "Alex", "")
@@ -152,6 +161,8 @@ func TestSelectMultipleWhere(t *testing.T) {
 func TestSelectInvalidOperator(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
+
 	insertUser(t, dbPath, "Alice", "")
 	router := setupServerWithDB(t, dbPath)
 	tokenStr := generateToken(t)
@@ -172,7 +183,7 @@ func TestSelectInvalidOperator(t *testing.T) {
 func TestSelectAllOperators(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
-
+	defer server.StopDBPlugins()
 	// Insert test data with different cases
 	_ = insertUser(t, dbPath, "Alice", "test1")
 	id2 := insertUser(t, dbPath, "ALICE2", "test2")
@@ -225,7 +236,7 @@ func TestSelectAllOperators(t *testing.T) {
 func TestContextSubstitution(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
-
+	defer server.StopDBPlugins()
 	// Insert test data
 	insertUser(t, dbPath, "testuser", "test1")   // Name must match sub in claims
 	insertUser(t, dbPath, "test_value", "test2") // Name must match custom in claims
@@ -283,7 +294,7 @@ func TestContextSubstitution(t *testing.T) {
 func TestSelectResponseFormats(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
-
+	defer server.StopDBPlugins()
 	// Insert test data.
 	insertUser(t, dbPath, "Alice", "")
 	insertUser(t, dbPath, "Bob", "")

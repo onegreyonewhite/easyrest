@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/onegreyonewhite/easyrest/internal/server"
 	_ "modernc.org/sqlite"
 )
 
@@ -58,6 +59,8 @@ func getAllUsers(t *testing.T, dbPath string) []map[string]any {
 func TestUpdateAll(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
+
 	// Insert 3 records.
 	insertUser(t, dbPath, "Alice", "old")
 	insertUser(t, dbPath, "Bob", "old")
@@ -101,6 +104,8 @@ func TestUpdateAll(t *testing.T) {
 func TestUpdateWhereLike(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
+
 	// Insert test data
 	insertUser(t, dbPath, "Alice", "test1")
 	insertUser(t, dbPath, "Alex", "test2")
@@ -152,6 +157,8 @@ func TestUpdateWhereLike(t *testing.T) {
 func TestUpdateWhereLt(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
+
 	// Insert test data
 	insertUser(t, dbPath, "Alice", "test1")
 	insertUser(t, dbPath, "Bob", "test2")
@@ -202,6 +209,8 @@ func TestUpdateWhereLt(t *testing.T) {
 func TestUpdateNoMatch(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
+
 	// Insert 2 records.
 	insertUser(t, dbPath, "Alice", "old")
 	insertUser(t, dbPath, "Bob", "old")
@@ -235,6 +244,8 @@ func TestUpdateNoMatch(t *testing.T) {
 func TestUpdateWhereContext(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
+
 	// Insert test data
 	insertUser(t, dbPath, "testuser", "test1")   // Name must match sub in claims
 	insertUser(t, dbPath, "test_value", "test2") // Name must match custom in claims
@@ -296,6 +307,8 @@ func TestUpdateWhereContext(t *testing.T) {
 func TestUpdateInvalidOperator(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
+
 	insertUser(t, dbPath, "Alice", "test1")
 	router := setupServerWithDB(t, dbPath)
 	tokenStr := generateToken(t)
@@ -321,6 +334,8 @@ func TestUpdateInvalidOperator(t *testing.T) {
 func TestUpdateMalformedJSON(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
+	defer server.StopDBPlugins()
+
 	insertUser(t, dbPath, "Alice", "test1")
 	router := setupServerWithDB(t, dbPath)
 	tokenStr := generateToken(t)

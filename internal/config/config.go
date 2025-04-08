@@ -15,6 +15,7 @@ type PluginConfig struct {
 	Name string `yaml:"name"`
 	Uri  string `yaml:"uri"`
 	Path string `yaml:"path"`
+	Type string `yaml:"type"`
 }
 
 type CORSConfig struct {
@@ -60,6 +61,7 @@ func LoadPluginConfigs(configs []string) map[string]PluginConfig {
 			plugins[connName] = PluginConfig{
 				Name: connName,
 				Uri:  parts[1],
+				Type: "db",
 			}
 		}
 	}
@@ -89,6 +91,11 @@ func LoadPluginConfigs(configs []string) map[string]PluginConfig {
 				log.Printf("WARN: skipping plugin config in file %s with empty name", path)
 				continue // Skip this document and proceed to the next
 			}
+
+			if cfg.Type == "" {
+				cfg.Type = "db"
+			}
+
 			// Add the successfully parsed config to the map.
 			plugins[cfg.Name] = cfg
 		}
@@ -239,6 +246,14 @@ func Load() Config {
 			yaml.Unmarshal(data, &cfg)
 		}
 	}
+
+	for pluginName, pluginCfg := range cfg.PluginMap {
+		if pluginCfg.Type == "" {
+			pluginCfg.Type = "db"
+			cfg.PluginMap[pluginName] = pluginCfg
+		}
+	}
+
 	for name, plcfg := range LoadPluginConfigs(cfg.Plugins) {
 		if _, exists := cfg.PluginMap[name]; !exists {
 			cfg.PluginMap[name] = plcfg
