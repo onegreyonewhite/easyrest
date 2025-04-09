@@ -2,12 +2,13 @@ package plugin
 
 import (
 	"sync"
+	"time"
 
 	"github.com/hashicorp/go-plugin"
 )
 
 // Version is the plugin version.
-var Version = "v0.5.1"
+var Version = "v0.6.0"
 
 // DBPlugin – interface for DB access plugins.
 type DBPlugin interface {
@@ -104,6 +105,48 @@ type GetSchemaRequest struct {
 type GetSchemaResponse struct {
 	Schema any
 	Error  string
+}
+
+// --- CachePlugin ---
+
+// CachePlugin defines the interface for cache operations.
+type CachePlugin interface {
+	InitConnection(uri string) error
+	Set(key string, value string, ttl time.Duration) error
+	Get(key string) (string, error)
+}
+
+// CacheInitConnectionRequest holds the URI for cache connection initialization.
+type CacheInitConnectionRequest struct {
+	URI string
+}
+
+// CacheInitConnectionResponse indicates success or error during cache connection initialization.
+type CacheInitConnectionResponse struct {
+	Error string
+}
+
+// CacheSetRequest holds the key, value, and TTL for setting a cache entry.
+type CacheSetRequest struct {
+	Key   string
+	Value string
+	TTL   time.Duration
+}
+
+// CacheSetResponse indicates success or error during cache set operation.
+type CacheSetResponse struct {
+	Error string
+}
+
+// CacheGetRequest holds the key for retrieving a cache entry.
+type CacheGetRequest struct {
+	Key string
+}
+
+// CacheGetResponse holds the retrieved value or an error.
+type CacheGetResponse struct {
+	Value string
+	Error string
 }
 
 // Pools.

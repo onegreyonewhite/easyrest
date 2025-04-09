@@ -117,6 +117,7 @@ func setupTestDBForSchema(t *testing.T) string {
 func TestSwaggerSchema(t *testing.T) {
 	dbPath := setupTestDBForSchema(t)
 	defer os.Remove(dbPath)
+	defer server.StopPlugins()
 
 	// Set environment variables for the plugin.
 	os.Setenv("ER_DB_TEST", "sqlite://"+dbPath)
@@ -249,8 +250,9 @@ func TestSwaggerSchema(t *testing.T) {
 }
 
 func TestSwaggerSchemaWithRPC(t *testing.T) {
-	// Unset ER_DB_TEST to avoid LoadDBPlugins overriding our fake plugin.
+	// Unset ER_DB_TEST to avoid LoadPlugins overriding our fake plugin.
 	os.Unsetenv("ER_DB_TEST")
+	defer server.StopPlugins()
 	// Set the fake plugin for database "test".
 	mockPluginInstance1 := &fakeDBPluginWithRPC{}
 	newPluginsMap1 := map[string]easyrest.DBPlugin{"mock": mockPluginInstance1}
@@ -263,7 +265,7 @@ func TestSwaggerSchemaWithRPC(t *testing.T) {
 	}
 	rr := httptest.NewRecorder()
 	server.ReloadConfig()
-	server.LoadDBPlugins()
+	server.LoadPlugins()
 
 	router := server.SetupRouter()
 

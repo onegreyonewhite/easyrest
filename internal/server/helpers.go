@@ -19,11 +19,14 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/goccy/go-json"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	"github.com/hashicorp/go-hclog"
 	hplugin "github.com/hashicorp/go-plugin"
+	"github.com/onegreyonewhite/easyrest/internal/cache"
 	"github.com/onegreyonewhite/easyrest/internal/config"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
@@ -33,6 +36,7 @@ var (
 	cfg           config.Config
 	cfgOnce       sync.Once
 	DbPlugins     atomic.Pointer[map[string]easyrest.DBPlugin]
+	CachePlugins  atomic.Pointer[map[string]easyrest.CachePlugin]
 	pluginClients atomic.Pointer[map[string]*hplugin.Client]
 	AllowedOps    = map[string]string{
 		"eq":    "=",
@@ -72,6 +76,8 @@ func init() {
 	// Initialize atomic pointers with empty maps
 	emptyDbPlugins := make(map[string]easyrest.DBPlugin)
 	DbPlugins.Store(&emptyDbPlugins)
+	emptyCachePlugins := make(map[string]easyrest.CachePlugin)
+	CachePlugins.Store(&emptyCachePlugins)
 	emptyPluginClients := make(map[string]*hplugin.Client)
 	pluginClients.Store(&emptyPluginClients)
 }
@@ -93,13 +99,15 @@ func ReloadConfig() {
 	cfg = config.Load()
 }
 
-func StopDBPlugins() {
+func StopPlugins() {
 	// Get the current clients map pointer
 	oldClientsPtr := pluginClients.Load()
 
 	// Atomically set empty maps
 	emptyDbPlugins := make(map[string]easyrest.DBPlugin)
 	DbPlugins.Store(&emptyDbPlugins)
+	emptyCachePlugins := make(map[string]easyrest.CachePlugin)
+	CachePlugins.Store(&emptyCachePlugins)
 	emptyPluginClients := make(map[string]*hplugin.Client)
 	pluginClients.Store(&emptyPluginClients)
 
@@ -557,6 +565,79 @@ func getTokenClaims(r *http.Request) jwt.MapClaims {
 	return nil
 }
 
+// --- ETag Helper Functions ---
+
+// getFirstCachePlugin retrieves the cache plugin based on configuration or fallback logic.
+// Priority:
+// 1. Cache plugin specified by `CacheName` in the config for the given `dbKey`.
+// 2. Cache plugin with the same name as `dbKey`.
+// 3. The first available cache plugin.
+// Returns nil if no cache plugins are configured or loaded.
+func getFirstCachePlugin(dbKey string) easyrest.CachePlugin {
+	cfg := GetConfig()
+	currentCachePlugins := *CachePlugins.Load()
+	if len(currentCachePlugins) == 0 {
+		return nil // No cache plugins available
+	}
+
+	dbPluginCfg, ok := cfg.PluginMap[dbKey]
+
+	if !ok || !dbPluginCfg.EnableCache {
+		return nil
+	}
+
+	// Priority 1: Check CacheName in the config for this dbKey
+	if dbPluginCfg.CacheName != "" {
+		if specifiedCachePlugin, found := currentCachePlugins[dbPluginCfg.CacheName]; found {
+			return specifiedCachePlugin
+		}
+		// Log if specified cache plugin not found, but continue to fallback
+		stdlog.Printf("WARN: Cache plugin '%s' specified for DB '%s' not found or loaded. Falling back...", dbPluginCfg.CacheName, dbKey)
+	}
+
+	// Priority 2: Try to find a cache plugin with the same name as dbKey
+	if matchingCachePlugin, found := currentCachePlugins[dbKey]; found {
+		return matchingCachePlugin
+	}
+
+	// Priority 3: Return the first one found (iteration order is not guaranteed)
+	for _, plugin := range currentCachePlugins {
+		return plugin
+	}
+
+	return nil // Should not happen if len > 0, but safeguard
+}
+
+// getOrGenerateETag fetches ETag from cache or generates a new one.
+func getOrGenerateETag(cachePlugin easyrest.CachePlugin, key string) string {
+	currentETag, err := cachePlugin.Get(key)
+	if err == nil && currentETag != "" {
+		return currentETag // Found in cache
+	}
+
+	// Not found or error occurred, generate a new one
+	newETag := uuid.NewString()
+	// Store the new ETag in cache (use a long TTL, e.g., 24 hours or adjust as needed)
+	err = cachePlugin.Set(key, newETag, 24*time.Hour)
+	if err != nil {
+		// Log the error but proceed with the newly generated ETag
+		stdlog.Printf("Error setting ETag in cache for key '%s': %v", key, err)
+	}
+	return newETag
+}
+
+// updateETag generates a new ETag and stores it in the cache.
+func updateETag(cachePlugin easyrest.CachePlugin, key string) string {
+	newETag := uuid.NewString()
+	err := cachePlugin.Set(key, newETag, 24*time.Hour) // Use the same TTL as getOrGenerateETag
+	if err != nil {
+		stdlog.Printf("Error updating ETag in cache for key '%s': %v", key, err)
+	}
+	return newETag
+}
+
+// --- End ETag Helper Functions ---
+
 func checkFile(path string) (string, error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -620,106 +701,161 @@ func findPluginPath(pluginExec string) (string, error) {
 	return "", fmt.Errorf("plugin not found: %s", pluginExec)
 }
 
-// LoadDBPlugins loads all configured database plugins.
-func LoadDBPlugins() {
+// LoadPlugins loads all configured database and cache plugins.
+func LoadPlugins() {
 	cfg := GetConfig()
 	// Create new maps for the plugins and clients
 	newDbPlugins := make(map[string]easyrest.DBPlugin)
+	newCachePlugins := make(map[string]easyrest.CachePlugin)
 	newPluginClients := make(map[string]*hplugin.Client)
 
 	for connName, pluginCfg := range cfg.PluginMap {
+		// Determine executable path (same as before)
 		splitURI := strings.SplitN(pluginCfg.Uri, "://", 2)
 		if len(splitURI) != 2 {
 			stdlog.Printf("Invalid URI for %s: %s", connName, pluginCfg.Uri)
 			continue
 		}
-		pluginType := splitURI[0]
-		pluginExec := "easyrest-plugin-" + pluginType
+		pluginTypeHint := splitURI[0] // Use this only for executable name guess
+		pluginExec := "easyrest-plugin-" + pluginTypeHint
 		var pluginPath string
 		if pluginCfg.Path != "" {
 			pluginPath = pluginCfg.Path
-			stdlog.Printf("Plugin path from config: %s\n", pluginPath)
+			// stdlog.Printf("Plugin path from config: %s\n", pluginPath) // Less verbose logging
 			if strings.HasPrefix(pluginPath, "~/") {
 				homeDir, err := os.UserHomeDir()
 				if err != nil {
-					stdlog.Printf("Error getting home directory: %v", err)
+					stdlog.Printf("Error getting home directory for plugin %s: %v", connName, err)
 					continue
 				}
 				pluginPath = filepath.Join(homeDir, pluginPath[2:])
 			}
 		} else {
-			pluginFindedPath, err := findPluginPath(pluginExec)
-
+			var err error
+			pluginPath, err = findPluginPath(pluginExec)
 			if err != nil {
-				stdlog.Printf("Plugin %s not found: %v", pluginExec, err)
+				stdlog.Printf("Plugin executable for %s (%s or %s-os-arch) not found: %v", connName, pluginExec, pluginExec, err)
 				continue
-			} else {
-				pluginPath = pluginFindedPath
 			}
 		}
 
 		absPluginPath, err := filepath.Abs(pluginPath)
 		if err != nil {
-			stdlog.Printf("Error getting absolute path for plugin %s: %v", pluginExec, err)
+			stdlog.Printf("Error getting absolute path for plugin %s (%s): %v", connName, pluginPath, err)
 			continue
 		}
 
-		var Plugins map[string]hplugin.Plugin
-		if pluginCfg.Type == "db" {
-			Plugins = map[string]hplugin.Plugin{
-				"db": &easyrest.DBPluginPlugin{},
-			}
-		} else {
-			stdlog.Printf("Plugin type %s not supported", pluginCfg.Type)
-			continue
+		// Define that this plugin *might* serve db and cache interfaces
+		pluginInterfaceMap := map[string]hplugin.Plugin{
+			"db":    &easyrest.DBPluginPlugin{},
+			"cache": &easyrest.CachePluginPlugin{},
 		}
 
-		pluginConfig := hplugin.ClientConfig{
+		// Configure the client
+		pluginClientConfig := hplugin.ClientConfig{
 			HandshakeConfig:  easyrest.Handshake,
-			Plugins:          Plugins,
+			Plugins:          pluginInterfaceMap,
 			Cmd:              exec.Command(absPluginPath),
 			AllowedProtocols: []hplugin.Protocol{hplugin.ProtocolNetRPC},
 		}
 		if cfg.NoPluginLog {
-			pluginConfig.Logger = hclog.New(&hclog.LoggerOptions{
+			pluginClientConfig.Logger = hclog.New(&hclog.LoggerOptions{
 				Output: io.Discard,
 			})
 		}
-		client := hplugin.NewClient(&pluginConfig)
+
+		// Create the plugin client process
+		client := hplugin.NewClient(&pluginClientConfig)
 		rpcClient, err := client.Client()
 		if err != nil {
-			stdlog.Printf("Error creating RPC client for plugin %s: %v", connName, err)
-			client.Kill()
+			stdlog.Printf("Error creating RPC client process for plugin %s (%s): %v", connName, pluginPath, err)
+			client.Kill() // Kill the client process if RPC connection failed
 			continue
 		}
-		raw, err := rpcClient.Dispense("db")
-		if err != nil {
-			stdlog.Printf("Error dispensing plugin %s: %v", connName, err)
-			client.Kill()
-			continue
+
+		pluginAddedSuccessfully := false
+		logMsgParts := []string{} // To build the final log message
+
+		// --- Attempt to load DB Plugin ---
+		rawDB, errDBDispense := rpcClient.Dispense("db")
+		if errDBDispense == nil {
+			dbPlug, ok := rawDB.(easyrest.DBPlugin)
+			if ok {
+				errDBInit := dbPlug.InitConnection(pluginCfg.Uri)
+				if errDBInit == nil {
+					newDbPlugins[connName] = dbPlug
+					pluginAddedSuccessfully = true
+					logMsgParts = append(logMsgParts, "DB")
+				} else {
+					stdlog.Printf("Error initializing DB connection for plugin %s: %v", connName, errDBInit)
+				}
+			} else {
+				// This usually indicates a programming error (plugin mismatch)
+				stdlog.Printf("Error: Plugin %s (%s) dispensed 'db' but type assertion to DBPlugin failed", connName, pluginPath)
+			}
+		} else {
+			// Only log dispense error if it's not the typical "unknown service" which means the interface isn't implemented
+			if !strings.Contains(errDBDispense.Error(), "unknown service") {
+				stdlog.Printf("Error dispensing 'db' interface for plugin %s: %v", connName, errDBDispense)
+			}
 		}
-		dbPlug, ok := raw.(easyrest.DBPlugin)
-		if !ok {
-			stdlog.Printf("Error: plugin %s does not implement DBPlugin interface", connName)
-			client.Kill()
-			continue
+
+		// --- Attempt to load Cache Plugin ---
+		rawCache, errCacheDispense := rpcClient.Dispense("cache")
+		if errCacheDispense == nil {
+			cachePlug, ok := rawCache.(easyrest.CachePlugin)
+			if ok {
+				errCacheInit := cachePlug.InitConnection(pluginCfg.Uri) // Use the same URI for cache init for now
+				if errCacheInit == nil {
+					newCachePlugins[connName] = cachePlug
+					pluginAddedSuccessfully = true
+					logMsgParts = append(logMsgParts, "Cache")
+				} else {
+					stdlog.Printf("Error initializing Cache connection for plugin %s: %v", connName, errCacheInit)
+				}
+			} else {
+				stdlog.Printf("Error: Plugin %s (%s) dispensed 'cache' but type assertion to CachePlugin failed", connName, pluginPath)
+			}
+		} else {
+			if !strings.Contains(errCacheDispense.Error(), "unknown service") {
+				stdlog.Printf("Error dispensing 'cache' interface for plugin %s: %v", connName, errCacheDispense)
+			}
 		}
-		err = dbPlug.InitConnection(pluginCfg.Uri)
-		if err != nil {
-			stdlog.Printf("Error initializing connection for plugin %s: %v", connName, err)
-			client.Kill()
-			continue
+
+		// --- Finalize Client Management ---
+		if pluginAddedSuccessfully {
+			newPluginClients[connName] = client
+			stdlog.Printf("Connection %s (%s) initialized with interfaces: [%s]", connName, pluginExec, strings.Join(logMsgParts, ", "))
+		} else {
+			stdlog.Printf("Connection %s (%s) failed to initialize any supported interfaces. Stopping client.", connName, pluginExec)
+			client.Kill() // Kill the client if no interfaces were loaded
 		}
-		newDbPlugins[connName] = dbPlug
-		newPluginClients[connName] = client
-		stdlog.Printf("Connection %s initialized using plugin %s", connName, pluginExec)
-	}
+	} // End loop over cfg.PluginMap
 
 	// Get the pointer to the old clients map *before* swapping
 	oldClientsPtr := pluginClients.Load()
 
+	// Initialize internal fallback cache if no external cache plugins were loaded or supported the cache interface
+	if len(newCachePlugins) == 0 && len(cfg.PluginMap) > 0 { // Only add internal if external were configured but none loaded/supported cache
+		stdlog.Println("No external cache plugins loaded or configured plugins did not support 'cache' interface. Initializing internal fallback cache.")
+		internalCache := cache.NewSimpleCachePlugin()
+		if err := internalCache.InitConnection(""); err != nil { // Pass empty URI for internal
+			stdlog.Printf("Error initializing internal fallback cache: %v", err)
+		} else {
+			// Use a distinct key for the internal cache
+			internalCacheKey := "_internal_cache"
+			newCachePlugins[internalCacheKey] = internalCache
+			stdlog.Printf("Internal fallback cache initialized successfully under key '%s'", internalCacheKey)
+		}
+	} else if len(newCachePlugins) > 0 {
+		stdlog.Printf("Loaded %d external cache plugin(s). Internal fallback cache not needed.", len(newCachePlugins))
+	} else {
+		stdlog.Println("No plugins configured, skipping cache initialization.")
+	}
+
 	// Atomically swap to the new maps
 	DbPlugins.Store(&newDbPlugins)
+	CachePlugins.Store(&newCachePlugins)
 	pluginClients.Store(&newPluginClients)
 
 	// Kill the old clients *after* the swap
@@ -727,8 +863,7 @@ func LoadDBPlugins() {
 		oldClients := *oldClientsPtr
 		if len(oldClients) > 0 {
 			stdlog.Printf("Stopping %d old plugin client(s)...", len(oldClients))
-			for connName, client := range oldClients {
-				stdlog.Printf("Stopping old plugin client for connection: %s", connName)
+			for _, client := range oldClients {
 				client.Kill()
 			}
 			stdlog.Printf("Finished stopping old plugin clients.")

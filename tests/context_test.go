@@ -26,7 +26,7 @@ func TestContextInQuery(t *testing.T) {
 	dbPath := tmpFile.Name()
 	tmpFile.Close()
 	defer os.Remove(dbPath)
-	defer server.StopDBPlugins()
+	defer server.StopPlugins()
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("Failed to open sqlite DB: %v", err)

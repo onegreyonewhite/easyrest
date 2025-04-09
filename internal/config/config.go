@@ -2,7 +2,8 @@ package config
 
 import (
 	"bytes" // Required for yaml.Decoder
-	"io"    // Required for yaml.Decoder EOF check
+	"fmt"
+	"io" // Required for yaml.Decoder EOF check
 	"log"
 	"os"
 	"strconv"
@@ -12,10 +13,12 @@ import (
 )
 
 type PluginConfig struct {
-	Name string `yaml:"name"`
-	Uri  string `yaml:"uri"`
-	Path string `yaml:"path"`
-	Type string `yaml:"type"`
+	Name                string              `yaml:"name,omitempty"`
+	Uri                 string              `yaml:"uri"`
+	Path                string              `yaml:"path,omitempty"`
+	FuncInvalidationMap map[string][]string `yaml:"cache_invalidation_map,omitempty"`
+	EnableCache         bool                `yaml:"enable_cache,omitempty"`
+	CacheName           string              `yaml:"cache_name,omitempty"`
 }
 
 type CORSConfig struct {
@@ -58,10 +61,24 @@ func LoadPluginConfigs(configs []string) map[string]PluginConfig {
 			}
 			envName := parts[0]
 			connName := strings.ToLower(strings.TrimPrefix(envName, "ER_DB_"))
+			// Look for specific cache config for this DB connection
+			cacheName := os.Getenv(fmt.Sprintf("ER_DB_%s_CACHENAME", connName))
+			plugins[connName] = PluginConfig{
+				Name:        connName,
+				Uri:         parts[1],
+				EnableCache: os.Getenv(fmt.Sprintf("ER_CACHE_ENABLE_%s", connName)) == "1",
+				CacheName:   cacheName,
+			}
+		} else if strings.HasPrefix(env, "ER_CACHE_") && !strings.HasPrefix(env, "ER_CACHE_ENABLE_") {
+			parts := strings.SplitN(env, "=", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			envName := parts[0]
+			connName := strings.ToLower(strings.TrimPrefix(envName, "ER_CACHE_"))
 			plugins[connName] = PluginConfig{
 				Name: connName,
 				Uri:  parts[1],
-				Type: "db",
 			}
 		}
 	}
@@ -90,10 +107,6 @@ func LoadPluginConfigs(configs []string) map[string]PluginConfig {
 			if cfg.Name == "" {
 				log.Printf("WARN: skipping plugin config in file %s with empty name", path)
 				continue // Skip this document and proceed to the next
-			}
-
-			if cfg.Type == "" {
-				cfg.Type = "db"
 			}
 
 			// Add the successfully parsed config to the map.
@@ -248,10 +261,8 @@ func Load() Config {
 	}
 
 	for pluginName, pluginCfg := range cfg.PluginMap {
-		if pluginCfg.Type == "" {
-			pluginCfg.Type = "db"
-			cfg.PluginMap[pluginName] = pluginCfg
-		}
+		pluginCfg.Name = pluginName
+		cfg.PluginMap[pluginName] = pluginCfg
 	}
 
 	for name, plcfg := range LoadPluginConfigs(cfg.Plugins) {

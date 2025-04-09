@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 
+	stdlog "log" // Added for logging cache invalidation errors
+
 	"github.com/gorilla/mux"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
@@ -74,9 +76,9 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	config := GetConfig()
+	config := GetConfig() // Moved GetConfig call earlier to access PluginMap
 	if config.CheckScope {
-		requiredScope := funcName + "-write"
+		requiredScope := funcName + "-write" // Assuming RPC calls are write operations for scope check
 		claims := getTokenClaims(r)
 		if !CheckScope(claims, requiredScope) {
 			http.Error(w, "Forbidden: insufficient scope", http.StatusForbidden)
@@ -85,7 +87,7 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Using parseRequest to handle different formats of incoming data
-	parsedData, err := parseRequest(r, false) // ожидаем один объект
+	parsedData, err := parseRequest(r, false) // expecting a single object
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -111,5 +113,25 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Error in CallFunction: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// ETag Cache Invalidation Logic START
+	pluginCfg, cfgOk := config.PluginMap[dbKey]
+	// Check if config exists, EnableCache is true, AND FuncInvalidationMap is present
+	if cfgOk && pluginCfg.EnableCache && pluginCfg.FuncInvalidationMap != nil {
+		if tablesToInvalidate, mapOk := pluginCfg.FuncInvalidationMap[funcName]; mapOk && len(tablesToInvalidate) > 0 {
+			cachePlugin := getFirstCachePlugin(dbKey) // Assumes this helper is available
+			if cachePlugin != nil {
+				stdlog.Printf("Invalidating ETags for tables %v due to RPC call %s/%s", tablesToInvalidate, dbKey, funcName)
+				for _, tableName := range tablesToInvalidate {
+					etagKey := fmt.Sprintf("etag:%s:%s", dbKey, tableName)
+					_ = updateETag(cachePlugin, etagKey) // Assumes this helper is available; ignore returned ETag
+				}
+			} else {
+				stdlog.Printf("Warning: Cache invalidation configured and enabled for %s/%s, but no cache plugin is loaded.", dbKey, funcName)
+			}
+		}
+	}
+	// ETag Cache Invalidation Logic END
+
 	makeResponse(w, r, http.StatusOK, result)
 }

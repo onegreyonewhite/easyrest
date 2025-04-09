@@ -189,6 +189,7 @@ func TestAccessLogMiddleware(t *testing.T) {
 	var buf strings.Builder
 	log.SetOutput(&buf)
 	defer log.SetOutput(os.Stderr)
+	defer server.StopPlugins()
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTeapot)
@@ -213,6 +214,7 @@ func TestRunMinimal(t *testing.T) {
 	// We'll set up environment so it doesn't block.
 	os.Setenv("ER_PORT", "9998")
 	os.Setenv("ER_CHECK_SCOPE", "0")
+	defer server.StopPlugins()
 	defer func() {
 		os.Unsetenv("ER_PORT")
 		os.Unsetenv("ER_CHECK_SCOPE")
@@ -233,8 +235,8 @@ func TestRunMinimal(t *testing.T) {
 	// We can't easily check coverage further. We kill the goroutine by exiting the test.
 }
 
-// TestLoadDBPlugins tries to cover loadDBPlugins by messing with environment variables.
-func TestLoadDBPlugins(t *testing.T) {
+// TestLoadPlugins tries to cover LoadPlugins by messing with environment variables.
+func TestLoadPlugins(t *testing.T) {
 	// We'll set environment for a non-existent plugin type: e.g., "xyz"
 	os.Setenv("ER_DB_NONEXIST", "xyz://somewhere")
 	defer os.Unsetenv("ER_DB_NONEXIST")
@@ -247,9 +249,9 @@ func TestLoadDBPlugins(t *testing.T) {
 	os.Setenv("ER_DB_TEST", "sqlite://test.db")
 	defer os.Unsetenv("ER_DB_TEST")
 
-	// Reset dbPlugins and call loadDBPlugins
-	server.LoadDBPlugins()
-	defer server.StopDBPlugins()
+	// Reset dbPlugins and call LoadPlugins
+	server.LoadPlugins()
+	defer server.StopPlugins()
 	// We expect it to attempt to look up easyrest-plugin-xyz and easyrest-plugin-sqlite
 	// For coverage, we at least ensure it doesn't panic.
 
@@ -265,7 +267,7 @@ func TestLoadDBPlugins(t *testing.T) {
 // Helper function to call unexported function in server to retrieve dbPlugins map.
 // func (server *Server) DbPlugins() map[string]easyrest.DBPlugin {
 // 	// not valid code unless we do reflection or fix the code to allow us to read dbPlugins
-// 	// In practice, to get coverage for loadDBPlugins, we rely on not panicking.
+// 	// In practice, to get coverage for LoadPlugins, we rely on not panicking.
 // 	// Alternatively we can do reflection or build a getter in the main code.
 // 	return nil
 // }
@@ -277,7 +279,7 @@ func TestRPCHandler(t *testing.T) {
 	defer os.Unsetenv("ER_DB_TEST")
 
 	server.ReloadConfig()
-	defer server.StopDBPlugins()
+	defer server.StopPlugins()
 
 	router := server.SetupRouter()
 	tokenStr := generateTestToken(t, "mytestsecret", "funcA-write")

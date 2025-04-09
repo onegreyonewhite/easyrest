@@ -236,21 +236,44 @@ plugin_configs:
 
 # Option 2: Define plugins directly in the main config file
 plugins:
-  # The key ('test', 'orders') becomes the API path segment (/api/test/, /api/orders/)
+  # The key ('test', 'orders', 'inventory') becomes the API path segment (/api/test/, /api/orders/, /api/inventory)
   test:
     # URI format: <plugin_type>://<connection_details>
     # The plugin_type (e.g., 'sqlite') determines the executable name (easyrest-plugin-sqlite)
     uri: "sqlite://./test.db"
+    enable_cache: true # Enable ETag caching for this connection
+    cache_name: test
+    cache_invalidation_map:
+      process_order:
+        - orders
+        - order_items
   orders:
     uri: "sqlite:///data/orders.db"
+    enable_cache: true
+    cache_name: orders
+    # Example: Invalidate 'orders' and 'order_items' ETags when 'process_order' RPC is called
+    cache_invalidation_map:
+      process_order:
+        - orders
+        - order_items
+  inventory:
+    uri: "sqlite:///data/inventory.db"
+    # enable_cache defaults to false if not specified
+
   # Example for a postgres plugin:
   # postgres_db:
   #   uri: "postgres://user:password@host:port/database?sslmode=disable"
+  #   enable_cache: true
 
-# --- Example External Plugin File (e.g., ./plugins/database1.yaml) ---
-# - name: test # Must match the key used in the API path
-#   uri: "sqlite://./test.db"
-#   path: "/usr/local/bin/easyrest-plugin-sqlite" # Optional: Explicit path to plugin binary
+# --- Example External Plugin File (e.g., ./plugins/database1.yaml) --- Structure:
+# - name: plugin_name # Name used in API path
+#   uri: "plugin_type://connection_string"
+#   path: "/path/to/plugin/binary" # Optional: Explicit path to plugin binary
+#   enable_cache: true # Optional: Enable ETag caching (default: false)
+#   cache_invalidation_map: # Optional: Map RPC function names to tables whose ETags should be invalidated
+#     rpc_function_name:
+#       - table1_to_invalidate
+#       - table2_to_invalidate
 ```
 
 **Key Configuration Sections:**
@@ -261,9 +284,16 @@ plugins:
 - **TLS**: Enable HTTPS by providing certificate and key files.
 - **Plugin Settings**:
     - `plugin_log`: Controls whether plugin logs are captured by the server.
-    - `plugin_configs`: A list of paths to external YAML files. Each file can define one or more plugins using the structure shown in the example (with `name`, `uri`, and optional `path`).
-    - `plugins`: A map for defining plugins directly. The map key (e.g., `test`) is used as the database identifier in API requests (`/api/test/`). The value must contain a `uri` field.
-    - **Plugin URI**: The `uri` specifies both the plugin type (which maps to the executable name, e.g., `sqlite` -> `easyrest-plugin-sqlite`) and the connection details (DSN) for that plugin.
+    - `plugin_configs`: A list of paths to external YAML files. Each file can define one or more plugins using the structure shown in the example.
+    - `plugins`: A map for defining plugins directly. The map key (e.g., `test`) is used as the database identifier in API requests (`/api/test/`).
+    - **Plugin Definition Attributes**:
+        - `name`: (Required in external files, derived from map key in inline definitions) The identifier used in the API path (`/api/<name>/`).
+        - `uri`: (Required) Specifies the plugin type and connection details. The type (e.g., `sqlite`) maps to the executable name (`easyrest-plugin-sqlite`).
+        - `path`: (Optional) Explicit path to the plugin executable. If omitted, EasyREST searches standard locations.
+        - `enable_cache`: (Optional, defaults to `false`) If `true`, enables ETag generation and checking (`If-Match`, `If-None-Match`) for **requests to this DB plugin's tables**. Requires at least one Cache plugin to be configured and loaded. This setting itself **does not affect** Cache plugins directly but enables the caching mechanism for operations related to this specific DB plugin.
+        - `cache_name`: (Optional) Specifies the name (key from `plugins` map or `name` from an external file) of the **Cache plugin** that should be used for ETag caching for **this DB plugin**. If omitted, EasyREST first looks for a Cache plugin with the same name as this DB plugin (e.g., if the DB plugin name is `test`, it looks for Cache plugin `test`). If not found, it falls back to the first available Cache plugin. This setting allows flexible linking between DB and Cache plugins.
+        - `cache_invalidation_map`: (Optional) A map where keys are RPC function names (used via `/api/<name>/rpc/<function_name>`) and values are lists of table names. When a listed RPC function is successfully executed for **this DB plugin** (`<name>`), the ETags for the specified tables associated with **this same DB plugin** are invalidated in the **corresponding Cache plugin**. This is useful if an RPC call modifies data in related tables.
+
 - The server merges plugin definitions from `plugin_configs` files and the inline `plugins` map. Definitions in the inline map take precedence if names conflict.
 
 ---
@@ -338,51 +368,161 @@ Returns a Swagger 2.0 JSON schema for all tables in the test database.
 
 ## Developing External Plugins
 
-To create an external plugin (e.g., a MySQL plugin):
+External plugins allow you to extend EasyREST with support for different database backends or caching systems. A single plugin binary can provide implementations for either the `DBPlugin` interface, the `CachePlugin` interface, or both.
 
-1. **Create a New Repository:**  
-   For instance, create a repository named `easyrest-plugin-mysql`.
+To create an external plugin (e.g., for MySQL DB and Redis Cache):
 
-2. **Import Required Modules:**  
-   In your plugin's `go.mod`, add:
-   ```go
-   require (
-       github.com/onegreyonewhite/easyrest v0.1.0
-       github.com/hashicorp/go-plugin v1.6.3
-   )
-   ```
-   Then, import the required packages:
-   ```go
-   import (
-       easyrest "github.com/onegreyonewhite/easyrest/plugin"
-       hplugin "github.com/hashicorp/go-plugin"
-   )
-   ```
+1.  **Create a New Repository:**
+    For instance, create a repository named `easyrest-plugin-mysql-redis`.
 
-3. **Implement the Interface:**  
-   Implement the `DBPlugin` interface defined in `easyrest/plugin`. Use the same handshake configuration (accessible as `easyrest.Handshake`).
+2.  **Import Required Modules:**
+    In your plugin's `go.mod`, add the necessary EasyREST and go-plugin dependencies:
+    ```go
+    require (
+        github.com/onegreyonewhite/easyrest v0.x.x // Use the appropriate version
+        github.com/hashicorp/go-plugin v1.x.x   // Use the appropriate version
+    )
+    ```
+    Then, import the required packages in your Go files:
+    ```go
+    import (
+        "context" // Often needed for context handling in implementations
+        "time"    // Often needed for cache TTLs
 
-4. **Structure Your Repository:**  
-   - Have a main package (e.g.,  `main.go`) that registers your plugin using:
-     ```go
-     func main() {
-         impl := &mysqlPlugin{}
-         hplugin.Serve(&hplugin.ServeConfig{
-             HandshakeConfig: easyrest.Handshake,
-             Plugins: map[string]hplugin.Plugin{
-                 "db": &easyrest.DBPluginPlugin{Impl: impl},
-             },
-         })
-     }
-     ```
-   - Organize your code so that the core logic is in packages that can be independently tested.
+        easyrest "github.com/onegreyonewhite/easyrest/plugin"
+        hplugin "github.com/hashicorp/go-plugin"
 
-5. **Build and Deploy:**  
-   Build the plugin binary with `go build` and ensure it is discoverable by EasyREST (via naming conventions and PATH configuration).
+        // Your specific DB/Cache driver imports, e.g.:
+        // _ "github.com/go-sql-driver/mysql"
+        // "github.com/redis/go-redis/v9"
+    )
+    ```
 
-### Changes in EasyREST Repository
+3.  **Implement the Interface(s):**
+    Create a struct (or structs) that implements the methods defined in the `easyrest.DBPlugin` and/or `easyrest.CachePlugin` interfaces from `github.com/onegreyonewhite/easyrest/plugin`.
 
-In the EasyREST core, nothing changes except that you now reference plugins by their binary names (e.g., `easyrest-plugin-mysql`) using `exec.LookPath`. Document the expected naming convention so that external plugins can be built and integrated independently.
+    ```go
+    // Example structure implementing both interfaces
+    type MyPlugin struct {
+        // Add fields for DB connections, cache clients, etc.
+        // e.g., db *sql.DB
+        // e.g., redisClient *redis.Client
+    }
+
+    // --- DBPlugin Implementation ---
+
+    func (p *MyPlugin) InitConnection(uri string) error {
+        // Parse URI, establish DB connection (e.g., MySQL)
+        // Store connection in p.db
+        return nil
+    }
+
+    func (p *MyPlugin) TableGet(userID, table string, selectFields []string, where map[string]any, ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, error) {
+        // Implement logic to SELECT data from the database
+        return nil, nil
+    }
+
+    func (p *MyPlugin) TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, error) {
+        // Implement logic to INSERT data into the database
+        return nil, nil
+    }
+
+    func (p *MyPlugin) TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, error) {
+        // Implement logic to UPDATE data in the database
+        return 0, nil
+    }
+
+    func (p *MyPlugin) TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, error) {
+        // Implement logic to DELETE data from the database
+        return 0, nil
+    }
+
+    func (p *MyPlugin) CallFunction(userID, funcName string, data map[string]any, ctx map[string]any) (any, error) {
+        // Implement logic for custom RPC functions (stored procedures, etc.)
+        return nil, nil
+    }
+
+    func (p *MyPlugin) GetSchema(ctx map[string]any) (any, error) {
+        // Implement logic to return the database schema in the expected format
+        return nil, nil
+    }
+
+    // --- CachePlugin Implementation ---
+
+    func (p *MyPlugin) InitConnection(uri string) error { // Can reuse or have separate logic from DB init
+         // Parse URI, establish Cache connection (e.g., Redis)
+         // Store connection in p.redisClient
+         return nil
+    }
+
+    func (p *MyPlugin) Get(key string) (string, error) {
+        // Implement logic to GET value from cache
+        return "", nil
+    }
+
+    func (p *MyPlugin) Set(key string, value string, ttl time.Duration) error {
+        // Implement logic to SET value in cache with TTL
+        return nil
+    }
+
+    func (p *MyPlugin) Delete(keys []string) error {
+        // Implement logic to DELETE keys from cache
+        return nil
+    }
+
+    // Note: A plugin doesn't *have* to implement both interfaces.
+    // If it only implements DBPlugin, only register "db".
+    // If it only implements CachePlugin, only register "cache".
+    ```
+
+4.  **Register and Serve the Plugin:**
+    In your plugin's `main` package (`main.go`), register your implementation(s) and start the plugin server. Use the `easyrest.Handshake` configuration.
+
+    ```go
+    func main() {
+        // Create an instance of your plugin implementation
+        impl := &MyPlugin{}
+
+        // Define the plugins provided by this binary
+        pluginMap := map[string]hplugin.Plugin{}
+
+        // Register DBPlugin implementation if provided
+        // Make sure 'impl' actually implements easyrest.DBPlugin
+        pluginMap["db"] = &easyrest.DBPluginPlugin{Impl: impl}
+
+        // Register CachePlugin implementation if provided
+        // Make sure 'impl' actually implements easyrest.CachePlugin
+        pluginMap["cache"] = &easyrest.CachePluginPlugin{Impl: impl}
+
+        // Serve the plugin(s)
+        hplugin.Serve(&hplugin.ServeConfig{
+            HandshakeConfig: easyrest.Handshake,
+            Plugins:         pluginMap,
+
+        })
+    }
+    ```
+    *Important:* Ensure your struct `impl` actually implements the methods for the interfaces you are registering (`DBPlugin` for `"db"`, `CachePlugin` for `"cache"`).
+
+5.  **Build and Deploy:**
+    Build the plugin binary (e.g., `go build -o easyrest-plugin-mysql-redis`). The binary name should ideally follow the convention `easyrest-plugin-<type>` (e.g., `easyrest-plugin-mysql`, `easyrest-plugin-redis`). EasyREST will look for these binaries:
+    *   In the directories listed in your system's `PATH` environment variable.
+    *   In the current working directory where EasyREST is run.
+    *   In the same directory as the EasyREST executable itself.
+    *   It also checks for OS/Arch specific names like `easyrest-plugin-mysql-linux-amd64`.
+
+    Alternatively, you can specify the exact path to the plugin binary in the EasyREST configuration file (`ER_DB_<NAME>_PATH` or `ER_CACHE_<NAME>_PATH`).
+
+6.  **Configure EasyREST:**
+    Update your EasyREST configuration (environment variables or config file) to use your new plugin, referencing the connection name you used in `main.go` (e.g., `mysql` if the binary is `easyrest-plugin-mysql`).
+    ```bash
+    export ER_DB_PRIMARY="mysql://user:password@tcp(host:port)/database"
+    # If the binary name doesn't match the type hint in the URI, or isn't in PATH:
+    # export ER_DB_PRIMARY_PATH="/path/to/your/easyrest-plugin-mysql-redis"
+
+    export ER_CACHE_PRIMARY="redis://host:port/0"
+    # export ER_CACHE_PRIMARY_PATH="/path/to/your/easyrest-plugin-mysql-redis"
+    ```
 
 ---
 

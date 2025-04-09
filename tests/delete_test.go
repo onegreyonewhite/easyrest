@@ -17,12 +17,13 @@ import (
 func TestDeleteAll(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
-	defer server.StopDBPlugins()
+	defer server.StopPlugins()
 	// Insert 3 records.
 	insertUser(t, dbPath, "Alice", "test1")
 	insertUser(t, dbPath, "Bob", "test2")
 	insertUser(t, dbPath, "Charlie", "test3")
-
+	
+	os.Setenv("ER_CACHE_ENABLE_TEST", "1")
 	router := setupServerWithDB(t, dbPath)
 	tokenStr := generateToken(t)
 
@@ -50,7 +51,7 @@ func TestDeleteAll(t *testing.T) {
 func TestDeleteWhereLike(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
-	defer server.StopDBPlugins()
+	defer server.StopPlugins()
 
 	// Insert records.
 	insertUser(t, dbPath, "Alice", "test1")
@@ -87,7 +88,7 @@ func TestDeleteWhereLike(t *testing.T) {
 func TestDeleteWhereLt(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
-	defer server.StopDBPlugins()
+	defer server.StopPlugins()
 
 	// Insert records.
 	insertUser(t, dbPath, "Alice", "test1")
@@ -123,7 +124,7 @@ func TestDeleteWhereLt(t *testing.T) {
 func TestDeleteWhereContext(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
-	defer server.StopDBPlugins()
+	defer server.StopPlugins()
 
 	// Insert records.
 	insertUser(t, dbPath, "testuser", "test1")   // Name must match sub in claims
@@ -169,7 +170,7 @@ func TestDeleteWhereContext(t *testing.T) {
 func TestDeleteNoMatch(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
-	defer server.StopDBPlugins()
+	defer server.StopPlugins()
 
 	// Insert 2 records.
 	insertUser(t, dbPath, "Alice", "old")
@@ -200,7 +201,7 @@ func TestDeleteNoMatch(t *testing.T) {
 func TestDeleteInvalidOperator(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
-	defer server.StopDBPlugins()
+	defer server.StopPlugins()
 
 	insertUser(t, dbPath, "Alice", "old")
 	router := setupServerWithDB(t, dbPath)
@@ -223,7 +224,7 @@ func TestDeleteInvalidOperator(t *testing.T) {
 func TestDeleteMalformedWhere(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
-	defer server.StopDBPlugins()
+	defer server.StopPlugins()
 	insertUser(t, dbPath, "Alice", "old")
 	router := setupServerWithDB(t, dbPath)
 	tokenStr := generateToken(t)

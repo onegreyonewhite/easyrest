@@ -240,9 +240,96 @@ func (p *DBPluginPlugin) Client(broker *plugin.MuxBroker, c *rpc.Client) (any, e
 	return &DBPluginRPC{client: c}, nil
 }
 
+// CachePluginRPC is the client wrapper for CachePlugin.
+type CachePluginRPC struct{ client *rpc.Client }
+
+func (c *CachePluginRPC) InitConnection(uri string) error {
+	req := CacheInitConnectionRequest{URI: uri}
+	var resp CacheInitConnectionResponse
+	err := c.client.Call("Plugin.InitConnection", req, &resp)
+	if err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		return errors.New(resp.Error)
+	}
+	return nil
+}
+
+func (c *CachePluginRPC) Set(key string, value string, ttl time.Duration) error {
+	req := CacheSetRequest{Key: key, Value: value, TTL: ttl}
+	var resp CacheSetResponse
+	err := c.client.Call("Plugin.Set", req, &resp)
+	if err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		return errors.New(resp.Error)
+	}
+	return nil
+}
+
+func (c *CachePluginRPC) Get(key string) (string, error) {
+	req := CacheGetRequest{Key: key}
+	var resp CacheGetResponse
+	err := c.client.Call("Plugin.Get", req, &resp)
+	if err != nil {
+		return "", err
+	}
+	if resp.Error != "" {
+		return "", errors.New(resp.Error)
+	}
+	return resp.Value, nil
+}
+
+// CachePluginRPCServer is the server-side RPC implementation for CachePlugin.
+type CachePluginRPCServer struct {
+	Impl CachePlugin
+}
+
+func (s *CachePluginRPCServer) InitConnection(req CacheInitConnectionRequest, resp *CacheInitConnectionResponse) error {
+	err := s.Impl.InitConnection(req.URI)
+	if err != nil {
+		resp.Error = err.Error()
+	}
+	return nil
+}
+
+func (s *CachePluginRPCServer) Set(req CacheSetRequest, resp *CacheSetResponse) error {
+	err := s.Impl.Set(req.Key, req.Value, req.TTL)
+	if err != nil {
+		resp.Error = err.Error()
+	}
+	return nil
+}
+
+func (s *CachePluginRPCServer) Get(req CacheGetRequest, resp *CacheGetResponse) error {
+	value, err := s.Impl.Get(req.Key)
+	if err != nil {
+		resp.Error = err.Error()
+		return nil
+	}
+	resp.Value = value
+	return nil
+}
+
+// CachePluginPlugin wraps the CachePlugin implementation for go-plugin.
+type CachePluginPlugin struct {
+	Impl CachePlugin
+}
+
+func (p *CachePluginPlugin) Server(broker *plugin.MuxBroker) (any, error) {
+	return &CachePluginRPCServer{Impl: p.Impl}, nil
+}
+
+func (p *CachePluginPlugin) Client(broker *plugin.MuxBroker, c *rpc.Client) (any, error) {
+	return &CachePluginRPC{client: c}, nil
+}
+
 func init() {
 	gob.Register(map[string]any(nil))
 	gob.Register([]map[string]any{})
 	gob.Register(time.Time{})
 	gob.Register([]any{})
+	gob.Register(time.Duration(0))
 }

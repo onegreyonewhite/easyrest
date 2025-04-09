@@ -46,6 +46,7 @@ func TestRPCWithoutClaims(t *testing.T) {
 			return data, nil
 		},
 	}
+	defer server.StopPlugins()
 
 	// Setup server
 	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
@@ -134,6 +135,7 @@ func TestRPCWithFormData(t *testing.T) {
 			return data, nil
 		},
 	}
+	defer server.StopPlugins()
 
 	// Setup server
 	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")

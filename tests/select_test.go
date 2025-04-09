@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/onegreyonewhite/easyrest/internal/config"
 	"github.com/onegreyonewhite/easyrest/internal/server"
 	_ "modernc.org/sqlite"
 )
@@ -18,18 +19,31 @@ import (
 func TestSelectBasic(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
-	defer server.StopDBPlugins()
+	defer server.StopPlugins()
 
 	// Insert a single user.
 	insertUser(t, dbPath, "Alice", "")
+	os.Setenv("ER_CACHE_TEST", "sqlite://"+dbPath)
+	os.Setenv("ER_CACHE_ENABLE_TEST", "1")
+	os.Setenv("ER_CORS_ENABLED", "1")
 
 	router := setupServerWithDB(t, dbPath)
+	cfg := server.GetConfig()
+	cfg.PluginMap["test"] = config.PluginConfig{
+		Name:        "test",
+		Uri:         "sqlite://" + dbPath,
+		EnableCache: true,
+	}
+	cfg.CORS.Enabled = true
+	server.SetConfig(cfg)
+	server.LoadPlugins()
 	tokenStr := generateToken(t)
 	req, err := http.NewRequest("GET", "/api/test/users/?select=id,name", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	req.Header.Set("Authorization", "Bearer "+tokenStr)
+	req.Header.Set("If-None-Match", "0000")
 	rr := httptest.NewRecorder()
 	router.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
@@ -45,12 +59,28 @@ func TestSelectBasic(t *testing.T) {
 	if result[0]["name"] != "Alice" {
 		t.Errorf("Expected name 'Alice', got %v", result[0]["name"])
 	}
+	// Assert that ETag header is present
+	etag := rr.Header().Get("ETag")
+	if etag == "" {
+		t.Errorf("Expected ETag header to be set, but it was empty. Headers: %v", rr.Header())
+	}
+	req, err = http.NewRequest("GET", "/api/test/users/?select=id,name", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tokenStr)
+	req.Header.Set("If-None-Match", etag)
+	rr = httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotModified {
+		t.Fatalf("Expected status 304, got %d. Response: %s", rr.Code, rr.Body.String())
+	}
 }
 
 func TestSelectWhereLike(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
-	defer server.StopDBPlugins()
+	defer server.StopPlugins()
 
 	// Insert several users.
 	insertUser(t, dbPath, "Alice", "")
@@ -90,7 +120,7 @@ func TestSelectWhereLike(t *testing.T) {
 func TestSelectWhereLt(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
-	defer server.StopDBPlugins()
+	defer server.StopPlugins()
 
 	// Insert two users.
 	id1 := insertUser(t, dbPath, "Alice", "")
@@ -124,7 +154,7 @@ func TestSelectWhereLt(t *testing.T) {
 func TestSelectMultipleWhere(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
-	defer server.StopDBPlugins()
+	defer server.StopPlugins()
 
 	// Insert several users.
 	id1 := insertUser(t, dbPath, "Alice", "")
@@ -161,7 +191,7 @@ func TestSelectMultipleWhere(t *testing.T) {
 func TestSelectInvalidOperator(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
-	defer server.StopDBPlugins()
+	defer server.StopPlugins()
 
 	insertUser(t, dbPath, "Alice", "")
 	router := setupServerWithDB(t, dbPath)
@@ -183,7 +213,7 @@ func TestSelectInvalidOperator(t *testing.T) {
 func TestSelectAllOperators(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
-	defer server.StopDBPlugins()
+	defer server.StopPlugins()
 	// Insert test data with different cases
 	_ = insertUser(t, dbPath, "Alice", "test1")
 	id2 := insertUser(t, dbPath, "ALICE2", "test2")
@@ -236,7 +266,7 @@ func TestSelectAllOperators(t *testing.T) {
 func TestContextSubstitution(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
-	defer server.StopDBPlugins()
+	defer server.StopPlugins()
 	// Insert test data
 	insertUser(t, dbPath, "testuser", "test1")   // Name must match sub in claims
 	insertUser(t, dbPath, "test_value", "test2") // Name must match custom in claims
@@ -294,7 +324,7 @@ func TestContextSubstitution(t *testing.T) {
 func TestSelectResponseFormats(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
-	defer server.StopDBPlugins()
+	defer server.StopPlugins()
 	// Insert test data.
 	insertUser(t, dbPath, "Alice", "")
 	insertUser(t, dbPath, "Bob", "")

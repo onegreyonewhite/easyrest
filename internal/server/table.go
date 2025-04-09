@@ -134,6 +134,46 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 	dbKey := strings.ToLower(vars["db"])
 	table := vars["table"]
 
+	// Get plugin config to check EnableCache
+	config := GetConfig() // Get global config first
+
+	// ETag handling START - Only if EnableCache is true for this plugin
+	var currentETag string
+	var cachePlugin easyrest.CachePlugin = getFirstCachePlugin(dbKey)
+	var etagKey string
+
+	if cachePlugin != nil {
+		etagKey = fmt.Sprintf("etag:%s:%s", dbKey, table)
+		ifMatch := r.Header.Get("If-Match")
+		ifNoneMatch := r.Header.Get("If-None-Match")
+		cachePlugin = getFirstCachePlugin(dbKey)
+
+		// Only get cache plugin and ETag if cache is enabled AND relevant headers are present/needed
+		if ifMatch != "" || ifNoneMatch != "" || r.Method == http.MethodGet || r.Method == http.MethodHead {
+			if cachePlugin != nil {
+				currentETag = getOrGenerateETag(cachePlugin, etagKey)
+			}
+		}
+
+		// Check If-None-Match for GET/HEAD requests (only if cache is enabled)
+		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && ifNoneMatch != "" {
+			if cachePlugin != nil && ifNoneMatch == currentETag {
+				w.Header().Set("ETag", currentETag)
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+		}
+
+		// Check If-Match for write operations (POST, PATCH, DELETE) (only if cache is enabled)
+		if (r.Method == http.MethodPost || r.Method == http.MethodPatch || r.Method == http.MethodDelete) && ifMatch != "" {
+			if cachePlugin == nil || ifMatch != currentETag {
+				w.WriteHeader(http.StatusPreconditionFailed)
+				return
+			}
+		}
+	} // End of if pluginCfg.EnableCache
+	// ETag handling END
+
 	// Get current plugins map
 	currentDbPlugins := *DbPlugins.Load()
 	// Get the specific plugin
@@ -149,7 +189,6 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	config := GetConfig()
 	var requiredScope string
 	if r.Method == http.MethodGet {
 		requiredScope = table + "-read"
@@ -176,6 +215,11 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
+		// Set ETag header before sending response (only if cache was enabled and plugin found)
+		if cachePlugin != nil {
+			w.Header().Set("ETag", currentETag)
+		}
+
 		selectParam := queryValues.Get("select")
 
 		selectFields, groupBy, err := processSelectParam(selectParam, flatCtx, pluginCtx)
@@ -230,6 +274,13 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Error in TableCreate: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+
+		// Update ETag after successful write operation (only if cache was enabled and plugin found)
+		if cachePlugin != nil {
+			newETag := updateETag(cachePlugin, etagKey)
+			w.Header().Set("ETag", newETag)
+		}
+
 		makeResponse(w, r, http.StatusCreated, rows)
 	case http.MethodPatch:
 		parsedData, err := parseRequest(r, false)
@@ -258,6 +309,13 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Error in TableUpdate: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+
+		// Update ETag after successful write operation (only if cache was enabled and plugin found)
+		if cachePlugin != nil {
+			newETag := updateETag(cachePlugin, etagKey)
+			w.Header().Set("ETag", newETag)
+		}
+
 		makeResponse(w, r, http.StatusOK, map[string]int{"updated": updated})
 
 	case http.MethodDelete:
@@ -274,6 +332,13 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Error in TableDelete: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+
+		// Update ETag after successful write operation (only if cache was enabled and plugin found)
+		if cachePlugin != nil {
+			newETag := updateETag(cachePlugin, etagKey)
+			w.Header().Set("ETag", newETag) // Set ETag even for 204
+		}
+
 		w.WriteHeader(http.StatusNoContent)
 
 	default:

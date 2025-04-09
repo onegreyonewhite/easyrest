@@ -20,7 +20,7 @@ func TestEmptyTokenSecret(t *testing.T) {
 	// Create test database
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
-	defer server.StopDBPlugins()
+	defer server.StopPlugins()
 
 	// Setup server with database
 	router := setupServerWithDB(t, dbPath)
@@ -133,7 +133,7 @@ func TestEmptyTokenSecretWithoutToken(t *testing.T) {
 	// Create test database
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
-	defer server.StopDBPlugins()
+	defer server.StopPlugins()
 
 	// Setup server
 	server.ReloadConfig()
@@ -185,7 +185,7 @@ func TestTokenURL(t *testing.T) {
 	// Create test database
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
-	defer server.StopDBPlugins()
+	defer server.StopPlugins()
 
 	// Setup server with database
 	router := setupServerWithDB(t, dbPath)
@@ -291,7 +291,7 @@ func TestTokenURLWithScopeCheck(t *testing.T) {
 	// Create test database
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
-	defer server.StopDBPlugins()
+	defer server.StopPlugins()
 
 	// Setup server with database
 	router := setupServerWithDB(t, dbPath)

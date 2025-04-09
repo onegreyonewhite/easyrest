@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -23,6 +24,10 @@ type sqlitePlugin struct {
 	db            *sql.DB
 	preparedStmts *lru.Cache[string, *sql.Stmt]
 	stmtGroup     singleflight.Group
+}
+
+type sqliteCachePlugin struct {
+	dbPluginPointer *sqlitePlugin
 }
 
 // InitConnection opens the SQLite database based on the provided URI.
@@ -62,6 +67,54 @@ func (s *sqlitePlugin) InitConnection(uri string) error {
 	}
 
 	return s.db.Ping()
+}
+
+func (s *sqliteCachePlugin) InitConnection(uri string) error {
+	err := s.dbPluginPointer.InitConnection(uri)
+	if err != nil {
+		return err
+	}
+	_, err = s.dbPluginPointer.db.Exec("CREATE TABLE IF NOT EXISTS easyrest_cache (key TEXT PRIMARY KEY, value TEXT, expires_at DATETIME DEFAULT CURRENT_TIMESTAMP)")
+	if err != nil {
+		return fmt.Errorf("failed to create cache table: %w", err)
+	}
+
+	// Launch background goroutine for cleanup
+	go s.cleanupExpiredCacheEntries()
+
+	return nil
+}
+
+// cleanupExpiredCacheEntries periodically deletes expired cache entries.
+func (s *sqliteCachePlugin) cleanupExpiredCacheEntries() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		// Use CURRENT_TIMESTAMP directly in SQL for simplicity and accuracy
+		_, err := s.dbPluginPointer.db.Exec("DELETE FROM easyrest_cache WHERE expires_at <= CURRENT_TIMESTAMP")
+		if err != nil {
+			// Log the error, but continue running the cleanup
+			fmt.Fprintf(os.Stderr, "Error cleaning up expired cache entries: %v\n", err)
+		}
+	}
+}
+
+func (s *sqliteCachePlugin) Set(key string, value string, ttl time.Duration) error {
+	_, err := s.dbPluginPointer.db.Exec("INSERT OR REPLACE INTO easyrest_cache (key, value, expires_at) VALUES (?, ?, ?)", key, value, time.Now().Add(ttl))
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *sqliteCachePlugin) Get(key string) (string, error) {
+	var value string
+	err := s.dbPluginPointer.db.QueryRow("SELECT value FROM easyrest_cache WHERE key = ? AND expires_at > ? ORDER BY expires_at LIMIT 1", key, time.Now()).Scan(&value)
+	if err != nil {
+		return "", err
+	}
+	return value, nil
 }
 
 // Get prepared statement from cache or create new
@@ -424,10 +477,12 @@ func main() {
 	}
 
 	impl := &sqlitePlugin{}
+	cacheImpl := &sqlitePlugin{}
 	hplugin.Serve(&hplugin.ServeConfig{
 		HandshakeConfig: easyrest.Handshake,
 		Plugins: map[string]hplugin.Plugin{
-			"db": &easyrest.DBPluginPlugin{Impl: impl},
+			"db":    &easyrest.DBPluginPlugin{Impl: impl},
+			"cache": &easyrest.CachePluginPlugin{Impl: &sqliteCachePlugin{dbPluginPointer: cacheImpl}},
 		},
 		Test: nil,
 	})

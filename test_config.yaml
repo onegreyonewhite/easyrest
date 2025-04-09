@@ -24,3 +24,7 @@ plugin_configs:
 plugins:
   test:
     uri: sqlite://./test.db
+    enable_cache: true
+  # cache:
+  #   uri: sqlite://./test.db
+  #   type: cache

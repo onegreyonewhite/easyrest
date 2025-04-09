@@ -237,7 +237,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 
 // SetupRouter initializes the router and endpoints.
 func SetupRouter() *mux.Router {
-	LoadDBPlugins()
+	LoadPlugins()
 	r := mux.NewRouter()
 
 	// Add CORS middleware first
@@ -320,12 +320,13 @@ func Run(conf config.Config) {
 		if sig == syscall.SIGHUP {
 			stdlog.Println("Received SIGHUP - reloading configuration")
 			ReloadConfig()
-			LoadDBPlugins()
+			LoadPlugins()
 		} else {
 			stdlog.Printf("Received signal %v - shutting down the server", sig)
 			if err := srv.Shutdown(ctx); err != nil {
 				stdlog.Printf("Forced server shutdown due to error: %v", err)
 			}
+			StopPlugins()
 			break
 		}
 	}
