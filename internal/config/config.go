@@ -19,6 +19,7 @@ type PluginConfig struct {
 	FuncInvalidationMap map[string][]string `yaml:"cache_invalidation_map,omitempty"`
 	EnableCache         bool                `yaml:"enable_cache,omitempty"`
 	CacheName           string              `yaml:"cache_name,omitempty"`
+	DbTxEnd             string              `yaml:"db_tx_end,omitempty"`
 }
 
 type CORSConfig struct {
@@ -68,6 +69,7 @@ func LoadPluginConfigs(configs []string) map[string]PluginConfig {
 				Uri:         parts[1],
 				EnableCache: os.Getenv(fmt.Sprintf("ER_CACHE_ENABLE_%s", connName)) == "1",
 				CacheName:   cacheName,
+				DbTxEnd:     "commit-allow-override",
 			}
 		} else if strings.HasPrefix(env, "ER_CACHE_") && !strings.HasPrefix(env, "ER_CACHE_ENABLE_") {
 			parts := strings.SplitN(env, "=", 2)
@@ -77,8 +79,9 @@ func LoadPluginConfigs(configs []string) map[string]PluginConfig {
 			envName := parts[0]
 			connName := strings.ToLower(strings.TrimPrefix(envName, "ER_CACHE_"))
 			plugins[connName] = PluginConfig{
-				Name: connName,
-				Uri:  parts[1],
+				Name:    connName,
+				Uri:     parts[1],
+				DbTxEnd: "commit",
 			}
 		}
 	}
@@ -107,6 +110,9 @@ func LoadPluginConfigs(configs []string) map[string]PluginConfig {
 			if cfg.Name == "" {
 				log.Printf("WARN: skipping plugin config in file %s with empty name", path)
 				continue // Skip this document and proceed to the next
+			}
+			if cfg.DbTxEnd == "" {
+				cfg.DbTxEnd = "commit"
 			}
 
 			// Add the successfully parsed config to the map.
@@ -262,6 +268,9 @@ func Load() Config {
 
 	for pluginName, pluginCfg := range cfg.PluginMap {
 		pluginCfg.Name = pluginName
+		if pluginCfg.DbTxEnd == "" {
+			pluginCfg.DbTxEnd = "commit"
+		}
 		cfg.PluginMap[pluginName] = pluginCfg
 	}
 

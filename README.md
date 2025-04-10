@@ -170,10 +170,17 @@ Available context variables:
 - **query:** Raw query string
 - **prefer:** Key-value pairs from Prefer header
 
-The `Prefer` header can be used to pass plugin-specific context parameters:
+The `Prefer` header can be used to pass plugin-specific context parameters or influence server behavior. It uses space-separated key-value pairs. EasyREST parses this header and makes the key-value pairs available in the `prefer` map within the plugin context map (`ctx["prefer"]`). Keys are converted to lowercase.
+
 ```
-Prefer: timezone=UTC param1=value1 param2=value2
+Prefer: timezone=UTC tx=rollback param1=value1 param2="quoted value"
 ```
+
+Standard keys recognized by EasyREST within the `Prefer` header include:
+- `timezone`: Sets the timezone for the request context (overrides `ER_DEFAULT_TIMEZONE`).
+- `tx`: Controls the transaction behavior for write operations (POST, PATCH, DELETE, RPC). Allowed values are `commit` or `rollback`. This preference might be ignored depending on the plugin's `db_tx_end` configuration setting (see Configuration Parameters).
+
+Plugins can access any other key-value pairs passed via the `Prefer` header through the `ctx["prefer"]` map.
 
 ### Data Insertion, Updates, and Deletion
 
@@ -243,6 +250,7 @@ plugins:
     uri: "sqlite://./test.db"
     enable_cache: true # Enable ETag caching for this connection
     cache_name: test
+    db_tx_end: commit-allow-override # Explicitly set default behavior
     cache_invalidation_map:
       process_order:
         - orders
@@ -293,6 +301,11 @@ plugins:
         - `enable_cache`: (Optional, defaults to `false`) If `true`, enables ETag generation and checking (`If-Match`, `If-None-Match`) for **requests to this DB plugin's tables**. Requires at least one Cache plugin to be configured and loaded. This setting itself **does not affect** Cache plugins directly but enables the caching mechanism for operations related to this specific DB plugin.
         - `cache_name`: (Optional) Specifies the name (key from `plugins` map or `name` from an external file) of the **Cache plugin** that should be used for ETag caching for **this DB plugin**. If omitted, EasyREST first looks for a Cache plugin with the same name as this DB plugin (e.g., if the DB plugin name is `test`, it looks for Cache plugin `test`). If not found, it falls back to the first available Cache plugin. This setting allows flexible linking between DB and Cache plugins.
         - `cache_invalidation_map`: (Optional) A map where keys are RPC function names (used via `/api/<name>/rpc/<function_name>`) and values are lists of table names. When a listed RPC function is successfully executed for **this DB plugin** (`<name>`), the ETags for the specified tables associated with **this same DB plugin** are invalidated in the **corresponding Cache plugin**. This is useful if an RPC call modifies data in related tables.
+        - `db_tx_end`: (Optional, defaults to `commit-allow-override`) Defines the default transaction handling behavior for write operations (POST, PATCH, DELETE) and RPC calls handled by this DB plugin, and whether the `Prefer: tx=` header can override it.
+            - `commit`: Always commit the transaction upon successful completion of the operation. Ignore `Prefer: tx=rollback`.
+            - `commit-allow-override`: Commit by default, but allow `Prefer: tx=rollback` to force a rollback even on success. **(Default behavior)**
+            - `rollback`: Always roll back the transaction, even upon successful completion. Ignore `Prefer: tx=commit`. Useful for read-only simulations or dry runs.
+            - `rollback-allow-override`: Roll back by default, but allow `Prefer: tx=commit` to force a commit on success.
 
 - The server merges plugin definitions from `plugin_configs` files and the inline `plugins` map. Definitions in the inline map take precedence if names conflict.
 

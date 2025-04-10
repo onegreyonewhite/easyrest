@@ -167,6 +167,89 @@ func convertILIKEtoLike(where map[string]any) map[string]any {
 	return result
 }
 
+// Function implementation to handle transactions, adapted for SQLite.
+func (s *sqlitePlugin) handleTransaction(ctxMap map[string]any, operation func(tx *sql.Tx) (any, error)) (any, error) {
+	ctxQuery := context.WithValue(context.Background(), "USER_ID", ctxMap["user_id"]) // Assuming user_id is passed in ctxMap
+	tx, err := s.db.BeginTx(ctxQuery, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin tx: %w", err)
+	}
+
+	// Default transaction preference is commit
+	txPreference := "commit"
+	isValidPreference := true
+	preferenceError := ""
+
+	if ctxMap != nil {
+		// Check and validate prefer.tx preference
+		if preferVal, ok := ctxMap["prefer"]; ok && preferVal != nil {
+			if preferMap, ok := preferVal.(map[string]any); ok {
+				if txVal, ok := preferMap["tx"]; ok && txVal != nil {
+					// Check if 'tx' is a string
+					if txStr, ok := txVal.(string); ok {
+						if txStr != "" { // If it's a non-empty string
+							txPreference = strings.ToLower(txStr)
+							if txPreference != "commit" && txPreference != "rollback" {
+								isValidPreference = false
+								preferenceError = fmt.Sprintf("invalid value for prefer.tx: '%s'. Must be 'commit' or 'rollback'", txStr)
+							}
+							// If txStr is "", txPreference remains default "commit", isValidPreference remains true.
+						}
+						// If txStr is "", it's valid, just use default preference.
+					} else { // 'tx' exists but is NOT a string
+						isValidPreference = false
+						preferenceError = fmt.Sprintf("invalid type for prefer.tx: expected string, got %T", txVal)
+					}
+				}
+			} else {
+				isValidPreference = false
+				preferenceError = fmt.Sprintf("invalid type for prefer: expected map[string]any, got %T", preferVal)
+			}
+		}
+
+		if !isValidPreference {
+			// No need to rollback tx as nothing has happened yet.
+			return nil, errors.New(preferenceError)
+		}
+		// SQLite does not need injectContext like MySQL
+	}
+
+	// Execute the core operation
+	result, err := operation(tx)
+	if err != nil {
+		tx.Rollback()   // Rollback on operation error
+		return nil, err // Return the original error from the operation
+	}
+
+	// Commit or Rollback based on preference
+	if txPreference == "rollback" {
+		if err := tx.Rollback(); err != nil {
+			return nil, fmt.Errorf("failed to rollback transaction: %w", err)
+		}
+		// Modify result for Update/Delete if rollback occurred
+		switch res := result.(type) {
+		case int: // Assumed from TableUpdate/TableDelete
+			return 0, nil
+		case int64: // Handle potential int64 return from RowsAffected directly
+			return int64(0), nil
+		default: // Assumed from TableCreate or others; return original result
+			return res, nil
+		}
+	} else { // commit or default
+		if err := tx.Commit(); err != nil {
+			// Attempt rollback if commit fails, but return the commit error
+			rbErr := tx.Rollback()
+			if rbErr != nil {
+				return nil, fmt.Errorf("failed to commit transaction: %w (rollback also failed: %v)", err, rbErr)
+			}
+			return nil, fmt.Errorf("failed to commit transaction: %w", err)
+		}
+	}
+
+	// Return the original result from the operation if committed successfully
+	return result, nil
+}
+
 // TableGet constructs and executes a SELECT query.
 func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, where map[string]any,
 	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, error) {
@@ -253,105 +336,120 @@ func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, whe
 
 // TableCreate builds and executes an INSERT query.
 func (s *sqlitePlugin) TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, error) {
-	ctxQuery := context.WithValue(context.Background(), "USER_ID", userID)
-	tx, err := s.db.BeginTx(ctxQuery, nil)
+	res, err := s.handleTransaction(ctx, func(tx *sql.Tx) (any, error) {
+		ctxQuery := context.WithValue(context.Background(), "USER_ID", userID)
+		var results []map[string]any
+		for _, row := range data {
+			var cols []string
+			var placeholders []string
+			var args []any
+			for k, v := range row {
+				cols = append(cols, k)
+				placeholders = append(placeholders, "?")
+				args = append(args, v)
+			}
+			baseQuery := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", table, strings.Join(cols, ", "), strings.Join(placeholders, ", "))
+			_, err := tx.ExecContext(ctxQuery, baseQuery, args...)
+			if err != nil {
+				// Error occurs within the loop, transaction will be rolled back by handleTransaction
+				return nil, err
+			}
+			results = append(results, row)
+		}
+		// Return the collected input data.
+		return results, nil
+	})
+
 	if err != nil {
-		return nil, err
+		return nil, err // Error already includes context from handleTransaction or the operation
 	}
-	var results []map[string]any
-	for _, row := range data {
-		var cols []string
-		var placeholders []string
-		var args []any
-		for k, v := range row {
-			cols = append(cols, k)
-			placeholders = append(placeholders, "?")
-			args = append(args, v)
-		}
-		baseQuery := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", table, strings.Join(cols, ", "), strings.Join(placeholders, ", "))
-		_, err := tx.ExecContext(ctxQuery, baseQuery, args...)
-		if err != nil {
-			tx.Rollback()
-			return nil, err
-		}
-		results = append(results, row)
+
+	// Type assertion for the result
+	if results, ok := res.([]map[string]any); ok {
+		return results, nil
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	return results, nil
+	return nil, fmt.Errorf("unexpected result type from handleTransaction: %T", res)
 }
 
 // TableUpdate builds and executes an UPDATE query.
 func (s *sqlitePlugin) TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, error) {
-	ctxQuery := context.WithValue(context.Background(), "USER_ID", userID)
-	tx, err := s.db.BeginTx(ctxQuery, nil)
-	if err != nil {
-		return 0, err
-	}
-	var setParts []string
-	var args []any
-	for k, v := range data {
-		setParts = append(setParts, fmt.Sprintf("%s = ?", k))
-		args = append(args, v)
-	}
-	baseQuery := fmt.Sprintf("UPDATE %s SET %s", table, strings.Join(setParts, ", "))
+	res, err := s.handleTransaction(ctx, func(tx *sql.Tx) (any, error) {
+		ctxQuery := context.WithValue(context.Background(), "USER_ID", userID)
+		var setParts []string
+		var args []any
+		for k, v := range data {
+			setParts = append(setParts, fmt.Sprintf("%s = ?", k))
+			args = append(args, v)
+		}
+		baseQuery := fmt.Sprintf("UPDATE %s SET %s", table, strings.Join(setParts, ", "))
 
-	// Convert ILIKE to LIKE COLLATE NOCASE before building where clause
-	where = convertILIKEtoLike(where)
-	whereClause, whereArgs, err := easyrest.BuildWhereClause(where)
+		// Convert ILIKE to LIKE COLLATE NOCASE before building where clause
+		where = convertILIKEtoLike(where)
+		whereClause, whereArgs, err := easyrest.BuildWhereClause(where)
+		if err != nil {
+			// Error in building WHERE clause, transaction will be rolled back
+			return 0, err
+		}
+		baseQuery += whereClause
+		args = append(args, whereArgs...)
+		sqlRes, err := tx.ExecContext(ctxQuery, baseQuery, args...)
+		if err != nil {
+			// Error during execution, transaction will be rolled back
+			return 0, err
+		}
+		affected, err := sqlRes.RowsAffected()
+		if err != nil {
+			// Error getting affected rows, transaction will be rolled back
+			return 0, err
+		}
+		return int(affected), nil
+	})
+
 	if err != nil {
-		tx.Rollback()
-		return 0, err
+		return 0, err // Error already includes context from handleTransaction or the operation
 	}
-	baseQuery += whereClause
-	args = append(args, whereArgs...)
-	res, err := tx.ExecContext(ctxQuery, baseQuery, args...)
-	if err != nil {
-		tx.Rollback()
-		return 0, err
+
+	// Type assertion for the result
+	if affected, ok := res.(int); ok {
+		return affected, nil
 	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		tx.Rollback()
-		return 0, err
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
-	return int(affected), nil
+	return 0, fmt.Errorf("unexpected result type from handleTransaction: %T", res)
 }
 
 // TableDelete builds and executes a DELETE query.
 func (s *sqlitePlugin) TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, error) {
-	ctxQuery := context.WithValue(context.Background(), "USER_ID", userID)
-	tx, err := s.db.BeginTx(ctxQuery, nil)
+	res, err := s.handleTransaction(ctx, func(tx *sql.Tx) (any, error) {
+		ctxQuery := context.WithValue(context.Background(), "USER_ID", userID)
+		// Convert ILIKE to LIKE COLLATE NOCASE before building where clause
+		where = convertILIKEtoLike(where)
+		whereClause, whereArgs, err := easyrest.BuildWhereClause(where)
+		if err != nil {
+			// Error in building WHERE clause, transaction will be rolled back
+			return 0, err
+		}
+		baseQuery := fmt.Sprintf("DELETE FROM %s%s", table, whereClause)
+		sqlRes, err := tx.ExecContext(ctxQuery, baseQuery, whereArgs...)
+		if err != nil {
+			// Error during execution, transaction will be rolled back
+			return 0, err
+		}
+		affected, err := sqlRes.RowsAffected()
+		if err != nil {
+			// Error getting affected rows, transaction will be rolled back
+			return 0, err
+		}
+		return int(affected), nil
+	})
+
 	if err != nil {
-		return 0, err
+		return 0, err // Error already includes context from handleTransaction or the operation
 	}
 
-	// Convert ILIKE to LIKE COLLATE NOCASE before building where clause
-	where = convertILIKEtoLike(where)
-	whereClause, whereArgs, err := easyrest.BuildWhereClause(where)
-	if err != nil {
-		tx.Rollback()
-		return 0, err
+	// Type assertion for the result
+	if affected, ok := res.(int); ok {
+		return affected, nil
 	}
-	baseQuery := fmt.Sprintf("DELETE FROM %s%s", table, whereClause)
-	res, err := tx.ExecContext(ctxQuery, baseQuery, whereArgs...)
-	if err != nil {
-		tx.Rollback()
-		return 0, err
-	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		tx.Rollback()
-		return 0, err
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
-	return int(affected), nil
+	return 0, fmt.Errorf("unexpected result type from handleTransaction: %T", res)
 }
 
 // CallFunction returns an error since it is not supported.

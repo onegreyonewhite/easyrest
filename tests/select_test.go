@@ -33,6 +33,7 @@ func TestSelectBasic(t *testing.T) {
 		Name:        "test",
 		Uri:         "sqlite://" + dbPath,
 		EnableCache: true,
+		DbTxEnd:     "commit-allow-override",
 	}
 	cfg.CORS.Enabled = true
 	server.SetConfig(cfg)
@@ -44,6 +45,7 @@ func TestSelectBasic(t *testing.T) {
 	}
 	req.Header.Set("Authorization", "Bearer "+tokenStr)
 	req.Header.Set("If-None-Match", "0000")
+	req.Header.Set("Prefer", "tx=rollback")
 	rr := httptest.NewRecorder()
 	router.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
@@ -64,6 +66,11 @@ func TestSelectBasic(t *testing.T) {
 	if etag == "" {
 		t.Errorf("Expected ETag header to be set, but it was empty. Headers: %v", rr.Header())
 	}
+	prefer := rr.Header().Get("Preference-Applied")
+	if prefer != "tx=rollback timezone=America/Los_Angeles" {
+		t.Errorf("Expected Preference-Applied header to be 'tx=rollback timezone=America/Los_Angeles', got %s", prefer)
+	}
+
 	req, err = http.NewRequest("GET", "/api/test/users/?select=id,name", nil)
 	if err != nil {
 		t.Fatal(err)

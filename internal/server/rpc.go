@@ -101,7 +101,15 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pluginCtx := BuildPluginContext(r)
-	w.Header().Set("Preference-Applied", "timezone="+pluginCtx["timezone"].(string))
+
+	applied := strings.Builder{}
+	tx := pluginCtx["prefer"].(map[string]any)["tx"]
+	if tx != nil {
+		applied.WriteString("tx=" + tx.(string) + " ")
+	}
+	applied.WriteString("timezone=" + pluginCtx["timezone"].(string))
+	w.Header().Set("Preference-Applied", applied.String())
+
 	flatCtx, err := easyrest.FormatToContext(pluginCtx)
 	if err != nil {
 		http.Error(w, "Error formatting context: "+err.Error(), http.StatusInternalServerError)

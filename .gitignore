@@ -5,6 +5,7 @@ release
 cover.out
 structure.txt
 .history
+.vscode
 perf_report.txt
 perf.data
 perf.data.old

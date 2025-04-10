@@ -43,6 +43,9 @@ var httpClient = &http.Client{
 // BuildPluginContext extracts context variables from the HTTP request.
 func BuildPluginContext(r *http.Request) map[string]any {
 	cfg := GetConfig()
+	vars := mux.Vars(r)
+	dbKey := vars["db"]
+	dbConfig := cfg.PluginMap[dbKey]
 	headers := make(map[string]any)
 	for k, vals := range r.Header {
 		lk := strings.ToLower(k)
@@ -55,6 +58,7 @@ func BuildPluginContext(r *http.Request) map[string]any {
 	}
 
 	timezone := ""
+	tx, txAllowOverride := strings.CutSuffix(dbConfig.DbTxEnd, "-allow-override")
 	prefer := make(map[string]any)
 	if preferStr := r.Header.Get("Prefer"); preferStr != "" {
 		tokens := strings.Split(preferStr, " ")
@@ -67,6 +71,10 @@ func BuildPluginContext(r *http.Request) map[string]any {
 			val := parts[1]
 			if key == "timezone" {
 				timezone = val
+			} else if key == "tx" && txAllowOverride {
+				if val == "commit" || val == "rollback" {
+					tx = val
+				}
 			}
 			prefer[key] = val
 		}
@@ -74,6 +82,8 @@ func BuildPluginContext(r *http.Request) map[string]any {
 	if timezone == "" {
 		timezone = cfg.DefaultTimezone
 	}
+
+	prefer["tx"] = tx
 
 	return map[string]any{
 		"timezone":   timezone,
