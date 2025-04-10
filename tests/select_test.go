@@ -2,6 +2,7 @@ package tests
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -67,8 +68,8 @@ func TestSelectBasic(t *testing.T) {
 		t.Errorf("Expected ETag header to be set, but it was empty. Headers: %v", rr.Header())
 	}
 	prefer := rr.Header().Get("Preference-Applied")
-	if prefer != "tx=rollback timezone=America/Los_Angeles" {
-		t.Errorf("Expected Preference-Applied header to be 'tx=rollback timezone=America/Los_Angeles', got %s", prefer)
+	if prefer != fmt.Sprintf("tx=rollback timezone=%s", cfg.DefaultTimezone) {
+		t.Errorf("Expected Preference-Applied header to be '%s', got %s", fmt.Sprintf("tx=rollback timezone=%s", cfg.DefaultTimezone), prefer)
 	}
 
 	req, err = http.NewRequest("GET", "/api/test/users/?select=id,name", nil)
