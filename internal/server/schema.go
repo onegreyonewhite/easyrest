@@ -13,9 +13,57 @@ import (
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
 
+// SwaggerSpec represents the Swagger 2.0 specification structure.
+type SwaggerSpec struct {
+	Swagger             string         `json:"swagger"`
+	Info                SwaggerInfo    `json:"info"`
+	Host                string         `json:"host"`
+	BasePath            string         `json:"basePath"`
+	Schemes             []string       `json:"schemes"`
+	Consumes            []string       `json:"consumes"`
+	Produces            []string       `json:"produces"`
+	Definitions         map[string]any `json:"definitions"`
+	SecurityDefinitions map[string]any `json:"securityDefinitions"`
+	Paths               map[string]any `json:"paths"`
+}
+
+type SwaggerInfo struct {
+	Title   string `json:"title"`
+	Version string `json:"version"`
+}
+
+// PathItem represents a Swagger path item object.
+type PathItem struct {
+	Get    *Operation `json:"get,omitempty"`
+	Post   *Operation `json:"post,omitempty"`
+	Patch  *Operation `json:"patch,omitempty"`
+	Delete *Operation `json:"delete,omitempty"`
+}
+
+// Operation represents a Swagger operation object.
+type Operation struct {
+	Summary     string           `json:"summary"`
+	Description string           `json:"description"`
+	Parameters  []Parameter      `json:"parameters"`
+	Security    []map[string]any `json:"security"`
+	Responses   map[string]any   `json:"responses"`
+}
+
+// Parameter represents a Swagger parameter object.
+type Parameter struct {
+	Name             string `json:"name"`
+	In               string `json:"in"`
+	Description      string `json:"description"`
+	Required         bool   `json:"required"`
+	Type             string `json:"type,omitempty"`
+	Items            any    `json:"items,omitempty"`
+	Schema           any    `json:"schema,omitempty"`
+	CollectionFormat string `json:"collectionFormat,omitempty"`
+}
+
 // buildSwaggerSpec constructs a Swagger 2.0 specification based on table definitions and RPC definitions.
 // dbKey is the current database key.
-func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs, viewDefs, rpcDefs map[string]any) map[string]any {
+func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs, viewDefs, rpcDefs map[string]any) *SwaggerSpec {
 	cfg := GetConfig()
 	pluginCfg, hasPluginCfg := cfg.PluginMap[dbKey]
 
@@ -61,24 +109,7 @@ func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs, viewDefs, rpcDef
 		}
 	}
 
-	swaggerDef := map[string]any{
-		"swagger": "2.0",
-		"info": map[string]any{
-			"title":   title,
-			"version": easyrest.Version,
-		},
-		"host":        r.Host,
-		"basePath":    "/api/" + dbKey,
-		"schemes":     []string{"http"},
-		"consumes":    []string{"application/json"},
-		"produces":    []string{"application/json"},
-		"definitions": mergedDefs,
-		"securityDefinitions": map[string]any{
-			"jwtToken": jwtTokenSecurity,
-		},
-		"paths": map[string]any{},
-	}
-	paths := swaggerDef["paths"].(map[string]any)
+	paths := make(map[string]*PathItem)
 
 	for tableName, modelSchemaRaw := range mergedDefs {
 		modelSchema, ok := modelSchemaRaw.(map[string]any)
@@ -86,16 +117,16 @@ func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs, viewDefs, rpcDef
 			continue
 		}
 		properties, _ := modelSchema["properties"].(map[string]any)
-		pathObject := make(map[string]any)
+		pathItem := &PathItem{}
 
 		// Determine if this table is public
 		isPublicTable := slices.Contains(publicTables, tableName)
 
 		getOp := buildGETEndpoint(tableName, properties)
 		if isPublicTable {
-			getOp["security"] = []map[string]any{} // No security for public
+			getOp.Security = []map[string]any{} // No security for public
 		}
-		pathObject["get"] = getOp
+		pathItem.Get = getOp
 
 		if _, ok := tableDefs[tableName]; ok {
 			// Build additional endpoints (POST, PATCH, DELETE) only for tables.
@@ -103,15 +134,15 @@ func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs, viewDefs, rpcDef
 			patchOp := buildPATCHEndpoint(tableName, properties)
 			deleteOp := buildDELETEEndpoint(tableName, properties)
 			if isPublicTable {
-				postOp["security"] = []map[string]any{}
-				patchOp["security"] = []map[string]any{}
-				deleteOp["security"] = []map[string]any{}
+				postOp.Security = []map[string]any{}
+				patchOp.Security = []map[string]any{}
+				deleteOp.Security = []map[string]any{}
 			}
-			pathObject["post"] = postOp
-			pathObject["patch"] = patchOp
-			pathObject["delete"] = deleteOp
+			pathItem.Post = postOp
+			pathItem.Patch = patchOp
+			pathItem.Delete = deleteOp
 		}
-		paths["/"+tableName+"/"] = pathObject
+		paths["/"+tableName+"/"] = pathItem
 	}
 
 	// If RPC definitions exist, add them to the swaggerSpec.
@@ -136,36 +167,55 @@ func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs, viewDefs, rpcDef
 		if isPublicFunc {
 			security = []map[string]any{} // No security for public
 		}
-		op := map[string]any{
-			"summary":     fmt.Sprintf("Call RPC function %s", funcName),
-			"description": fmt.Sprintf("Invoke the RPC function %s", funcName),
-			"parameters": []map[string]any{
+		op := &Operation{
+			Summary:     fmt.Sprintf("Call RPC function %s", funcName),
+			Description: fmt.Sprintf("Invoke the RPC function %s", funcName),
+			Parameters: []Parameter{
 				{
-					"name":        "body",
-					"in":          "body",
-					"description": "RPC request payload",
-					"required":    true,
-					"schema":      reqSchema,
+					Name:        "body",
+					In:          "body",
+					Description: "RPC request payload",
+					Required:    true,
+					Schema:      reqSchema,
 				},
 			},
-			"responses": map[string]map[string]any{
-				"200": {
+			Responses: map[string]any{
+				"200": map[string]any{
 					"description": "RPC response",
 					"schema":      respSchema,
 				},
 			},
-			"security": security,
+			Security: security,
 		}
-		paths[path] = map[string]any{
-			"post": op,
-		}
+		paths[path] = &PathItem{Post: op}
+	}
+
+	swaggerDef := &SwaggerSpec{
+		Swagger: "2.0",
+		Info: SwaggerInfo{
+			Title:   title,
+			Version: easyrest.Version,
+		},
+		Host:        r.Host,
+		BasePath:    "/api/" + dbKey,
+		Schemes:     []string{"http"},
+		Consumes:    []string{"application/json"},
+		Produces:    []string{"application/json"},
+		Definitions: mergedDefs,
+		SecurityDefinitions: map[string]any{
+			"jwtToken": jwtTokenSecurity,
+		},
+		Paths: make(map[string]any),
+	}
+	for k, v := range paths {
+		swaggerDef.Paths[k] = v
 	}
 
 	return swaggerDef
 }
 
 // buildGETEndpoint constructs a GET operation map with query parameters for the given name and property set.
-func buildGETEndpoint(name string, properties map[string]any) map[string]any {
+func buildGETEndpoint(name string, properties map[string]any) *Operation {
 	var fieldNames []string
 
 	for fieldName := range properties {
@@ -173,11 +223,11 @@ func buildGETEndpoint(name string, properties map[string]any) map[string]any {
 	}
 
 	getParams := buildSchemaParams(fieldNames, properties, true)
-	return map[string]any{
-		"summary":     fmt.Sprintf("Get %s", name),
-		"description": fmt.Sprintf("Retrieve rows from the %s", name),
-		"parameters":  getParams,
-		"responses": map[string]any{
+	return &Operation{
+		Summary:     fmt.Sprintf("Get %s", name),
+		Description: fmt.Sprintf("Retrieve rows from the %s", name),
+		Parameters:  getParams,
+		Responses: map[string]any{
 			"200": map[string]any{
 				"description": "Successful response",
 				"schema": map[string]any{
@@ -186,7 +236,7 @@ func buildGETEndpoint(name string, properties map[string]any) map[string]any {
 				},
 			},
 		},
-		"security": []map[string]any{
+		Security: []map[string]any{
 			{"jwtToken": []string{}},
 		},
 	}
@@ -194,8 +244,8 @@ func buildGETEndpoint(name string, properties map[string]any) map[string]any {
 
 // buildGETParams creates the common query parameters (select, ordering, limit, offset)
 // plus where-filters based on the field types.
-func buildSchemaParams(fieldNames []string, properties map[string]any, isGet bool) []map[string]any {
-	var params []map[string]any
+func buildSchemaParams(fieldNames []string, properties map[string]any, isGet bool) []Parameter {
+	var params []Parameter
 
 	if isGet {
 		orderingFieldNames := make([]string, 0)
@@ -204,38 +254,38 @@ func buildSchemaParams(fieldNames []string, properties map[string]any, isGet boo
 			orderingFieldNames = append(orderingFieldNames, "-"+fieldName)
 		}
 		// Basic query parameters: select, ordering, limit, offset.
-		params = append(params, []map[string]any{
+		params = append(params, []Parameter{
 			{
-				"name":             "select",
-				"in":               "query",
-				"description":      "Comma-separated list of fields",
-				"type":             "array",
-				"items":            map[string]any{"type": "string", "enum": fieldNames},
-				"required":         false,
-				"collectionFormat": "csv",
+				Name:             "select",
+				In:               "query",
+				Description:      "Comma-separated list of fields",
+				Type:             "array",
+				Items:            map[string]any{"type": "string", "enum": fieldNames},
+				Required:         false,
+				CollectionFormat: "csv",
 			},
 			{
-				"name":             "ordering",
-				"in":               "query",
-				"description":      "Comma-separated ordering fields",
-				"type":             "array",
-				"items":            map[string]any{"type": "string", "enum": orderingFieldNames},
-				"required":         false,
-				"collectionFormat": "csv",
+				Name:             "ordering",
+				In:               "query",
+				Description:      "Comma-separated ordering fields",
+				Type:             "array",
+				Items:            map[string]any{"type": "string", "enum": orderingFieldNames},
+				Required:         false,
+				CollectionFormat: "csv",
 			},
 			{
-				"name":        "limit",
-				"in":          "query",
-				"description": "Maximum number of records to return",
-				"type":        "integer",
-				"required":    false,
+				Name:        "limit",
+				In:          "query",
+				Description: "Maximum number of records to return",
+				Type:        "integer",
+				Required:    false,
 			},
 			{
-				"name":        "offset",
-				"in":          "query",
-				"description": "Number of records to skip",
-				"type":        "integer",
-				"required":    false,
+				Name:        "offset",
+				In:          "query",
+				Description: "Number of records to skip",
+				Type:        "integer",
+				Required:    false,
 			},
 		}...)
 	}
@@ -260,14 +310,15 @@ func buildSchemaParams(fieldNames []string, properties map[string]any, isGet boo
 					continue
 				}
 			}
-			param := make(map[string]any)
-			param["name"] = fmt.Sprintf("where.%s.%s", op, fieldName)
-			param["description"] = fmt.Sprintf("Filter for field '%s' with operator %s", fieldName, op)
-			param["in"] = "query"
-			param["type"] = paramType
-			param["required"] = false
+			param := Parameter{
+				Name:        fmt.Sprintf("where.%s.%s", op, fieldName),
+				Description: fmt.Sprintf("Filter for field '%s' with operator %s", fieldName, op),
+				In:          "query",
+				Type:        paramType,
+				Required:    false,
+			}
 			if op == "in" {
-				param["collectionFormat"] = "csv"
+				param.CollectionFormat = "csv"
 			}
 			params = append(params, param)
 		}
@@ -277,52 +328,52 @@ func buildSchemaParams(fieldNames []string, properties map[string]any, isGet boo
 }
 
 // buildPOSTEndpoint returns a POST operation map for the given table name.
-func buildPOSTEndpoint(name string) map[string]any {
-	return map[string]any{
-		"summary":     fmt.Sprintf("Create rows in %s", name),
-		"description": fmt.Sprintf("Insert new rows into %s", name),
-		"parameters": []map[string]any{
+func buildPOSTEndpoint(name string) *Operation {
+	return &Operation{
+		Summary:     fmt.Sprintf("Create rows in %s", name),
+		Description: fmt.Sprintf("Insert new rows into %s", name),
+		Parameters: []Parameter{
 			{
-				"name":        "body",
-				"in":          "body",
-				"description": fmt.Sprintf("Array of %s objects", name),
-				"required":    true,
-				"schema": map[string]any{
+				Name:        "body",
+				In:          "body",
+				Description: fmt.Sprintf("Array of %s objects", name),
+				Required:    true,
+				Schema: map[string]any{
 					"type":  "array",
 					"items": map[string]any{"$ref": "#/definitions/" + name},
 				},
 			},
 		},
-		"responses": map[string]any{
+		Responses: map[string]any{
 			"201": map[string]any{
 				"description": "Rows created",
 			},
 		},
-		"security": []map[string]any{
+		Security: []map[string]any{
 			{"jwtToken": []string{}},
 		},
 	}
 }
 
 // buildPATCHEndpoint returns a PATCH operation map for the given table name.
-func buildPATCHEndpoint(name string, properties map[string]any) map[string]any {
+func buildPATCHEndpoint(name string, properties map[string]any) *Operation {
 	var fieldNames []string
 
 	for fieldName := range properties {
 		fieldNames = append(fieldNames, fieldName)
 	}
 	getParams := buildSchemaParams(fieldNames, properties, false)
-	return map[string]any{
-		"summary":     fmt.Sprintf("Update rows in %s", name),
-		"description": fmt.Sprintf("Update existing rows in %s", name),
-		"parameters": append(getParams, map[string]any{
-			"name":        "body",
-			"in":          "body",
-			"description": fmt.Sprintf("Partial update of a %s object", name),
-			"required":    true,
-			"schema":      map[string]any{"$ref": "#/definitions/" + name},
+	return &Operation{
+		Summary:     fmt.Sprintf("Update rows in %s", name),
+		Description: fmt.Sprintf("Update existing rows in %s", name),
+		Parameters: append(getParams, Parameter{
+			Name:        "body",
+			In:          "body",
+			Description: fmt.Sprintf("Partial update of a %s object", name),
+			Required:    true,
+			Schema:      map[string]any{"$ref": "#/definitions/" + name},
 		}),
-		"responses": map[string]any{
+		Responses: map[string]any{
 			"200": map[string]any{
 				"description": "Rows updated",
 				"schema": map[string]any{
@@ -333,14 +384,14 @@ func buildPATCHEndpoint(name string, properties map[string]any) map[string]any {
 				},
 			},
 		},
-		"security": []map[string]any{
+		Security: []map[string]any{
 			{"jwtToken": []string{}},
 		},
 	}
 }
 
 // buildDELETEEndpoint returns a DELETE operation map for the given table name.
-func buildDELETEEndpoint(name string, properties map[string]any) map[string]any {
+func buildDELETEEndpoint(name string, properties map[string]any) *Operation {
 	var fieldNames []string
 
 	for fieldName := range properties {
@@ -348,16 +399,16 @@ func buildDELETEEndpoint(name string, properties map[string]any) map[string]any 
 	}
 	getParams := buildSchemaParams(fieldNames, properties, false)
 
-	return map[string]any{
-		"summary":     fmt.Sprintf("Delete rows from %s", name),
-		"description": fmt.Sprintf("Delete rows from %s", name),
-		"parameters":  getParams,
-		"responses": map[string]any{
+	return &Operation{
+		Summary:     fmt.Sprintf("Delete rows from %s", name),
+		Description: fmt.Sprintf("Delete rows from %s", name),
+		Parameters:  getParams,
+		Responses: map[string]any{
 			"204": map[string]any{
 				"description": "Rows deleted",
 			},
 		},
-		"security": []map[string]any{
+		Security: []map[string]any{
 			{"jwtToken": []string{}},
 		},
 	}

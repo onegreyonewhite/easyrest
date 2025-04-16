@@ -721,7 +721,6 @@ func LoadPlugins() {
 		var pluginPath string
 		if pluginCfg.Path != "" {
 			pluginPath = pluginCfg.Path
-			// stdlog.Printf("Plugin path from config: %s\n", pluginPath) // Less verbose logging
 			if strings.HasPrefix(pluginPath, "~/") {
 				homeDir, err := os.UserHomeDir()
 				if err != nil {

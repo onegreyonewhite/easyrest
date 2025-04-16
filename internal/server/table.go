@@ -150,42 +150,6 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// ETag handling START - Only if EnableCache is true for this plugin
-	var currentETag string
-	var cachePlugin easyrest.CachePlugin = getFirstCachePlugin(dbKey)
-	var etagKey string
-
-	if cachePlugin != nil {
-		etagKey = fmt.Sprintf("etag:%s:%s", dbKey, table)
-		ifMatch := r.Header.Get("If-Match")
-		ifNoneMatch := r.Header.Get("If-None-Match")
-		cachePlugin = getFirstCachePlugin(dbKey)
-
-		// Only get cache plugin and ETag if cache is enabled AND relevant headers are present/needed
-		if ifMatch != "" || ifNoneMatch != "" || r.Method == http.MethodGet || r.Method == http.MethodHead {
-			if cachePlugin != nil {
-				currentETag = getOrGenerateETag(cachePlugin, etagKey)
-			}
-		}
-
-		// Check If-None-Match for GET/HEAD requests (only if cache is enabled)
-		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && ifNoneMatch != "" {
-			if cachePlugin != nil && ifNoneMatch == currentETag {
-				w.Header().Set("ETag", currentETag)
-				w.WriteHeader(http.StatusNotModified)
-				return
-			}
-		}
-
-		// Check If-Match for write operations (POST, PATCH, DELETE) (only if cache is enabled)
-		if (r.Method == http.MethodPost || r.Method == http.MethodPatch || r.Method == http.MethodDelete) && ifMatch != "" {
-			if cachePlugin == nil || ifMatch != currentETag {
-				w.WriteHeader(http.StatusPreconditionFailed)
-				return
-			}
-		}
-	} // End of if pluginCfg.EnableCache
-	// ETag handling END
 
 	// Get current plugins map
 	currentDbPlugins := *DbPlugins.Load()
@@ -224,6 +188,43 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	// ETag handling START - Only if EnableCache is true for this plugin
+	var currentETag string
+	var cachePlugin easyrest.CachePlugin = getFirstCachePlugin(dbKey)
+	var etagKey string
+
+	if cachePlugin != nil {
+		etagKey = fmt.Sprintf("etag:%s:%s", dbKey, table)
+		ifMatch := r.Header.Get("If-Match")
+		ifNoneMatch := r.Header.Get("If-None-Match")
+		cachePlugin = getFirstCachePlugin(dbKey)
+
+		// Only get cache plugin and ETag if cache is enabled AND relevant headers are present/needed
+		if ifMatch != "" || ifNoneMatch != "" || r.Method == http.MethodGet || r.Method == http.MethodHead {
+			if cachePlugin != nil {
+				currentETag = getOrGenerateETag(cachePlugin, etagKey)
+			}
+		}
+
+		// Check If-None-Match for GET/HEAD requests (only if cache is enabled)
+		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && ifNoneMatch != "" {
+			if cachePlugin != nil && ifNoneMatch == currentETag {
+				w.Header().Set("ETag", currentETag)
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+		}
+
+		// Check If-Match for write operations (POST, PATCH, DELETE) (only if cache is enabled)
+		if (r.Method == http.MethodPost || r.Method == http.MethodPatch || r.Method == http.MethodDelete) && ifMatch != "" {
+			if cachePlugin == nil || ifMatch != currentETag {
+				w.WriteHeader(http.StatusPreconditionFailed)
+				return
+			}
+		}
+	} // End of if pluginCfg.EnableCache
+	// ETag handling END
 
 	pluginCtx := BuildPluginContext(r)
 	applied := strings.Builder{}
