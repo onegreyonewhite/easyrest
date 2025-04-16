@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"slices"
+
 	"github.com/gorilla/mux"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
@@ -134,8 +136,19 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 	dbKey := strings.ToLower(vars["db"])
 	table := vars["table"]
 
-	// Get plugin config to check EnableCache
-	config := GetConfig() // Get global config first
+	// Get global config
+	config := GetConfig()
+
+	// Get plugin config
+	pluginCfg, hasPluginCfg := config.PluginMap[dbKey]
+
+	// Check if table restricted for this dbKey
+	if hasPluginCfg {
+		if slices.Contains(pluginCfg.Exclude.Table, table) {
+			http.Error(w, "Not found", http.StatusNotFound)
+			return
+		}
+	}
 
 	// ETag handling START - Only if EnableCache is true for this plugin
 	var currentETag string
@@ -183,6 +196,14 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if table is public for this dbKey
+	isPublicTable := false
+	if hasPluginCfg {
+		if slices.Contains(pluginCfg.Public.Table, table) {
+			isPublicTable = true
+		}
+	}
+
 	userID, r, err := Authenticate(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
@@ -195,7 +216,8 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		requiredScope = table + "-write"
 	}
-	if config.CheckScope {
+	if config.CheckScope && !isPublicTable {
+		w.Header().Add("Vary", "Authorization")
 		claims := getTokenClaims(r)
 		if !CheckScope(claims, requiredScope) {
 			http.Error(w, "Forbidden: insufficient scope", http.StatusForbidden)
@@ -243,6 +265,9 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 		ordering := ParseCSV(queryValues.Get("ordering"))
 		limit, _ := strconv.Atoi(queryValues.Get("limit"))
 		offset, _ := strconv.Atoi(queryValues.Get("offset"))
+		if limit == 0 {
+			limit = pluginCfg.DefaultLimit
+		}
 
 		startTime := time.Now()
 		rows, err := dbPlug.TableGet(userID, table, selectFields, where, ordering, groupBy, limit, offset, pluginCtx)

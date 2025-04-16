@@ -1,4 +1,5 @@
 port: 8080
+access_log: true
 token_user_search: sub
 token_url: https://auth.example.com/token
 auth_flow: password
@@ -23,8 +24,15 @@ plugin_configs:
   - ./test.yaml
 plugins:
   test:
+    title: "Test API"
     uri: sqlite://./test.db
     enable_cache: true
+    exclude:
+      table:
+        - easyrest_cache
   # cache:
   #   uri: sqlite://./test.db
   #   type: cache
+anon_claims:
+  role: "anonymous"
+  sub: 0

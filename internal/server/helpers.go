@@ -96,7 +96,8 @@ func SetConfig(newConfig config.Config) {
 }
 
 func ReloadConfig() {
-	cfg = config.Load()
+	cfgOnce = sync.Once{}
+	schemaCache = make(map[string]any)
 }
 
 func StopPlugins() {
@@ -329,7 +330,7 @@ func parseRequest(r *http.Request, expectArray bool) (interface{}, error) {
 			// XML does not have a standard representation for an array of objects.
 			// Expect something like <items><item>...</item><item>...</item></items>.
 			var result struct {
-				Items []map[string]interface{} `xml:"item"`
+				Items []map[string]any `xml:"item"`
 			}
 			if err := xml.NewDecoder(r.Body).Decode(&result); err != nil {
 				return nil, fmt.Errorf("XML parse error: %w", err)
@@ -338,7 +339,7 @@ func parseRequest(r *http.Request, expectArray bool) (interface{}, error) {
 		} else {
 			// For XML, a root element is required.
 			var wrapper struct {
-				Data map[string]interface{} `xml:",any"`
+				Data map[string]any `xml:",any"`
 			}
 			if err := xml.NewDecoder(r.Body).Decode(&wrapper); err != nil {
 				return nil, fmt.Errorf("XML parse error: %w", err)
@@ -352,7 +353,7 @@ func parseRequest(r *http.Request, expectArray bool) (interface{}, error) {
 }
 
 // makeResponse transforms the data according to the Accept header and sends the response.
-func makeResponse(w http.ResponseWriter, r *http.Request, status int, v interface{}) {
+func makeResponse(w http.ResponseWriter, r *http.Request, status int, v any) {
 	// Determine output format based on the Accept header
 	acceptHeader := r.Header.Get("Accept")
 	contentType := r.Header.Get("Content-Type")
@@ -360,6 +361,7 @@ func makeResponse(w http.ResponseWriter, r *http.Request, status int, v interfac
 	// If Accept is not set or equals */*, use Content-Type
 	if acceptHeader == "" || acceptHeader == "*/*" {
 		acceptHeader = contentType
+		w.Header().Add("Vary", "Content-Type")
 	}
 
 	// If Accept contains multiple types, take the first
@@ -371,6 +373,8 @@ func makeResponse(w http.ResponseWriter, r *http.Request, status int, v interfac
 		acceptHeader = acceptHeader[:idx]
 	}
 	acceptHeader = strings.TrimSpace(acceptHeader)
+
+	w.Header().Add("Vary", "Accept")
 
 	switch acceptHeader {
 	case "application/json", "":
@@ -444,10 +448,6 @@ func makeResponse(w http.ResponseWriter, r *http.Request, status int, v interfac
 		w.Header().Set("Content-Type", "application/xml")
 		w.WriteHeader(status)
 
-		encoder := xml.NewEncoder(w)
-		encoder.Indent("", "  ")
-
-		// Wrap the data in a root element.
 		fmt.Fprintf(w, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
 
 		// Handle different types of data.

@@ -248,9 +248,23 @@ plugins:
     # URI format: <plugin_type>://<connection_details>
     # The plugin_type (e.g., 'sqlite') determines the executable name (easyrest-plugin-sqlite)
     uri: "sqlite://./test.db"
+    title: "Main Test Database API" # Optional: Custom title for this API in Swagger
     enable_cache: true # Enable ETag caching for this connection
     cache_name: test
     db_tx_end: commit-allow-override # Explicitly set default behavior
+    # Define tables/functions accessible without authentication
+    public:
+      table:
+        - public_info
+      func:
+        - get_server_status
+    # Define tables/functions to hide completely from the API schema
+    exclude:
+      table:
+        - internal_metadata
+        - migration_history
+      func:
+        - internal_cleanup_job
     cache_invalidation_map:
       process_order:
         - orders
@@ -277,7 +291,19 @@ plugins:
 # - name: plugin_name # Name used in API path
 #   uri: "plugin_type://connection_string"
 #   path: "/path/to/plugin/binary" # Optional: Explicit path to plugin binary
+#   title: "Custom API Title" # Optional: Override the default API title in Swagger
 #   enable_cache: true # Optional: Enable ETag caching (default: false)
+#   public: # Optional: Define tables/functions accessible without JWT authentication
+#     table:
+#       - public_table1
+#       - public_table2
+#     func:
+#       - public_rpc1
+#   exclude: # Optional: Define tables/functions to hide from the API schema
+#     table:
+#       - hidden_table1
+#     func:
+#       - hidden_rpc1
 #   cache_invalidation_map: # Optional: Map RPC function names to tables whose ETags should be invalidated
 #     rpc_function_name:
 #       - table1_to_invalidate
@@ -298,6 +324,7 @@ plugins:
         - `name`: (Required in external files, derived from map key in inline definitions) The identifier used in the API path (`/api/<name>/`).
         - `uri`: (Required) Specifies the plugin type and connection details. The type (e.g., `sqlite`) maps to the executable name (`easyrest-plugin-sqlite`).
         - `path`: (Optional) Explicit path to the plugin executable. If omitted, EasyREST searches standard locations.
+        - `title`: (Optional) A custom title for this specific plugin's API documentation (Swagger schema). If omitted, the default title "EasyRest API" is used.
         - `enable_cache`: (Optional, defaults to `false`) If `true`, enables ETag generation and checking (`If-Match`, `If-None-Match`) for **requests to this DB plugin's tables**. Requires at least one Cache plugin to be configured and loaded. This setting itself **does not affect** Cache plugins directly but enables the caching mechanism for operations related to this specific DB plugin.
         - `cache_name`: (Optional) Specifies the name (key from `plugins` map or `name` from an external file) of the **Cache plugin** that should be used for ETag caching for **this DB plugin**. If omitted, EasyREST first looks for a Cache plugin with the same name as this DB plugin (e.g., if the DB plugin name is `test`, it looks for Cache plugin `test`). If not found, it falls back to the first available Cache plugin. This setting allows flexible linking between DB and Cache plugins.
         - `cache_invalidation_map`: (Optional) A map where keys are RPC function names (used via `/api/<name>/rpc/<function_name>`) and values are lists of table names. When a listed RPC function is successfully executed for **this DB plugin** (`<name>`), the ETags for the specified tables associated with **this same DB plugin** are invalidated in the **corresponding Cache plugin**. This is useful if an RPC call modifies data in related tables.
@@ -306,6 +333,13 @@ plugins:
             - `commit-allow-override`: Commit by default, but allow `Prefer: tx=rollback` to force a rollback even on success. **(Default behavior)**
             - `rollback`: Always roll back the transaction, even upon successful completion. Ignore `Prefer: tx=commit`. Useful for read-only simulations or dry runs.
             - `rollback-allow-override`: Roll back by default, but allow `Prefer: tx=commit` to force a commit on success.
+        - `public`: (Optional) Defines tables and RPC functions within this plugin that are accessible **without any authentication** (no JWT required).
+            - `table`: A list of table names that can be accessed publicly.
+            - `func`: A list of RPC function names that can be called publicly.
+            Scope checks (`check_scope`) are skipped for these public resources.
+        - `exclude`: (Optional) Defines tables and RPC functions within this plugin that should be completely **hidden** from the API. They will not appear in the generated Swagger schema.
+            - `table`: A list of table names to exclude.
+            - `func`: A list of RPC function names to exclude.
 
 - The server merges plugin definitions from `plugin_configs` files and the inline `plugins` map. Definitions in the inline map take precedence if names conflict.
 

@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	stdlog "log" // Added for logging cache invalidation errors
@@ -11,54 +12,25 @@ import (
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
 
-// updateSwaggerSpecWithRPC adds paths for RPC functions based on rpcDefinitions.
-func updateSwaggerSpecWithRPC(swaggerSpec map[string]any, rpcDefinitions map[string]any) {
-	paths, ok := swaggerSpec["paths"].(map[string]any)
-	if !ok {
-		paths = make(map[string]any)
-		swaggerSpec["paths"] = paths
-	}
-	for funcName, def := range rpcDefinitions {
-		arr, ok := def.([]any)
-		if !ok || len(arr) != 2 {
-			continue
-		}
-		reqSchema := arr[0]
-		respSchema := arr[1]
-		path := "/rpc/" + funcName + "/"
-		op := map[string]any{
-			"summary":     fmt.Sprintf("Call RPC function %s", funcName),
-			"description": fmt.Sprintf("Invoke the RPC function %s", funcName),
-			"parameters": []any{
-				map[string]any{
-					"name":        "body",
-					"in":          "body",
-					"description": "RPC request payload",
-					"required":    true,
-					"schema":      reqSchema,
-				},
-			},
-			"responses": map[string]any{
-				"200": map[string]any{
-					"description": "RPC response",
-					"schema":      respSchema,
-				},
-			},
-			"security": []map[string]any{
-				{"jwtToken": []string{}},
-			},
-		}
-		paths[path] = map[string]any{
-			"post": op,
-		}
-	}
-}
-
 // rpcHandler processes RPC calls to plugin functions.
 func rpcHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	dbKey := strings.ToLower(vars["db"])
 	funcName := vars["func"]
+
+	// Get global config
+	config := GetConfig()
+
+	// Get plugin config
+	pluginCfg, hasPluginCfg := config.PluginMap[dbKey]
+
+	// Check if function is restricted for this dbKey
+	if hasPluginCfg {
+		if slices.Contains(pluginCfg.Exclude.Func, funcName) {
+			http.Error(w, "Not found", http.StatusNotFound)
+			return
+		}
+	}
 
 	// Get current plugins map
 	currentDbPlugins := *DbPlugins.Load()
@@ -76,9 +48,15 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	config := GetConfig() // Moved GetConfig call earlier to access PluginMap
-	if config.CheckScope {
+	// Check if function is public for this dbKey
+	isPublicFunc := false
+	if hasPluginCfg {
+		isPublicFunc = slices.Contains(pluginCfg.Public.Func, funcName)
+	}
+
+	if config.CheckScope && !isPublicFunc {
 		requiredScope := funcName + "-write" // Assuming RPC calls are write operations for scope check
+		w.Header().Add("Vary", "Authorization")
 		claims := getTokenClaims(r)
 		if !CheckScope(claims, requiredScope) {
 			http.Error(w, "Forbidden: insufficient scope", http.StatusForbidden)

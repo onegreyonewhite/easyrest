@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes" // Required for yaml.Decoder
+	"encoding/json"
 	"fmt"
 	"io" // Required for yaml.Decoder EOF check
 	"log"
@@ -12,6 +13,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type AccessConfig struct {
+	Table []string `yaml:"table,omitempty"`
+	Func  []string `yaml:"func,omitempty"`
+}
+
 type PluginConfig struct {
 	Name                string              `yaml:"name,omitempty"`
 	Uri                 string              `yaml:"uri"`
@@ -20,6 +26,10 @@ type PluginConfig struct {
 	EnableCache         bool                `yaml:"enable_cache,omitempty"`
 	CacheName           string              `yaml:"cache_name,omitempty"`
 	DbTxEnd             string              `yaml:"db_tx_end,omitempty"`
+	Public              AccessConfig        `yaml:"public,omitempty"`
+	Exclude             AccessConfig        `yaml:"exclude,omitempty"`
+	Title               string              `yaml:"title,omitempty"`
+	DefaultLimit        int                 `yaml:"default_limit,omitempty"`
 }
 
 type CORSConfig struct {
@@ -38,6 +48,7 @@ type Config struct {
 	NoPluginLog     bool   `yaml:"plugin_log"`
 	AccessLogOn     bool   `yaml:"access_log"`
 	DefaultTimezone string `yaml:"default_timezone"`
+	DefaultLimit    int    `yaml:"default_limit"`
 	TokenURL        string `yaml:"token_url"`
 	AuthFlow        string `yaml:"auth_flow"`
 	// CORS settings
@@ -48,8 +59,9 @@ type Config struct {
 	TLSCertFile string `yaml:"tls_cert_file"`
 	TLSKeyFile  string `yaml:"tls_key_file"`
 	// Plugin settings
-	Plugins   []string                `yaml:"plugin_configs"`
-	PluginMap map[string]PluginConfig `yaml:"plugins"`
+	Plugins    []string                `yaml:"plugin_configs"`
+	PluginMap  map[string]PluginConfig `yaml:"plugins"`
+	AnonClaims map[string]any          `yaml:"anon_claims,omitempty"`
 }
 
 func LoadPluginConfigs(configs []string) map[string]PluginConfig {
@@ -252,8 +264,19 @@ func Load() Config {
 		TLSCertFile: tlsCertFile,
 		TLSKeyFile:  tlsKeyFile,
 		// Plugin settings
-		Plugins:   pluginsList,
-		PluginMap: make(map[string]PluginConfig),
+		Plugins:    pluginsList,
+		PluginMap:  make(map[string]PluginConfig),
+		AnonClaims: make(map[string]any),
+	}
+
+	// Load AnonClaims from environment variable if present (as JSON)
+	if anonClaimsStr := os.Getenv("ER_ANON_CLAIMS"); anonClaimsStr != "" {
+		var anonClaims map[string]any
+		if err := json.Unmarshal([]byte(anonClaimsStr), &anonClaims); err == nil {
+			cfg.AnonClaims = anonClaims
+		} else {
+			log.Printf("Failed to parse ER_ANON_CLAIMS: %v", err)
+		}
 	}
 
 	// Load config from environment variable
@@ -266,12 +289,29 @@ func Load() Config {
 		}
 	}
 
+	if cfg.AccessLogOn {
+		log.Print("Access log enabled\n")
+	}
+
+	if cfg.CheckScope {
+		log.Print("Token's scope check enabled\n")
+	}
+
+	log.Printf("Default server timezone: %s\n", cfg.DefaultTimezone)
+
+	if cfg.DefaultLimit == 0 {
+		cfg.DefaultLimit = 100
+	}
+
 	for pluginName, pluginCfg := range cfg.PluginMap {
 		pluginCfg.Name = pluginName
 		if pluginCfg.DbTxEnd == "" {
 			pluginCfg.DbTxEnd = "commit"
 		}
 		cfg.PluginMap[pluginName] = pluginCfg
+		if pluginCfg.DefaultLimit == 0 {
+			pluginCfg.DefaultLimit = cfg.DefaultLimit
+		}
 	}
 
 	for name, plcfg := range LoadPluginConfigs(cfg.Plugins) {

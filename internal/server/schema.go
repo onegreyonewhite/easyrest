@@ -5,6 +5,10 @@ import (
 	"net/http"
 	"strings"
 
+	"slices"
+
+	"maps"
+
 	"github.com/gorilla/mux"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
@@ -13,17 +17,23 @@ import (
 // dbKey is the current database key.
 func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs, viewDefs, rpcDefs map[string]any) map[string]any {
 	cfg := GetConfig()
+	pluginCfg, hasPluginCfg := cfg.PluginMap[dbKey]
 
 	// Merge tables and views into one definitions map.
 	mergedDefs := make(map[string]any)
-	for k, v := range tableDefs {
-		mergedDefs[k] = v
-	}
-	for k, v := range viewDefs {
-		mergedDefs[k] = v
+	maps.Copy(mergedDefs, tableDefs)
+	maps.Copy(mergedDefs, viewDefs)
+
+	// Remove restricted tables
+	if hasPluginCfg {
+		for k := range mergedDefs {
+			if slices.Contains(pluginCfg.Exclude.Table, k) {
+				delete(mergedDefs, k)
+			}
+		}
 	}
 
-	jwtTokenSecurity := make(map[string]any)
+	var jwtTokenSecurity map[string]any
 	if cfg.TokenURL != "" {
 		jwtTokenSecurity = map[string]any{
 			"type":     "oauth2",
@@ -40,10 +50,21 @@ func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs, viewDefs, rpcDef
 		}
 	}
 
+	// Get public tables and funcs for this dbKey
+	var publicTables, publicFuncs []string
+	title := "EasyRest API"
+	if pluginCfg, ok := cfg.PluginMap[dbKey]; ok {
+		publicTables = pluginCfg.Public.Table
+		publicFuncs = pluginCfg.Public.Func
+		if pluginCfg.Title != "" {
+			title = pluginCfg.Title
+		}
+	}
+
 	swaggerDef := map[string]any{
 		"swagger": "2.0",
 		"info": map[string]any{
-			"title":   "EasyRest API",
+			"title":   title,
 			"version": easyrest.Version,
 		},
 		"host":        r.Host,
@@ -66,21 +87,78 @@ func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs, viewDefs, rpcDef
 		}
 		properties, _ := modelSchema["properties"].(map[string]any)
 		pathObject := make(map[string]any)
-		pathObject["get"] = buildGETEndpoint(tableName, properties)
+
+		// Determine if this table is public
+		isPublicTable := slices.Contains(publicTables, tableName)
+
+		getOp := buildGETEndpoint(tableName, properties)
+		if isPublicTable {
+			getOp["security"] = []map[string]any{} // No security for public
+		}
+		pathObject["get"] = getOp
 
 		if _, ok := tableDefs[tableName]; ok {
-			// Build additional endpoints (POST, PATCH, DELETE)
-			// only for tables.
-			pathObject["post"] = buildPOSTEndpoint(tableName)
-			pathObject["patch"] = buildPATCHEndpoint(tableName, properties)
-			pathObject["delete"] = buildDELETEEndpoint(tableName, properties)
+			// Build additional endpoints (POST, PATCH, DELETE) only for tables.
+			postOp := buildPOSTEndpoint(tableName)
+			patchOp := buildPATCHEndpoint(tableName, properties)
+			deleteOp := buildDELETEEndpoint(tableName, properties)
+			if isPublicTable {
+				postOp["security"] = []map[string]any{}
+				patchOp["security"] = []map[string]any{}
+				deleteOp["security"] = []map[string]any{}
+			}
+			pathObject["post"] = postOp
+			pathObject["patch"] = patchOp
+			pathObject["delete"] = deleteOp
 		}
 		paths["/"+tableName+"/"] = pathObject
 	}
 
 	// If RPC definitions exist, add them to the swaggerSpec.
-	if rpcDefs != nil {
-		updateSwaggerSpecWithRPC(swaggerDef, rpcDefs)
+	// Patch updateSwaggerSpecWithRPC to support public funcs
+	for funcName, def := range rpcDefs {
+		arr, ok := def.([]any)
+		if !ok || len(arr) != 2 {
+			continue
+		}
+
+		// Check if function is restricted for this dbKey
+		if hasPluginCfg {
+			if slices.Contains(pluginCfg.Exclude.Func, funcName) {
+				continue
+			}
+		}
+		reqSchema := arr[0]
+		respSchema := arr[1]
+		path := "/rpc/" + funcName + "/"
+		isPublicFunc := slices.Contains(publicFuncs, funcName)
+		security := []map[string]any{{"jwtToken": []string{}}}
+		if isPublicFunc {
+			security = []map[string]any{} // No security for public
+		}
+		op := map[string]any{
+			"summary":     fmt.Sprintf("Call RPC function %s", funcName),
+			"description": fmt.Sprintf("Invoke the RPC function %s", funcName),
+			"parameters": []map[string]any{
+				{
+					"name":        "body",
+					"in":          "body",
+					"description": "RPC request payload",
+					"required":    true,
+					"schema":      reqSchema,
+				},
+			},
+			"responses": map[string]map[string]any{
+				"200": {
+					"description": "RPC response",
+					"schema":      respSchema,
+				},
+			},
+			"security": security,
+		}
+		paths[path] = map[string]any{
+			"post": op,
+		}
 	}
 
 	return swaggerDef
@@ -120,22 +198,28 @@ func buildSchemaParams(fieldNames []string, properties map[string]any, isGet boo
 	var params []map[string]any
 
 	if isGet {
+		orderingFieldNames := make([]string, 0)
+		for _, fieldName := range fieldNames {
+			orderingFieldNames = append(orderingFieldNames, fieldName)
+			orderingFieldNames = append(orderingFieldNames, "-"+fieldName)
+		}
 		// Basic query parameters: select, ordering, limit, offset.
 		params = append(params, []map[string]any{
 			{
 				"name":             "select",
 				"in":               "query",
 				"description":      "Comma-separated list of fields",
-				"type":             "string",
+				"type":             "array",
+				"items":            map[string]any{"type": "string", "enum": fieldNames},
 				"required":         false,
-				"enum":             fieldNames,
 				"collectionFormat": "csv",
 			},
 			{
 				"name":             "ordering",
 				"in":               "query",
 				"description":      "Comma-separated ordering fields",
-				"type":             "string",
+				"type":             "array",
+				"items":            map[string]any{"type": "string", "enum": orderingFieldNames},
 				"required":         false,
 				"collectionFormat": "csv",
 			},

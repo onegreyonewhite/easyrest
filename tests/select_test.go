@@ -385,3 +385,90 @@ func TestSelectResponseFormats(t *testing.T) {
 		t.Errorf("Expected XML output to contain <items> or <item> tags. Output: %s", xmlOutput)
 	}
 }
+
+func TestAnonymousScopeAccess(t *testing.T) {
+	dbPath := setupTestDB(t)
+	defer os.Remove(dbPath)
+	defer server.StopPlugins()
+
+	// Create two tables: product and users
+	db := openDB(t, dbPath)
+	_, err := db.Exec(`CREATE TABLE product (id INTEGER PRIMARY KEY, name TEXT);`)
+	if err != nil {
+		t.Fatalf("Failed to create product table: %v", err)
+	}
+	_, err = db.Exec(`CREATE TABLE hidden_users (id INTEGER PRIMARY KEY, name TEXT);`)
+	if err != nil {
+		t.Fatalf("Failed to create users table: %v", err)
+	}
+	_, err = db.Exec(`INSERT INTO product (name) VALUES ('Widget'), ('Gadget');`)
+	if err != nil {
+		t.Fatalf("Failed to insert into product: %v", err)
+	}
+	_, err = db.Exec(`INSERT INTO users (name) VALUES ('Alice'), ('Bob');`)
+	if err != nil {
+		t.Fatalf("Failed to insert into users: %v", err)
+	}
+	db.Close()
+
+	os.Setenv("ER_CACHE_TEST", "sqlite://"+dbPath)
+	os.Setenv("ER_CACHE_ENABLE_TEST", "1")
+	os.Setenv("ER_CORS_ENABLED", "1")
+	os.Setenv("ER_ANON_CLAIMS", `{"scope": "product-read"}`)
+
+	router := setupServerWithDB(t, dbPath)
+	cfg := server.GetConfig()
+	cfg.PluginMap["test"] = config.PluginConfig{
+		Name:        "test",
+		Uri:         "sqlite://" + dbPath,
+		EnableCache: true,
+		DbTxEnd:     "commit-allow-override",
+		Exclude: config.AccessConfig{
+			Table: []string{"hidden_users"},
+		},
+	}
+	cfg.CORS.Enabled = true
+	cfg.CheckScope = true
+	server.SetConfig(cfg)
+	server.LoadPlugins()
+
+	// Anonymous request to product table (should succeed)
+	req, err := http.NewRequest("GET", "/api/test/product/?select=id,name", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected status 200 for anonymous product access, got %d. Response: %s", rr.Code, rr.Body.String())
+	}
+	var products []map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &products); err != nil {
+		t.Fatalf("Error parsing product response: %v. Response: %s", err, rr.Body.String())
+	}
+	if len(products) != 2 {
+		t.Fatalf("Expected 2 products, got %d", len(products))
+	}
+
+	// Anonymous request to users table (should fail with 403 or 401)
+	req, err = http.NewRequest("GET", "/api/test/users/?select=id,name", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr = httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden && rr.Code != http.StatusUnauthorized {
+		t.Fatalf("Expected status 403 or 401 for anonymous users access, got %d. Response: %s", rr.Code, rr.Body.String())
+	}
+
+	// Anonymous request to hidden_users table (should fail with 403 or 401)
+	req, err = http.NewRequest("GET", "/api/test/hidden_users/?select=id,name", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr = httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("Expected status 404 for hidden users access, got %d. Response: %s", rr.Code, rr.Body.String())
+	}
+}

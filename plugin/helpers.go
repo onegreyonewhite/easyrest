@@ -85,10 +85,9 @@ func FormatToContext(input map[string]any) (map[string]string, error) {
 			}
 		default:
 			s := fmt.Sprintf("%v", v)
-			if strings.Contains(s, ";") || strings.Contains(s, "--") {
-				return fmt.Errorf("invalid value in context: %s", s)
+			if !(strings.Contains(s, ";") || strings.Contains(s, "--")) {
+				output[prefix] = s
 			}
-			output[prefix] = s
 		}
 		return nil
 	}

@@ -1,3 +1,12 @@
 ---
 name: test2
+title: Test mirror database
 uri: sqlite://./test.db
+enable_cache: true
+default_limit: 10
+public:
+  table:
+    - users
+exclude:
+  table:
+    - easyrest_cache

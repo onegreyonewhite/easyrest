@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/onegreyonewhite/easyrest/internal/server"
@@ -85,76 +86,62 @@ func main() {
 		}
 	}
 
-	// Load base configuration from environment variables
-	cfg := server.GetConfig()
-
-	// Update configuration with values from flags if they are set
 	if *port != "" {
-		cfg.Port = *port
+		os.Setenv("ER_PORT", *port)
 	}
 	if flag.Lookup("check-scope").Value.String() != "" {
-		cfg.CheckScope = *checkScope
+		os.Setenv("ER_CHECK_SCOPE", flag.Lookup("check-scope").Value.String())
 	}
 	if *tokenSecret != "" {
-		cfg.TokenSecret = *tokenSecret
+		os.Setenv("ER_TOKEN_SECRET", *tokenSecret)
 	}
 	if *tokenUserSearch != "" {
-		cfg.TokenUserSearch = *tokenUserSearch
+		os.Setenv("ER_TOKEN_USER_SEARCH", *tokenUserSearch)
 	}
 	if flag.Lookup("enable-plugin-log").Value.String() != "" {
-		cfg.NoPluginLog = !*enablePluginLog
+		if *enablePluginLog {
+			os.Setenv("ER_NO_PLUGIN_LOG", "true")
+		}
 	}
-	if flag.Lookup("access-log").Value.String() != "" {
-		cfg.AccessLogOn = *accessLogOn
+	if flag.Lookup("access-log").Value.String() != "" && *accessLogOn {
+		os.Setenv("ER_ACCESS_LOG", "true")
 	}
 	if *defaultTimezone != "" {
-		cfg.DefaultTimezone = *defaultTimezone
+		os.Setenv("ER_DEFAULT_TIMEZONE", *defaultTimezone)
 	}
 	if *tokenURL != "" {
-		cfg.TokenURL = *tokenURL
+		os.Setenv("ER_TOKEN_URL", *tokenURL)
 	}
 	if *authFlow != "" {
-		cfg.AuthFlow = *authFlow
+		os.Setenv("ER_AUTH_FLOW", *authFlow)
 	}
-
-	// Update CORS configuration from flags
-	if flag.Lookup("cors-enabled").Value.String() != "" {
-		cfg.CORS.Enabled = *corsEnabled
+	if *corsEnabled {
+		os.Setenv("ER_CORS_ENABLED", "1")
 	}
-
-	// Only process other CORS flags if CORS is enabled
-	if cfg.CORS.Enabled {
-		if corsOrigins != "" {
-			cfg.CORS.Origins = strings.Split(corsOrigins, ",")
-		}
-		if corsMethods != "" {
-			cfg.CORS.Methods = strings.Split(corsMethods, ",")
-		}
-		if corsHeaders != "" {
-			cfg.CORS.Headers = strings.Split(corsHeaders, ",")
-		}
-		if flag.Lookup("cors-max-age").Value.String() != "" {
-			cfg.CORS.MaxAge = corsMaxAge
-		}
-	} else {
-		// If CORS is disabled, show warning if other CORS flags were used
-		if corsOrigins != "" || corsMethods != "" || corsHeaders != "" {
-			fmt.Println("Warning: CORS-related flags were ignored because --cors-enabled is not set")
-		}
+	if corsOrigins != "" {
+		os.Setenv("ER_CORS_ORIGINS", corsOrigins)
 	}
-
-	// Update TLS configuration from flags
+	if corsMethods != "" {
+		os.Setenv("ER_CORS_METHODS", corsMethods)
+	}
+	if corsHeaders != "" {
+		os.Setenv("ER_CORS_HEADERS", corsHeaders)
+	}
+	if corsMaxAge != 0 {
+		os.Setenv("ER_CORS_MAX_AGE", strconv.Itoa(corsMaxAge))
+	}
 	if tlsCertFile != "" {
-		cfg.TLSCertFile = tlsCertFile
+		os.Setenv("ER_TLS_CERT_FILE", tlsCertFile)
 	}
 	if tlsKeyFile != "" {
-		cfg.TLSKeyFile = tlsKeyFile
+		os.Setenv("ER_TLS_KEY_FILE", tlsKeyFile)
+	}
+	if *checkScope {
+		os.Setenv("ER_CHECK_SCOPE", "true")
 	}
 
-	// Automatically enable TLS if both certificate and key are provided
-	if tlsCertFile != "" && tlsKeyFile != "" {
-		cfg.TLSEnabled = true
-	}
+	// Load base configuration from environment variables
+	cfg := server.GetConfig()
 
 	// Run server
 	server.Run(cfg)

@@ -19,6 +19,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/mux"
 	"github.com/onegreyonewhite/easyrest/internal/config"
+	"maps"
 )
 
 type contextKey string
@@ -109,7 +110,14 @@ func AccessLogMiddleware(next http.Handler) http.Handler {
 // Authenticate extracts and validates the JWT token.
 func Authenticate(r *http.Request) (string, *http.Request, error) {
 	authHeader := r.Header.Get("Authorization")
+	config := GetConfig()
 	if authHeader == "" {
+		if len(config.AnonClaims) > 0 {
+			claims := jwt.MapClaims{}
+			maps.Copy(claims, config.AnonClaims)
+			r = r.WithContext(context.WithValue(r.Context(), TokenClaimsKey, claims))
+			return "", r, nil
+		}
 		return "", r, errors.New("missing authorization header")
 	}
 
@@ -119,7 +127,6 @@ func Authenticate(r *http.Request) (string, *http.Request, error) {
 	}
 	tokenStr := matches[1]
 
-	config := GetConfig()
 	if config.TokenSecret != "" {
 		parsed, err := jwt.Parse(tokenStr, func(token *jwt.Token) (any, error) {
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {

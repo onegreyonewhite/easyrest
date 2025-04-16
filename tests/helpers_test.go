@@ -90,3 +90,12 @@ func generateToken(t *testing.T) string {
 	}
 	return tokenStr
 }
+
+// openDB opens a sqlite DB at the given path and returns *sql.DB. Fails the test on error.
+func openDB(t *testing.T, dbPath string) *sql.DB {
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("Failed to open sqlite DB: %v", err)
+	}
+	return db
+}
