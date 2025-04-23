@@ -72,16 +72,19 @@ func buildWhereCondEntries(where map[string]any) []whereCondEntry {
 // It returns the SQL string (starting with " WHERE ") and the list of arguments.
 func BuildWhereClause(where map[string]any) (string, []any, error) {
 	entries := buildWhereCondEntries(where)
-	conds := make([]string, 0, len(entries))
+	if len(entries) == 0 {
+		return "", nil, nil
+	}
+	var sb strings.Builder
 	args := make([]any, 0, len(entries))
-	for _, entry := range entries {
-		conds = append(conds, entry.cond)
+	for i, entry := range entries {
+		if i > 0 {
+			sb.WriteString(" AND ")
+		}
+		sb.WriteString(entry.cond)
 		args = append(args, entry.args...)
 	}
-	if len(conds) > 0 {
-		return " WHERE " + strings.Join(conds, " AND "), args, nil
-	}
-	return "", args, nil
+	return " WHERE " + sb.String(), args, nil
 }
 
 // BuildWhereClauseSorted constructs a SQL WHERE clause from a given where map,
@@ -96,16 +99,19 @@ func BuildWhereClauseSorted(where map[string]any) (string, []any, error) {
 			j--
 		}
 	}
-	conds := make([]string, 0, len(entries))
+	if len(entries) == 0 {
+		return "", nil, nil
+	}
+	var sb strings.Builder
 	args := make([]any, 0, len(entries))
-	for _, entry := range entries {
-		conds = append(conds, entry.cond)
+	for i, entry := range entries {
+		if i > 0 {
+			sb.WriteString(" AND ")
+		}
+		sb.WriteString(entry.cond)
 		args = append(args, entry.args...)
 	}
-	if len(conds) > 0 {
-		return " WHERE " + strings.Join(conds, " AND "), args, nil
-	}
-	return "", args, nil
+	return " WHERE " + sb.String(), args, nil
 }
 
 // FormatToContext flattens an arbitrarily nested map into a flat map with keys joined by underscores.
@@ -113,18 +119,19 @@ func BuildWhereClauseSorted(where map[string]any) (string, []any, error) {
 // For arrays, it uses the index as part of the key.
 // It also validates that the final values do not contain dangerous characters.
 func FormatToContext(input map[string]any) (map[string]string, error) {
-	output := make(map[string]string)
+	output := make(map[string]string, len(input))
 	var flatten func(prefix string, val any) error
 	flatten = func(prefix string, val any) error {
 		switch v := val.(type) {
 		case map[string]any:
 			for k, v2 := range v {
-				normalizedKey := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(k, ".", "_"), "-", "_"))
+				var keyBuilder strings.Builder
+				keyBuilder.WriteString(strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(k, ".", "_"), "-", "_")))
 				var newPrefix string
 				if prefix == "" {
-					newPrefix = normalizedKey
+					newPrefix = keyBuilder.String()
 				} else {
-					newPrefix = prefix + "_" + normalizedKey
+					newPrefix = prefix + "_" + keyBuilder.String()
 				}
 				if err := flatten(newPrefix, v2); err != nil {
 					return err
@@ -146,8 +153,9 @@ func FormatToContext(input map[string]any) (map[string]string, error) {
 		return nil
 	}
 	for k, v := range input {
-		normalizedKey := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(k, ".", "_"), "-", "_"))
-		if err := flatten(normalizedKey, v); err != nil {
+		var keyBuilder strings.Builder
+		keyBuilder.WriteString(strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(k, ".", "_"), "-", "_")))
+		if err := flatten(keyBuilder.String(), v); err != nil {
 			return nil, err
 		}
 	}

@@ -20,8 +20,11 @@ func processSelectParam(param string, flatCtx map[string]string, pluginCtx map[s
 		return nil, nil, nil
 	}
 	parts := strings.Split(param, ",")
-	var selectFields []string
-	var groupBy []string
+	// Preallocate with a reasonable initial capacity.
+	selectFields := make([]string, 0, len(parts))
+	groupBy := make([]string, 0, len(parts))
+	var exprBuilder strings.Builder
+
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		if part == "" {
@@ -36,7 +39,9 @@ func processSelectParam(param string, flatCtx map[string]string, pluginCtx map[s
 			alias = ""
 			raw = part
 		}
-		var expr string
+
+		exprBuilder.Reset() // Reset builder for each part
+
 		if strings.Contains(raw, ".") && strings.HasSuffix(raw, "()") {
 			// Process function syntax like "amount.sum()"
 			subParts := strings.SplitN(raw, ".", 2)
@@ -50,21 +55,26 @@ func processSelectParam(param string, flatCtx map[string]string, pluginCtx map[s
 				return nil, nil, fmt.Errorf("function %s is not allowed", funcName)
 			}
 			if funcName == "count" && fieldPart == "" {
-				expr = "COUNT(*)"
+				exprBuilder.WriteString("COUNT(*)")
 			} else {
-				expr = strings.ToUpper(funcName) + "(" + fieldPart + ")"
+				exprBuilder.WriteString(strings.ToUpper(funcName))
+				exprBuilder.WriteByte('(')
+				exprBuilder.WriteString(fieldPart)
+				exprBuilder.WriteByte(')')
 			}
 			if alias == "" {
 				alias = funcName
 			}
 			// Append alias so that the SQL query becomes, for example, "SUM(amount) AS sum"
-			expr = expr + " AS " + alias
+			exprBuilder.WriteString(" AS ")
+			exprBuilder.WriteString(alias)
 		} else if raw == "count()" {
-			expr = "COUNT(*)"
+			exprBuilder.WriteString("COUNT(*)")
 			if alias == "" {
 				alias = "count"
 			}
-			expr = expr + " AS " + alias
+			exprBuilder.WriteString(" AS ")
+			exprBuilder.WriteString(alias)
 		} else {
 			// For plain fields - if the value is contextual, substitute it as a literal
 			if strings.HasPrefix(raw, "erctx.") || strings.HasPrefix(raw, "request.") {
@@ -72,16 +82,22 @@ func processSelectParam(param string, flatCtx map[string]string, pluginCtx map[s
 				if alias == "" {
 					alias = strings.ReplaceAll(raw, ".", "_")
 				}
-				expr = fmt.Sprintf("'%s' AS %s", escapeSQLLiteral(substituted), alias)
+				// Use builder instead of fmt.Sprintf
+				exprBuilder.WriteString("'")
+				exprBuilder.WriteString(escapeSQLLiteral(substituted))
+				exprBuilder.WriteString("' AS ")
+				exprBuilder.WriteString(alias)
 			} else {
-				expr = raw
+				exprBuilder.WriteString(raw)
 				if alias != "" {
-					expr = expr + " AS " + alias
+					exprBuilder.WriteString(" AS ")
+					exprBuilder.WriteString(alias)
 				}
+				// Only add raw field to groupBy if it's not a context variable
 				groupBy = append(groupBy, raw)
 			}
 		}
-		selectFields = append(selectFields, expr)
+		selectFields = append(selectFields, exprBuilder.String())
 	}
 	return selectFields, groupBy, nil
 }
@@ -89,15 +105,20 @@ func processSelectParam(param string, flatCtx map[string]string, pluginCtx map[s
 // ParseWhereClause converts query parameters starting with "where." into a map,
 // performing context substitution for values.
 func ParseWhereClause(values map[string][]string, flatCtx map[string]string, pluginCtx map[string]any) (map[string]any, error) {
-	result := make(map[string]any)
+	result := make(map[string]any, len(values))
 	for key, vals := range values {
 		if strings.HasPrefix(key, "where.") {
-			parts := strings.Split(key, ".")
-			if len(parts) != 3 {
-				return nil, fmt.Errorf("Invalid where key format: %s", key)
+			// Use strings.Cut for potentially slightly better performance than SplitN(..., 3)
+			// when we expect exactly 3 parts, although Split is fine too.
+			prefix, fieldOp, found := strings.Cut(key, ".")
+			if !found || prefix != "where" { // Check prefix just in case
+				return nil, fmt.Errorf("invalid where key format: %s", key)
 			}
-			opCode := strings.ToLower(parts[1])
-			field := parts[2]
+			opCode, field, found := strings.Cut(fieldOp, ".")
+			if !found {
+				return nil, fmt.Errorf("invalid where key format: %s", key)
+			}
+			opCode = strings.ToLower(opCode)
 
 			if _, ok := AllowedOps[opCode]; !ok {
 				return nil, fmt.Errorf("unknown operator: %s", opCode)
@@ -105,24 +126,32 @@ func ParseWhereClause(values map[string][]string, flatCtx map[string]string, plu
 			op := AllowedOps[opCode]
 
 			substituted := ""
-			if op == "IN" {
-				val_arr := strings.Split(vals[0], ",")
-				for idx, v := range val_arr {
-					val_arr[idx] = substitutePluginContext(v, flatCtx, pluginCtx)
+			if len(vals) > 0 { // Ensure there's at least one value
+				if op == "IN" {
+					// Consider using strings.Builder if vals[0] is very long or has many commas
+					val_arr := strings.Split(vals[0], ",")
+					// Preallocate for substitution
+					substituted_arr := make([]string, len(val_arr))
+					for idx, v := range val_arr {
+						substituted_arr[idx] = substitutePluginContext(v, flatCtx, pluginCtx)
+					}
+					substituted = strings.Join(substituted_arr, ",")
+				} else {
+					substituted = substitutePluginContext(vals[0], flatCtx, pluginCtx)
 				}
-				substituted = strings.Join(val_arr, ",")
-			} else {
-				substituted = substitutePluginContext(vals[0], flatCtx, pluginCtx)
-			}
+			} // else: substituted remains "", which might be valid for IS NULL/IS NOT NULL
 
+			// Use map access pattern that avoids double lookup
 			if existing, found := result[field]; found {
+				// Type assertion to modify existing map
 				m, ok := existing.(map[string]any)
 				if !ok {
-					return nil, fmt.Errorf("type error for field %s", field)
+					// This indicates mixed condition types for the same field, handle error
+					return nil, fmt.Errorf("conflicting condition types for field %s", field)
 				}
 				m[op] = substituted
-				result[field] = m
 			} else {
+				// Create new map for the field only when it's first encountered
 				result[field] = map[string]any{op: substituted}
 			}
 		}
@@ -149,7 +178,6 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-
 
 	// Get current plugins map
 	currentDbPlugins := *DbPlugins.Load()

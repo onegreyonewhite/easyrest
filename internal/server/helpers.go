@@ -72,13 +72,6 @@ var supportedTypes = [4]string{
 	"application/x-www-form-urlencoded",
 }
 
-// Pool for JSON encoding.
-var jsonBufferPool = sync.Pool{
-	New: func() interface{} {
-		return new(bytes.Buffer)
-	},
-}
-
 func init() {
 	// Initialize atomic pointers with empty maps
 	emptyDbPlugins := make(map[string]easyrest.DBPlugin)
@@ -182,7 +175,14 @@ func substitutePluginContext(input string, flatCtx map[string]string, pluginCtx 
 					return string(bytes)
 				}
 			}
-			return fmt.Sprintf("%v", v)
+			switch vv := v.(type) {
+			case string:
+				return vv
+			case int, int64, int32, float64, float32, bool:
+				return fmt.Sprint(vv)
+			default:
+				return fmt.Sprintf("%v", vv)
+			}
 		}
 	}
 	return input
@@ -225,22 +225,20 @@ func ParseCSV(s string) []string {
 
 // respondJSON serializes v to JSON and writes it to w with Content-Type header.
 func respondJSON(w http.ResponseWriter, status int, v interface{}) {
-	buf := jsonBufferPool.Get().(*bytes.Buffer)
-	buf.Reset()
-	defer jsonBufferPool.Put(buf)
-
-	// Use goccy/go-json with optimized settings
-	enc := json.NewEncoder(buf)
-	enc.SetEscapeHTML(false)
-
-	if err := enc.Encode(v); err != nil {
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-		return
-	}
-
+	// Set headers before writing body
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	w.Write(buf.Bytes())
+
+	// Encode directly to the ResponseWriter
+	enc := json.NewEncoder(w)
+
+	if err := enc.Encode(v); err != nil {
+		// Log the error, as we might not be able to write to w anymore
+		stdlog.Printf("Error encoding JSON response: %v", err)
+		// Attempt to send an error, though it might fail if headers are already sent
+		// http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
 }
 
 // parseRequest parses the request body according to the Content-Type.
@@ -255,15 +253,16 @@ func parseRequest(r *http.Request, expectArray bool) (interface{}, error) {
 	switch contentType {
 	case "application/json", "":
 		// By default, use JSON.
+		decoder := json.NewDecoder(r.Body)
 		if expectArray {
 			var data []map[string]any
-			if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+			if err := decoder.Decode(&data); err != nil {
 				return nil, fmt.Errorf("JSON parse error: %w", err)
 			}
 			return data, nil
 		} else {
 			var data map[string]any
-			if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+			if err := decoder.Decode(&data); err != nil {
 				return nil, fmt.Errorf("JSON parse error: %w", err)
 			}
 			return data, nil
@@ -595,7 +594,14 @@ func extractUserIDFromClaims(claims jwt.MapClaims) string {
 	config := GetConfig()
 	searchPath := config.TokenUserSearch
 	if val, ok := claims[searchPath]; ok {
-		return fmt.Sprintf("%v", val)
+		switch v := val.(type) {
+		case string:
+			return v
+		case int, int64, int32, float64, float32, bool:
+			return fmt.Sprint(v)
+		default:
+			return fmt.Sprintf("%v", v)
+		}
 	}
 	return ""
 }
