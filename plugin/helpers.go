@@ -5,16 +5,16 @@ import (
 	"strings"
 )
 
-// BuildWhereClause constructs a SQL WHERE clause from a given where map.
-// The where map is expected to be in the form:
-//
-//	{ "field": {"=": value}, ... }
-//
-// It returns the SQL string (starting with " WHERE ") and the list of arguments.
-// This is the original logic.
-func BuildWhereClause(where map[string]any) (string, []any, error) {
-	conds := make([]string, 0, len(where))
-	args := make([]any, 0, len(where))
+// internal helper for building condition entries from the where map.
+type whereCondEntry struct {
+	cond    string
+	args    []any
+	sortKey string
+}
+
+// buildWhereCondEntries processes the where map and returns a slice of whereCondEntry.
+func buildWhereCondEntries(where map[string]any) []whereCondEntry {
+	entries := make([]whereCondEntry, 0, len(where))
 	for field, val := range where {
 		switch v := val.(type) {
 		case map[string]any:
@@ -25,28 +25,82 @@ func BuildWhereClause(where map[string]any) (string, []any, error) {
 						arr[i] = strings.TrimSpace(arr[i])
 					}
 					if len(arr) == 0 {
-						conds = append(conds, fmt.Sprintf("%s IN (NULL)", field))
+						entries = append(entries, whereCondEntry{
+							cond:    fmt.Sprintf("%s IN (NULL)", field),
+							args:    nil,
+							sortKey: field + "|IN",
+						})
 					} else {
 						placeholders := make([]string, len(arr))
 						for i := range arr {
 							placeholders[i] = "?"
 						}
-						conds = append(conds, fmt.Sprintf("%s IN (%s)", field, strings.Join(placeholders, ",")))
 						inVals := make([]any, len(arr))
 						for i, val := range arr {
 							inVals[i] = val
 						}
-						args = append(args, inVals...)
+						entries = append(entries, whereCondEntry{
+							cond:    fmt.Sprintf("%s IN (%s)", field, strings.Join(placeholders, ",")),
+							args:    inVals,
+							sortKey: field + "|IN",
+						})
 					}
 				} else {
-					conds = append(conds, fmt.Sprintf("%s %s ?", field, op))
-					args = append(args, operand)
+					entries = append(entries, whereCondEntry{
+						cond:    fmt.Sprintf("%s %s ?", field, op),
+						args:    []any{operand},
+						sortKey: field + "|" + op,
+					})
 				}
 			}
 		default:
-			conds = append(conds, fmt.Sprintf("%s = ?", field))
-			args = append(args, v)
+			entries = append(entries, whereCondEntry{
+				cond:    fmt.Sprintf("%s = ?", field),
+				args:    []any{v},
+				sortKey: field + "|=",
+			})
 		}
+	}
+	return entries
+}
+
+// BuildWhereClause constructs a SQL WHERE clause from a given where map.
+// The where map is expected to be in the form:
+//
+//	{ "field": {"=": value}, ... }
+//
+// It returns the SQL string (starting with " WHERE ") and the list of arguments.
+func BuildWhereClause(where map[string]any) (string, []any, error) {
+	entries := buildWhereCondEntries(where)
+	conds := make([]string, 0, len(entries))
+	args := make([]any, 0, len(entries))
+	for _, entry := range entries {
+		conds = append(conds, entry.cond)
+		args = append(args, entry.args...)
+	}
+	if len(conds) > 0 {
+		return " WHERE " + strings.Join(conds, " AND "), args, nil
+	}
+	return "", args, nil
+}
+
+// BuildWhereClauseSorted constructs a SQL WHERE clause from a given where map,
+// but sorts the conditions (and their arguments) by field name and operator for deterministic output.
+func BuildWhereClauseSorted(where map[string]any) (string, []any, error) {
+	entries := buildWhereCondEntries(where)
+	// Sort entries by sortKey (insertion sort for no extra imports)
+	for i := 1; i < len(entries); i++ {
+		j := i
+		for j > 0 && entries[j-1].sortKey > entries[j].sortKey {
+			entries[j-1], entries[j] = entries[j], entries[j-1]
+			j--
+		}
+	}
+	conds := make([]string, 0, len(entries))
+	args := make([]any, 0, len(entries))
+	for _, entry := range entries {
+		conds = append(conds, entry.cond)
+		args = append(args, entry.args...)
 	}
 	if len(conds) > 0 {
 		return " WHERE " + strings.Join(conds, " AND "), args, nil

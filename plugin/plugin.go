@@ -1,14 +1,13 @@
 package plugin
 
 import (
-	"sync"
 	"time"
 
 	"github.com/hashicorp/go-plugin"
 )
 
 // Version is the plugin version.
-var Version = "v0.8.1"
+var Version = "v0.8.2"
 
 // DBPlugin – interface for DB access plugins.
 type DBPlugin interface {
@@ -147,19 +146,6 @@ type CacheGetRequest struct {
 type CacheGetResponse struct {
 	Value string
 	Error string
-}
-
-// Pools.
-var tableGetRequestPool = sync.Pool{
-	New: func() any {
-		return &TableGetRequest{}
-	},
-}
-
-var tableGetResponsePool = sync.Pool{
-	New: func() any {
-		return &TableGetResponse{}
-	},
 }
 
 // Handshake configuration for plugin security.

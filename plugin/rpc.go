@@ -27,42 +27,29 @@ func (g *DBPluginRPC) InitConnection(uri string) error {
 
 func (g *DBPluginRPC) TableGet(userID, table string, selectFields []string, where map[string]any,
 	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, error) {
-	req := tableGetRequestPool.Get().(*TableGetRequest)
-	req.UserID = userID
-	req.Table = table
-	req.SelectFields = selectFields
-	req.Where = where
-	req.Ordering = ordering
-	req.GroupBy = groupBy
-	req.Limit = limit
-	req.Offset = offset
-	req.Ctx = ctx
+	req := TableGetRequest{
+		UserID:       userID,
+		Table:        table,
+		SelectFields: selectFields,
+		Where:        where,
+		Ordering:     ordering,
+		GroupBy:      groupBy,
+		Limit:        limit,
+		Offset:       offset,
+		Ctx:          ctx,
+	}
 
-	resp := tableGetResponsePool.Get().(*TableGetResponse)
-	err := g.client.Call("Plugin.TableGet", req, resp)
-
-	req.UserID = ""
-	req.Table = ""
-	req.SelectFields = nil
-	req.Where = nil
-	req.Ordering = nil
-	req.GroupBy = nil
-	req.Limit = 0
-	req.Offset = 0
-	req.Ctx = nil
-	tableGetRequestPool.Put(req)
+	var resp TableGetResponse
+	err := g.client.Call("Plugin.TableGet", req, &resp)
 
 	if err != nil {
-		tableGetResponsePool.Put(resp)
 		return nil, err
 	}
 	if resp.Error != "" {
-		tableGetResponsePool.Put(resp)
 		return nil, errors.New(resp.Error)
 	}
 	result := resp.Rows
 	resp.Rows = nil
-	tableGetResponsePool.Put(resp)
 	return result, nil
 }
 

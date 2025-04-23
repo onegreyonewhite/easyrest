@@ -65,6 +65,13 @@ var (
 	schemaCacheMutex sync.RWMutex
 )
 
+var supportedTypes = [4]string{
+	"application/json",
+	"application/xml",
+	"text/csv",
+	"application/x-www-form-urlencoded",
+}
+
 // Pool for JSON encoding.
 var jsonBufferPool = sync.Pool{
 	New: func() interface{} {
@@ -355,19 +362,55 @@ func parseRequest(r *http.Request, expectArray bool) (interface{}, error) {
 // makeResponse transforms the data according to the Accept header and sends the response.
 func makeResponse(w http.ResponseWriter, r *http.Request, status int, v any) {
 	// Determine output format based on the Accept header
-	acceptHeader := r.Header.Get("Accept")
-	contentType := r.Header.Get("Content-Type")
-
-	// If Accept is not set or equals */*, use Content-Type
-	if acceptHeader == "" || acceptHeader == "*/*" {
-		acceptHeader = contentType
-		w.Header().Add("Vary", "Content-Type")
+	// First, check the "format" query parameter for explicit output format preference.
+	format := r.URL.Query().Get("format")
+	acceptHeader := ""
+	switch strings.ToLower(format) {
+	case "json":
+		acceptHeader = "application/json"
+	case "xml":
+		acceptHeader = "application/xml"
+	case "csv":
+		acceptHeader = "text/csv"
+	case "":
+		// No format param, fall back to Accept and Content-Type headers below.
+	default:
+		// Unknown format, treat as unsupported (will be handled later).
+		acceptHeader = format
 	}
 
-	// If Accept contains multiple types, take the first
-	if idx := strings.Index(acceptHeader, ","); idx != -1 {
-		acceptHeader = acceptHeader[:idx]
+	if acceptHeader == "" {
+		acceptHeader = r.Header.Get("Accept")
+		contentType := r.Header.Get("Content-Type")
+
+		// If Accept is not set or equals */*, use Content-Type
+		if acceptHeader == "" || acceptHeader == "*/*" {
+			acceptHeader = contentType
+			w.Header().Add("Vary", "Content-Type")
+		} else {
+			// If Accept contains multiple types, take the first supported: json, xml, csv, or formdata.
+			acceptTypes := strings.Split(acceptHeader, ",")
+
+			acceptHeader = ""
+			for _, t := range acceptTypes {
+				t = strings.TrimSpace(t)
+				// Remove parameters like charset
+				if idx := strings.Index(t, ";"); idx != -1 {
+					t = t[:idx]
+				}
+				for _, supported := range supportedTypes {
+					if t == supported {
+						acceptHeader = t
+						break
+					}
+				}
+				if acceptHeader != "" {
+					break
+				}
+			}
+		}
 	}
+
 	// Remove parameters like charset
 	if idx := strings.Index(acceptHeader, ";"); idx != -1 {
 		acceptHeader = acceptHeader[:idx]

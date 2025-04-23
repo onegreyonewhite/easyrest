@@ -9,7 +9,9 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/docker/go-units"
 	"gopkg.in/yaml.v3"
 )
 
@@ -40,6 +42,26 @@ type CORSConfig struct {
 	MaxAge  int      `yaml:"max_age"`
 }
 
+// ServerConfig holds HTTP server tunables.
+type ServerConfig struct {
+	ReadTimeout       time.Duration `yaml:"read_timeout"`
+	WriteTimeout      time.Duration `yaml:"write_timeout"`
+	IdleTimeout       time.Duration `yaml:"idle_timeout"`
+	ReadHeaderTimeout time.Duration `yaml:"read_header_timeout"`
+	KeepAlivePeriod   time.Duration `yaml:"keep_alive_period"`
+	MaxHeaderBytes    int           `yaml:"max_header_bytes"`
+
+	// HTTP/2 specific
+	HTTP2MaxConcurrentStreams         uint32        `yaml:"http2_max_concurrent_streams"`
+	HTTP2MaxReadFrameSize             uint32        `yaml:"http2_max_read_frame_size"`
+	HTTP2MaxUploadBufferPerConnection int32         `yaml:"http2_max_upload_buffer_per_connection"`
+	HTTP2MaxUploadBufferPerStream     int32         `yaml:"http2_max_upload_buffer_per_stream"`
+	HTTP2IdleTimeout                  time.Duration `yaml:"http2_idle_timeout"`
+	HTTP2ReadIdleTimeout              time.Duration `yaml:"http2_read_idle_timeout"`
+	HTTP2PingTimeout                  time.Duration `yaml:"http2_ping_timeout"`
+	HTTP2PermitProhibitedCipherSuites bool          `yaml:"http2_permit_prohibited_cipher_suites"`
+}
+
 type Config struct {
 	Port            string `yaml:"port"`
 	CheckScope      bool   `yaml:"check_scope"`
@@ -62,6 +84,7 @@ type Config struct {
 	Plugins    []string                `yaml:"plugin_configs"`
 	PluginMap  map[string]PluginConfig `yaml:"plugins"`
 	AnonClaims map[string]any          `yaml:"anon_claims,omitempty"`
+	Server     ServerConfig            `yaml:"server"`
 }
 
 func LoadPluginConfigs(configs []string) map[string]PluginConfig {
@@ -241,6 +264,94 @@ func Load() Config {
 		pluginsList = strings.Split(plugins, ",")
 	}
 
+	// Server settings
+	serverReadTimeout := 5 * time.Second
+	if v := os.Getenv("ER_SERVER_READ_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			serverReadTimeout = d
+		}
+	}
+	serverWriteTimeout := 10 * time.Second
+	if v := os.Getenv("ER_SERVER_WRITE_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			serverWriteTimeout = d
+		}
+	}
+	serverIdleTimeout := 120 * time.Second
+	if v := os.Getenv("ER_SERVER_IDLE_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			serverIdleTimeout = d
+		}
+	}
+	serverMaxHeaderBytes := 1 << 20
+	if v := os.Getenv("ER_SERVER_MAX_HEADER_BYTES"); v != "" {
+		if n, err := units.FromHumanSize(v); err == nil {
+			serverMaxHeaderBytes = int(n)
+		}
+	}
+	serverReadHeaderTimeout := 5 * time.Second
+	if v := os.Getenv("ER_SERVER_READ_HEADER_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			serverReadHeaderTimeout = d
+		}
+	}
+	serverKeepAlivePeriod := 3 * time.Minute
+	if v := os.Getenv("ER_SERVER_KEEP_ALIVE_PERIOD"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			serverKeepAlivePeriod = d
+		}
+	}
+
+	// HTTP/2 settings
+	http2MaxConcurrentStreams := uint32(0)
+	if v := os.Getenv("ER_HTTP2_MAX_CONCURRENT_STREAMS"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 32); err == nil {
+			http2MaxConcurrentStreams = uint32(n)
+		}
+	}
+	http2MaxReadFrameSize := uint32(0)
+	if v := os.Getenv("ER_HTTP2_MAX_READ_FRAME_SIZE"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 32); err == nil {
+			http2MaxReadFrameSize = uint32(n)
+		}
+	}
+	http2MaxUploadBufferPerConn := int32(0)
+	if v := os.Getenv("ER_HTTP2_MAX_UPLOAD_BUFFER_PER_CONNECTION"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 32); err == nil {
+			http2MaxUploadBufferPerConn = int32(n)
+		}
+	}
+	http2MaxUploadBufferPerStream := int32(0)
+	if v := os.Getenv("ER_HTTP2_MAX_UPLOAD_BUFFER_PER_STREAM"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 32); err == nil {
+			http2MaxUploadBufferPerStream = int32(n)
+		}
+	}
+	http2IdleTimeout := time.Duration(0)
+	if v := os.Getenv("ER_HTTP2_IDLE_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			http2IdleTimeout = d
+		}
+	}
+	http2ReadIdleTimeout := time.Duration(0)
+	if v := os.Getenv("ER_HTTP2_READ_IDLE_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			http2ReadIdleTimeout = d
+		}
+	}
+	http2PingTimeout := time.Duration(0)
+	if v := os.Getenv("ER_HTTP2_PING_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			http2PingTimeout = d
+		}
+	}
+	http2PermitProhibitedCipherSuites := false
+	if v := os.Getenv("ER_HTTP2_PERMIT_PROHIBITED_CIPHER_SUITES"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			http2PermitProhibitedCipherSuites = b
+		}
+	}
+
 	cfg := Config{
 		Port:            port,
 		CheckScope:      checkScope,
@@ -267,6 +378,22 @@ func Load() Config {
 		Plugins:    pluginsList,
 		PluginMap:  make(map[string]PluginConfig),
 		AnonClaims: make(map[string]any),
+		Server: ServerConfig{
+			ReadTimeout:                       serverReadTimeout,
+			WriteTimeout:                      serverWriteTimeout,
+			IdleTimeout:                       serverIdleTimeout,
+			MaxHeaderBytes:                    serverMaxHeaderBytes,
+			ReadHeaderTimeout:                 serverReadHeaderTimeout,
+			KeepAlivePeriod:                   serverKeepAlivePeriod,
+			HTTP2MaxConcurrentStreams:         http2MaxConcurrentStreams,
+			HTTP2MaxReadFrameSize:             http2MaxReadFrameSize,
+			HTTP2MaxUploadBufferPerConnection: http2MaxUploadBufferPerConn,
+			HTTP2MaxUploadBufferPerStream:     http2MaxUploadBufferPerStream,
+			HTTP2IdleTimeout:                  http2IdleTimeout,
+			HTTP2ReadIdleTimeout:              http2ReadIdleTimeout,
+			HTTP2PingTimeout:                  http2PingTimeout,
+			HTTP2PermitProhibitedCipherSuites: http2PermitProhibitedCipherSuites,
+		},
 	}
 
 	// Load AnonClaims from environment variable if present (as JSON)

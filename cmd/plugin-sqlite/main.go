@@ -262,7 +262,7 @@ func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, whe
 
 	// Convert ILIKE to LIKE COLLATE NOCASE before building where clause
 	where = convertILIKEtoLike(where)
-	whereClause, args, err := easyrest.BuildWhereClause(where)
+	whereClause, args, err := easyrest.BuildWhereClauseSorted(where)
 	if err != nil {
 		return nil, err
 	}
@@ -385,7 +385,7 @@ func (s *sqlitePlugin) TableUpdate(userID, table string, data map[string]any, wh
 
 		// Convert ILIKE to LIKE COLLATE NOCASE before building where clause
 		where = convertILIKEtoLike(where)
-		whereClause, whereArgs, err := easyrest.BuildWhereClause(where)
+		whereClause, whereArgs, err := easyrest.BuildWhereClauseSorted(where)
 		if err != nil {
 			// Error in building WHERE clause, transaction will be rolled back
 			return 0, err
@@ -422,7 +422,7 @@ func (s *sqlitePlugin) TableDelete(userID, table string, where map[string]any, c
 		ctxQuery := context.WithValue(context.Background(), "USER_ID", userID)
 		// Convert ILIKE to LIKE COLLATE NOCASE before building where clause
 		where = convertILIKEtoLike(where)
-		whereClause, whereArgs, err := easyrest.BuildWhereClause(where)
+		whereClause, whereArgs, err := easyrest.BuildWhereClauseSorted(where)
 		if err != nil {
 			// Error in building WHERE clause, transaction will be rolled back
 			return 0, err

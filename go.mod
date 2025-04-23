@@ -3,6 +3,7 @@ module github.com/onegreyonewhite/easyrest
 go 1.24.0
 
 require (
+	github.com/docker/go-units v0.5.0
 	github.com/goccy/go-json v0.10.5
 	github.com/golang-jwt/jwt/v5 v5.2.2
 	github.com/google/uuid v1.6.0
@@ -12,6 +13,7 @@ require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/patrickmn/go-cache v2.1.0+incompatible
 	go.uber.org/automaxprocs v1.6.0
+	golang.org/x/net v0.39.0
 	golang.org/x/sync v0.13.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.37.0
@@ -29,13 +31,12 @@ require (
 	github.com/oklog/run v1.1.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	golang.org/x/exp v0.0.0-20250408133849-7e4ce0ab07d0 // indirect
-	golang.org/x/net v0.39.0 // indirect
 	golang.org/x/sys v0.32.0 // indirect
 	golang.org/x/text v0.24.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20250414145226-207652e42e2e // indirect
-	google.golang.org/grpc v1.71.1 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20250422160041-2d3770c4ea7f // indirect
+	google.golang.org/grpc v1.72.0 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect
-	modernc.org/libc v1.62.1 // indirect
+	modernc.org/libc v1.63.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.10.0 // indirect
 )

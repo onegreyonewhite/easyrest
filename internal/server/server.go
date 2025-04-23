@@ -15,11 +15,15 @@ import (
 	"syscall"
 	"time"
 
+	"maps"
+
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
+
 	"github.com/goccy/go-json"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/mux"
 	"github.com/onegreyonewhite/easyrest/internal/config"
-	"maps"
 )
 
 type contextKey string
@@ -287,18 +291,18 @@ func Run(conf config.Config) {
 	srv := &http.Server{
 		Addr:              ":" + conf.Port,
 		Handler:           router,
-		ReadTimeout:       5 * time.Second,
-		WriteTimeout:      10 * time.Second,
-		IdleTimeout:       120 * time.Second,
-		MaxHeaderBytes:    1 << 20, // 1MB
-		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       conf.Server.ReadTimeout,
+		WriteTimeout:      conf.Server.WriteTimeout,
+		IdleTimeout:       conf.Server.IdleTimeout,
+		MaxHeaderBytes:    conf.Server.MaxHeaderBytes,
+		ReadHeaderTimeout: conf.Server.ReadHeaderTimeout,
 		ConnState: func(conn net.Conn, state http.ConnState) {
 			switch state {
 			case http.StateNew:
 				// Set TCP keepalive
 				if tcpConn, ok := conn.(*net.TCPConn); ok {
 					tcpConn.SetKeepAlive(true)
-					tcpConn.SetKeepAlivePeriod(3 * time.Minute)
+					tcpConn.SetKeepAlivePeriod(conf.Server.KeepAlivePeriod)
 				}
 			case http.StateIdle:
 				// Clear buffers when idle
@@ -310,6 +314,17 @@ func Run(conf config.Config) {
 		},
 	}
 
+	h2s := &http2.Server{
+		MaxConcurrentStreams:         conf.Server.HTTP2MaxConcurrentStreams,
+		MaxReadFrameSize:             conf.Server.HTTP2MaxReadFrameSize,
+		MaxUploadBufferPerConnection: conf.Server.HTTP2MaxUploadBufferPerConnection,
+		MaxUploadBufferPerStream:     conf.Server.HTTP2MaxUploadBufferPerStream,
+		IdleTimeout:                  conf.Server.HTTP2IdleTimeout,
+		ReadIdleTimeout:              conf.Server.HTTP2ReadIdleTimeout,
+		PingTimeout:                  conf.Server.HTTP2PingTimeout,
+		PermitProhibitedCipherSuites: conf.Server.HTTP2PermitProhibitedCipherSuites,
+	}
+
 	// Create context with timeout for graceful shutdown
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -317,12 +332,14 @@ func Run(conf config.Config) {
 	// Run server in a goroutine
 	go func() {
 		if conf.TLSEnabled {
+			http2.ConfigureServer(srv, h2s)
 			stdlog.Printf("TLS server listening on port %s...", conf.Port)
 			if err := srv.ListenAndServeTLS(conf.TLSCertFile, conf.TLSKeyFile); err != nil && err != http.ErrServerClosed {
 				stdlog.Fatalf("Server error: %v", err)
 			}
 		} else {
 			stdlog.Printf("Server listening on port %s...", conf.Port)
+			srv.Handler = h2c.NewHandler(router, h2s)
 			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				stdlog.Fatalf("Server error: %v", err)
 			}
