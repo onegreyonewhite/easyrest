@@ -19,6 +19,12 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+var backgroundCtx = context.Background()
+
+type ctxKey string
+
+const userIDKey ctxKey = "USER_ID"
+
 // sqlitePlugin implements easyrest.DBPlugin for SQLite.
 type sqlitePlugin struct {
 	db            *sql.DB
@@ -168,8 +174,8 @@ func convertILIKEtoLike(where map[string]any) map[string]any {
 }
 
 // Function implementation to handle transactions, adapted for SQLite.
-func (s *sqlitePlugin) handleTransaction(ctxMap map[string]any, operation func(tx *sql.Tx) (any, error)) (any, error) {
-	ctxQuery := context.WithValue(context.Background(), "USER_ID", ctxMap["user_id"]) // Assuming user_id is passed in ctxMap
+func (s *sqlitePlugin) handleTransaction(userID string, ctxMap map[string]any, operation func(tx *sql.Tx) (any, error)) (any, error) {
+	ctxQuery := context.WithValue(backgroundCtx, userIDKey, userID)
 	tx, err := s.db.BeginTx(ctxQuery, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin tx: %w", err)
@@ -258,7 +264,11 @@ func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, whe
 	if len(selectFields) > 0 {
 		fields = strings.Join(selectFields, ", ")
 	}
-	query := fmt.Sprintf("SELECT %s FROM %s", fields, table)
+	var sb strings.Builder
+	sb.WriteString("SELECT ")
+	sb.WriteString(fields)
+	sb.WriteString(" FROM ")
+	sb.WriteString(table)
 
 	// Convert ILIKE to LIKE COLLATE NOCASE before building where clause
 	where = convertILIKEtoLike(where)
@@ -266,23 +276,26 @@ func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, whe
 	if err != nil {
 		return nil, err
 	}
-	query += whereClause
+	sb.WriteString(whereClause)
 	if len(groupBy) > 0 {
-		query += " GROUP BY " + strings.Join(groupBy, ", ")
+		sb.WriteString(" GROUP BY ")
+		sb.WriteString(strings.Join(groupBy, ", "))
 	}
 	if len(ordering) > 0 {
-		query += " ORDER BY " + strings.Join(ordering, ", ")
+		sb.WriteString(" ORDER BY ")
+		sb.WriteString(strings.Join(ordering, ", "))
 	}
 	if limit > 0 {
-		query += fmt.Sprintf(" LIMIT %d", limit)
+		sb.WriteString(fmt.Sprintf(" LIMIT %d", limit))
 		if offset > 0 {
-			query += fmt.Sprintf(" OFFSET %d", offset)
+			sb.WriteString(fmt.Sprintf(" OFFSET %d", offset))
 		}
 	} else if offset > 0 {
-		query += fmt.Sprintf(" LIMIT -1 OFFSET %d", offset)
+		sb.WriteString(fmt.Sprintf(" LIMIT -1 OFFSET %d", offset))
 	}
+	query := sb.String()
 
-	ctxQuery := context.WithValue(context.Background(), "USER_ID", userID)
+	ctxQuery := context.WithValue(backgroundCtx, userIDKey, userID)
 
 	// Use prepared statement for better performance
 	stmt, err := s.getPreparedStmt(query, ctxQuery)
@@ -336,13 +349,13 @@ func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, whe
 
 // TableCreate builds and executes an INSERT query.
 func (s *sqlitePlugin) TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, error) {
-	res, err := s.handleTransaction(ctx, func(tx *sql.Tx) (any, error) {
-		ctxQuery := context.WithValue(context.Background(), "USER_ID", userID)
+	res, err := s.handleTransaction(userID, ctx, func(tx *sql.Tx) (any, error) {
+		ctxQuery := context.WithValue(backgroundCtx, userIDKey, userID)
 		var results []map[string]any
 		for _, row := range data {
-			var cols []string
-			var placeholders []string
-			var args []any
+			cols := make([]string, 0, len(row))
+			placeholders := make([]string, 0, len(row))
+			args := make([]any, 0, len(row))
 			for k, v := range row {
 				cols = append(cols, k)
 				placeholders = append(placeholders, "?")
@@ -373,15 +386,27 @@ func (s *sqlitePlugin) TableCreate(userID, table string, data []map[string]any, 
 
 // TableUpdate builds and executes an UPDATE query.
 func (s *sqlitePlugin) TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, error) {
-	res, err := s.handleTransaction(ctx, func(tx *sql.Tx) (any, error) {
-		ctxQuery := context.WithValue(context.Background(), "USER_ID", userID)
+	res, err := s.handleTransaction(userID, ctx, func(tx *sql.Tx) (any, error) {
+		ctxQuery := context.WithValue(backgroundCtx, userIDKey, userID)
 		var setParts []string
 		var args []any
+		if len(data) > 0 {
+			setParts = make([]string, 0, len(data))
+			args = make([]any, 0, len(data))
+		} else {
+			setParts = []string{}
+			args = []any{}
+		}
 		for k, v := range data {
 			setParts = append(setParts, fmt.Sprintf("%s = ?", k))
 			args = append(args, v)
 		}
-		baseQuery := fmt.Sprintf("UPDATE %s SET %s", table, strings.Join(setParts, ", "))
+		var sb strings.Builder
+		sb.WriteString("UPDATE ")
+		sb.WriteString(table)
+		sb.WriteString(" SET ")
+		sb.WriteString(strings.Join(setParts, ", "))
+		baseQuery := sb.String()
 
 		// Convert ILIKE to LIKE COLLATE NOCASE before building where clause
 		where = convertILIKEtoLike(where)
@@ -418,8 +443,8 @@ func (s *sqlitePlugin) TableUpdate(userID, table string, data map[string]any, wh
 
 // TableDelete builds and executes a DELETE query.
 func (s *sqlitePlugin) TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, error) {
-	res, err := s.handleTransaction(ctx, func(tx *sql.Tx) (any, error) {
-		ctxQuery := context.WithValue(context.Background(), "USER_ID", userID)
+	res, err := s.handleTransaction(userID, ctx, func(tx *sql.Tx) (any, error) {
+		ctxQuery := context.WithValue(backgroundCtx, userIDKey, userID)
 		// Convert ILIKE to LIKE COLLATE NOCASE before building where clause
 		where = convertILIKEtoLike(where)
 		whereClause, whereArgs, err := easyrest.BuildWhereClauseSorted(where)
@@ -427,7 +452,11 @@ func (s *sqlitePlugin) TableDelete(userID, table string, where map[string]any, c
 			// Error in building WHERE clause, transaction will be rolled back
 			return 0, err
 		}
-		baseQuery := fmt.Sprintf("DELETE FROM %s%s", table, whereClause)
+		var sb strings.Builder
+		sb.WriteString("DELETE FROM ")
+		sb.WriteString(table)
+		sb.WriteString(whereClause)
+		baseQuery := sb.String()
 		sqlRes, err := tx.ExecContext(ctxQuery, baseQuery, whereArgs...)
 		if err != nil {
 			// Error during execution, transaction will be rolled back

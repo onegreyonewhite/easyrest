@@ -244,6 +244,13 @@ func respondJSON(w http.ResponseWriter, status int, v interface{}) {
 // parseRequest parses the request body according to the Content-Type.
 // The parameter expectArray indicates whether an array of objects (true) or a single object (false) is expected.
 func parseRequest(r *http.Request, expectArray bool) (interface{}, error) {
+	cfg := GetConfig()
+	// Limit request body size
+	if cfg.Server.MaxBodySize > 0 {
+		r.Body = http.MaxBytesReader(nil, r.Body, cfg.Server.MaxBodySize)
+		defer r.Body.Close() // Ensure body is closed even if parsing fails midway
+	}
+
 	contentType := r.Header.Get("Content-Type")
 	if idx := strings.Index(contentType, ";"); idx != -1 {
 		contentType = contentType[:idx]

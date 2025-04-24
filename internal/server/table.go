@@ -173,7 +173,7 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Check if table restricted for this dbKey
 	if hasPluginCfg {
-		if slices.Contains(pluginCfg.Exclude.Table, table) {
+		if table == "easyrest_cache" || slices.Contains(pluginCfg.Exclude.Table, table) {
 			http.Error(w, "Not found", http.StatusNotFound)
 			return
 		}

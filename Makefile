@@ -23,7 +23,7 @@ test: plugin-sqlite
 	go tool cover -func=$(COVERAGE)
 
 bench: plugin-sqlite
-	go test -bench=. ./...
+	go test -bench=. ./... -benchmem
 
 run: plugin-sqlite
 	go run cmd/server/main.go --config test_config.yaml

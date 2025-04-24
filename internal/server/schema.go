@@ -446,6 +446,7 @@ func schemaHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid tables schema", http.StatusInternalServerError)
 			return
 		}
+		delete(tableDefs, "easyrest_cache")
 		var viewDefs map[string]any
 		if raw, exists := schemaMap["views"]; exists && raw != nil {
 			if m, ok := raw.(map[string]any); ok {

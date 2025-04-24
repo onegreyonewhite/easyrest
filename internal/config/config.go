@@ -50,6 +50,7 @@ type ServerConfig struct {
 	ReadHeaderTimeout time.Duration `yaml:"read_header_timeout"`
 	KeepAlivePeriod   time.Duration `yaml:"keep_alive_period"`
 	MaxHeaderBytes    int           `yaml:"max_header_bytes"`
+	MaxBodySize       int64         `yaml:"max_body_size"`
 
 	// HTTP/2 specific
 	HTTP2MaxConcurrentStreams         uint32        `yaml:"http2_max_concurrent_streams"`
@@ -302,6 +303,13 @@ func Load() Config {
 		}
 	}
 
+	serverMaxBodySize := int64(10 * 1024 * 1024) // 10 MB default
+	if v := os.Getenv("ER_SERVER_MAX_BODY_SIZE"); v != "" {
+		if n, err := units.FromHumanSize(v); err == nil {
+			serverMaxBodySize = n
+		}
+	}
+
 	// HTTP/2 settings
 	http2MaxConcurrentStreams := uint32(0)
 	if v := os.Getenv("ER_HTTP2_MAX_CONCURRENT_STREAMS"); v != "" {
@@ -383,6 +391,7 @@ func Load() Config {
 			WriteTimeout:                      serverWriteTimeout,
 			IdleTimeout:                       serverIdleTimeout,
 			MaxHeaderBytes:                    serverMaxHeaderBytes,
+			MaxBodySize:                       serverMaxBodySize,
 			ReadHeaderTimeout:                 serverReadHeaderTimeout,
 			KeepAlivePeriod:                   serverKeepAlivePeriod,
 			HTTP2MaxConcurrentStreams:         http2MaxConcurrentStreams,
