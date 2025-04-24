@@ -29,6 +29,7 @@ import (
 	"github.com/onegreyonewhite/easyrest/internal/cache"
 	"github.com/onegreyonewhite/easyrest/internal/config"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
+	cachepkg "github.com/patrickmn/go-cache"
 )
 
 // Global configuration and dbPlugins loaded only once.
@@ -72,6 +73,19 @@ var supportedTypes = [4]string{
 	"application/x-www-form-urlencoded",
 }
 
+// claimsCacheEntry stores claims and user_id for a token
+// Used for caching in Authenticate
+// Claims is jwt.MapClaims, UserID is string
+// TTL is managed by go-cache
+
+type claimsCacheEntry struct {
+	Claims jwt.MapClaims
+	UserID string
+}
+
+// claimsCache is a package-level cache for token claims and user_id
+var claimsCache *cachepkg.Cache
+
 func init() {
 	// Initialize atomic pointers with empty maps
 	emptyDbPlugins := make(map[string]easyrest.DBPlugin)
@@ -98,6 +112,7 @@ func SetConfig(newConfig config.Config) {
 func ReloadConfig() {
 	cfgOnce = sync.Once{}
 	schemaCache = make(map[string]any)
+	ResetClaimsCache()
 }
 
 func StopPlugins() {
@@ -119,6 +134,12 @@ func StopPlugins() {
 			stdlog.Printf("Stopping plugin client for connection: %s", connName)
 			client.Kill()
 		}
+	}
+}
+
+func ResetClaimsCache() {
+	if claimsCache != nil {
+		claimsCache.Flush()
 	}
 }
 

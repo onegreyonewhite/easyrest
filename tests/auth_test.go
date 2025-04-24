@@ -269,6 +269,7 @@ func TestTokenURL(t *testing.T) {
 	defer mockServer.Close()
 
 	// Replace URL with mock server
+	server.ResetClaimsCache()
 	os.Setenv("ER_TOKEN_URL", mockServer.URL)
 	server.SetConfig(server.GetConfig())
 
@@ -411,6 +412,7 @@ func TestTokenURLWithScopeCheck(t *testing.T) {
 	defer mockServer.Close()
 
 	// Replace URL with mock server
+	server.ResetClaimsCache()
 	os.Setenv("ER_TOKEN_URL", mockServer.URL)
 	server.SetConfig(server.GetConfig())
 
@@ -520,6 +522,7 @@ func TestTokenURLWithScopeCheck(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
+	server.ResetClaimsCache()
 	os.Setenv("ER_TOKEN_URL", mockServer.URL)
 	server.SetConfig(server.GetConfig())
 

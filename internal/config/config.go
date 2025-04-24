@@ -73,6 +73,7 @@ type Config struct {
 	DefaultTimezone string `yaml:"default_timezone"`
 	DefaultLimit    int    `yaml:"default_limit"`
 	TokenURL        string `yaml:"token_url"`
+	TokenCacheTTL   int    `yaml:"token_cache_ttl"`
 	AuthFlow        string `yaml:"auth_flow"`
 	// CORS settings
 	CORS CORSConfig `yaml:"cors"`
@@ -360,6 +361,13 @@ func Load() Config {
 		}
 	}
 
+	tokenCacheTTL := -1
+	if v := os.Getenv("ER_TOKEN_CACHE_TTL"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			tokenCacheTTL = n
+		}
+	}
+
 	cfg := Config{
 		Port:            port,
 		CheckScope:      checkScope,
@@ -369,6 +377,7 @@ func Load() Config {
 		AccessLogOn:     accessLogOn,
 		DefaultTimezone: defaultTimezone,
 		TokenURL:        tokenURL,
+		TokenCacheTTL:   tokenCacheTTL,
 		AuthFlow:        authFlow,
 		// CORS settings
 		CORS: CORSConfig{

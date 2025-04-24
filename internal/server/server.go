@@ -24,6 +24,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/mux"
 	"github.com/onegreyonewhite/easyrest/internal/config"
+	cachepkg "github.com/patrickmn/go-cache"
 )
 
 type contextKey string
@@ -131,6 +132,17 @@ func Authenticate(r *http.Request) (string, *http.Request, error) {
 	}
 	tokenStr := matches[1]
 
+	// Check cache for claims and user_id
+	if claimsCache != nil {
+		if cached, found := claimsCache.Get(tokenStr); found {
+			if entry, ok := cached.(claimsCacheEntry); ok {
+				// Set claims in context and return cached user_id
+				r = r.WithContext(context.WithValue(r.Context(), TokenClaimsKey, entry.Claims))
+				return entry.UserID, r, nil
+			}
+		}
+	}
+
 	if config.TokenSecret != "" {
 		parsed, err := jwt.Parse(tokenStr, func(token *jwt.Token) (any, error) {
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
@@ -152,7 +164,12 @@ func Authenticate(r *http.Request) (string, *http.Request, error) {
 		}
 
 		r = r.WithContext(context.WithValue(r.Context(), TokenClaimsKey, claims))
-		return extractUserIDFromClaims(claims), r, nil
+		userID := extractUserIDFromClaims(claims)
+		// Store in cache
+		if claimsCache != nil {
+			claimsCache.SetDefault(tokenStr, claimsCacheEntry{Claims: claims, UserID: userID})
+		}
+		return userID, r, nil
 	}
 
 	tokenURL := os.Getenv("ER_TOKEN_URL")
@@ -182,7 +199,12 @@ func Authenticate(r *http.Request) (string, *http.Request, error) {
 
 		claims := jwt.MapClaims(authResponse)
 		r = r.WithContext(context.WithValue(r.Context(), TokenClaimsKey, claims))
-		return extractUserIDFromClaims(claims), r, nil
+		userID := extractUserIDFromClaims(claims)
+		// Store in cache
+		if claimsCache != nil {
+			claimsCache.SetDefault(tokenStr, claimsCacheEntry{Claims: claims, UserID: userID})
+		}
+		return userID, r, nil
 	}
 
 	claims, err := DecodeTokenWithoutValidation(tokenStr)
@@ -196,7 +218,12 @@ func Authenticate(r *http.Request) (string, *http.Request, error) {
 	}
 
 	r = r.WithContext(context.WithValue(r.Context(), TokenClaimsKey, claims))
-	return extractUserIDFromClaims(claims), r, nil
+	userID := extractUserIDFromClaims(claims)
+	// Store in cache
+	if claimsCache != nil {
+		claimsCache.SetDefault(tokenStr, claimsCacheEntry{Claims: claims, UserID: userID})
+	}
+	return userID, r, nil
 }
 
 // proxyHeadersHandler wraps the original handler to process X-Forwarded-* headers
@@ -258,11 +285,17 @@ func corsMiddleware(next http.Handler) http.Handler {
 
 // SetupRouter initializes the router and endpoints.
 func SetupRouter() *mux.Router {
+	cfg := GetConfig()
+	// Initialize claims cache with default expiration and cleanup interval
+	if claimsCache == nil && cfg.TokenCacheTTL >= 0 {
+		defaultExpiration := time.Duration(cfg.TokenCacheTTL) * time.Second
+		cleanupInterval := time.Duration(cfg.TokenCacheTTL) * time.Second * 10
+		claimsCache = cachepkg.New(defaultExpiration, cleanupInterval)
+	}
 	LoadPlugins()
 	r := mux.NewRouter()
 
 	// Add CORS middleware first
-	cfg := GetConfig()
 	if cfg.CORS.Enabled {
 		r.Use(corsMiddleware)
 	}
