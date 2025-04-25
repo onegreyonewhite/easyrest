@@ -472,3 +472,83 @@ func TestAnonymousScopeAccess(t *testing.T) {
 		t.Fatalf("Expected status 404 for hidden users access, got %d. Response: %s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestSelectRangeHeaders(t *testing.T) {
+	dbPath := setupTestDB(t)
+	defer os.Remove(dbPath)
+	defer server.StopPlugins()
+
+	// Insert multiple users for pagination
+	insertUser(t, dbPath, "Alice", "")
+	insertUser(t, dbPath, "Bob", "")
+	insertUser(t, dbPath, "Charlie", "")
+	insertUser(t, dbPath, "Diana", "")
+
+	router := setupServerWithDB(t, dbPath)
+	tokenStr := generateToken(t)
+
+	tests := []struct {
+		name          string
+		rangeUnit     string
+		rangeHeader   string
+		wantStatus    int
+		wantStart     int
+		wantEnd       int
+		wantLen       int
+		wantBodyEmpty bool
+	}{
+		{"first_two", "items", "0-1", http.StatusOK, 0, 1, 2, false},
+		{"middle", "items", "1-2", http.StatusOK, 1, 2, 2, false},
+		{"last_one", "items", "3-3", http.StatusOK, 3, 3, 1, false},
+		{"all", "items", "0-3", http.StatusOK, 0, 3, 4, false},
+		{"out_of_range", "items", "10-15", http.StatusRequestedRangeNotSatisfiable, 15, 15, 0, true},
+		{"invalid_header_fallback", "items", "bad-header", http.StatusOK, 0, 3, 4, false},
+		{"no_header_fallback", "", "", http.StatusOK, 0, 3, 4, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := http.NewRequest("GET", "/api/test/users/?select=id,name", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer "+tokenStr)
+			if tt.rangeUnit != "" {
+				req.Header.Set("Range-Unit", tt.rangeUnit)
+			}
+			if tt.rangeHeader != "" {
+				req.Header.Set("Range", tt.rangeHeader)
+			}
+			rr := httptest.NewRecorder()
+			router.ServeHTTP(rr, req)
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("Expected status %d, got %d. Response: %s", tt.wantStatus, rr.Code, rr.Body.String())
+			}
+			contentRange := rr.Header().Get("Content-Range")
+			if !strings.HasPrefix(contentRange, fmt.Sprintf("%d-%d/", tt.wantStart, tt.wantEnd)) {
+				t.Errorf("Content-Range header = %q, want prefix %d-%d/", contentRange, tt.wantStart, tt.wantEnd)
+			}
+			rangeUnit := rr.Header().Get("Range-Unit")
+			if rangeUnit != "items" {
+				t.Errorf("Range-Unit header = %q, want 'items'", rangeUnit)
+			}
+			acceptRanges := rr.Header().Get("Accept-Ranges")
+			if acceptRanges != "items" {
+				t.Errorf("Accept-Ranges header = %q, want 'items'", acceptRanges)
+			}
+			if !tt.wantBodyEmpty {
+				var result []map[string]any
+				if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
+					t.Fatalf("Error parsing response: %v. Response: %s", err, rr.Body.String())
+				}
+				if len(result) != tt.wantLen {
+					t.Errorf("Expected %d rows, got %d", tt.wantLen, len(result))
+				}
+			} else {
+				if len(rr.Body.Bytes()) > 0 && strings.TrimSpace(rr.Body.String()) != "[]" {
+					t.Errorf("Expected empty body, got: %q", rr.Body.String())
+				}
+			}
+		})
+	}
+}

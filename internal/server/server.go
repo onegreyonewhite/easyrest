@@ -283,6 +283,12 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// healthHandler returns OK for health checks.
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
+}
+
 // SetupRouter initializes the router and endpoints.
 func SetupRouter() *mux.Router {
 	cfg := GetConfig()
@@ -309,6 +315,8 @@ func SetupRouter() *mux.Router {
 	r.HandleFunc("/api/{db}/rpc/{func}/", rpcHandler).Methods("POST")
 	// Call table endpoint.
 	r.HandleFunc("/api/{db}/{table}/", tableHandler)
+	// Add health check endpoint.
+	r.HandleFunc("/health", healthHandler).Methods("GET")
 	return r
 }
 

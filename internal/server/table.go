@@ -277,6 +277,36 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("ETag", currentETag)
 		}
 
+		// --- Range header parsing for pagination ---
+		limit := 0
+		offset := 0
+		rangeUnitHeader := r.Header.Get("Range-Unit")
+		rangeHeader := r.Header.Get("Range")
+		usedHeaderRange := false
+		if strings.ToLower(rangeUnitHeader) == "items" && rangeHeader != "" {
+			// Expecting format: offset-last (e.g., 0-9)
+			parts := strings.SplitN(rangeHeader, "-", 2)
+			if len(parts) == 2 {
+				start, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+				end, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+				if err1 == nil && err2 == nil && start >= 0 && end >= start {
+					offset = start
+					limit = end - start + 1
+					usedHeaderRange = true
+				}
+			}
+		}
+		if !usedHeaderRange {
+			limit, _ = strconv.Atoi(queryValues.Get("limit"))
+			offset, _ = strconv.Atoi(queryValues.Get("offset"))
+			if offset < 0 {
+				offset = 0
+			}
+		}
+		if limit == 0 {
+			limit = pluginCfg.DefaultLimit
+		}
+
 		selectParam := queryValues.Get("select")
 
 		selectFields, groupBy, err := processSelectParam(selectParam, flatCtx, pluginCtx)
@@ -292,11 +322,6 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		ordering := ParseCSV(queryValues.Get("ordering"))
-		limit, _ := strconv.Atoi(queryValues.Get("limit"))
-		offset, _ := strconv.Atoi(queryValues.Get("offset"))
-		if limit == 0 {
-			limit = pluginCfg.DefaultLimit
-		}
 
 		startTime := time.Now()
 		rows, err := dbPlug.TableGet(userID, table, selectFields, where, ordering, groupBy, limit, offset, pluginCtx)
@@ -308,7 +333,37 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Error in TableGet: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		makeResponse(w, r, http.StatusOK, rows)
+
+		status := http.StatusOK
+
+		// --- Add Content-Range and Range-Unit headers ---
+		rowCount := len(rows)
+		startIdx := offset
+		endIdx := offset + rowCount - 1
+		if rowCount == 0 {
+			endIdx = offset - 1 // for empty result, E < S
+		}
+
+		// Out of range: use requested end for Content-Range, always return []
+		if startIdx > endIdx {
+			status = http.StatusRequestedRangeNotSatisfiable
+			if usedHeaderRange {
+				parts := strings.SplitN(rangeHeader, "-", 2)
+				if len(parts) == 2 {
+					end, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+					if err2 == nil {
+						startIdx = end
+						endIdx = end
+					}
+				}
+			}
+			rows = []map[string]any{} // always return [] for JSON
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("%d-%d/*", startIdx, endIdx))
+		w.Header().Set("Range-Unit", "items")
+		w.Header().Set("Accept-Ranges", "items")
+
+		makeResponse(w, r, status, rows)
 
 	case http.MethodPost:
 		parsedData, err := parseRequest(r, true)

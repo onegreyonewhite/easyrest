@@ -297,3 +297,17 @@ func TestRPCHandler(t *testing.T) {
 		t.Errorf("Expected 404 DB plugin not found, got %d, body: %s", rr.Code, rr.Body.String())
 	}
 }
+
+// TestHealthHandler checks the /health endpoint returns 200 and 'OK'.
+func TestHealthHandler(t *testing.T) {
+	router := server.SetupRouter()
+	req, _ := http.NewRequest("GET", "/health", nil)
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", rr.Code)
+	}
+	if rr.Body.String() != "OK" {
+		t.Errorf("Expected body 'OK', got %q", rr.Body.String())
+	}
+}
