@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -15,50 +16,69 @@ type whereCondEntry struct {
 // buildWhereCondEntries processes the where map and returns a slice of whereCondEntry.
 func buildWhereCondEntries(where map[string]any) []whereCondEntry {
 	entries := make([]whereCondEntry, 0, len(where))
+
+	addEntry := func(cond string, args []any, sortKey string) {
+		entries = append(entries, whereCondEntry{
+			cond:    cond,
+			args:    args,
+			sortKey: sortKey,
+		})
+	}
+
 	for field, val := range where {
+		isNot := false
+		baseField := field
+		if strings.HasPrefix(field, "NOT ") {
+			isNot = true
+			baseField = strings.TrimPrefix(field, "NOT ")
+		}
 		switch v := val.(type) {
 		case map[string]any:
 			for op, operand := range v {
 				if op == "IN" {
 					arr := strings.Split(operand.(string), ",")
 					for i := range arr {
-						arr[i] = strings.TrimSpace(arr[i])
+						if trimmed := strings.TrimSpace(arr[i]); trimmed != "" {
+							arr[i] = trimmed
+						} else {
+							arr = slices.Delete(arr, i, i+1)
+						}
+					}
+					placeholders := make([]string, len(arr))
+					for i := range arr {
+						placeholders[i] = "?"
+					}
+					inVals := make([]any, len(arr))
+					for i, val := range arr {
+						inVals[i] = val
 					}
 					if len(arr) == 0 {
-						entries = append(entries, whereCondEntry{
-							cond:    fmt.Sprintf("%s IN (NULL)", field),
-							args:    nil,
-							sortKey: field + "|IN",
-						})
+						if isNot {
+							addEntry(fmt.Sprintf("NOT (%s IN (NULL))", baseField), nil, field+"|IN")
+						} else {
+							addEntry(fmt.Sprintf("%s IN (NULL)", baseField), nil, field+"|IN")
+						}
 					} else {
-						placeholders := make([]string, len(arr))
-						for i := range arr {
-							placeholders[i] = "?"
+						if isNot {
+							addEntry(fmt.Sprintf("NOT (%s IN (%s))", baseField, strings.Join(placeholders, ",")), inVals, field+"|IN")
+						} else {
+							addEntry(fmt.Sprintf("%s IN (%s)", baseField, strings.Join(placeholders, ",")), inVals, field+"|IN")
 						}
-						inVals := make([]any, len(arr))
-						for i, val := range arr {
-							inVals[i] = val
-						}
-						entries = append(entries, whereCondEntry{
-							cond:    fmt.Sprintf("%s IN (%s)", field, strings.Join(placeholders, ",")),
-							args:    inVals,
-							sortKey: field + "|IN",
-						})
 					}
 				} else {
-					entries = append(entries, whereCondEntry{
-						cond:    fmt.Sprintf("%s %s ?", field, op),
-						args:    []any{operand},
-						sortKey: field + "|" + op,
-					})
+					if isNot {
+						addEntry(fmt.Sprintf("NOT (%s %s ?)", baseField, op), []any{operand}, field+"|NOT "+op)
+					} else {
+						addEntry(fmt.Sprintf("%s %s ?", baseField, op), []any{operand}, field+"|"+op)
+					}
 				}
 			}
 		default:
-			entries = append(entries, whereCondEntry{
-				cond:    fmt.Sprintf("%s = ?", field),
-				args:    []any{v},
-				sortKey: field + "|=",
-			})
+			if isNot {
+				addEntry(fmt.Sprintf("NOT (%s = ?)", baseField), []any{v}, field+"|NOT =")
+			} else {
+				addEntry(fmt.Sprintf("%s = ?", baseField), []any{v}, field+"|=")
+			}
 		}
 	}
 	return entries
@@ -160,4 +180,38 @@ func FormatToContext(input map[string]any) (map[string]string, error) {
 		}
 	}
 	return output, nil
+}
+
+// GetTxPreference extracts the transaction preference ('commit' or 'rollback') from the context.
+// Defaults to 'commit' if not specified. Returns an error for invalid values.
+func GetTxPreference(ctx map[string]any) (string, error) {
+	txPreference := "commit" // Default behavior
+	if ctx != nil {
+		// Use type assertion with checking for existence
+		if preferAny, preferExists := ctx["prefer"]; preferExists {
+			// Check if prefer is a map
+			if prefer, ok := preferAny.(map[string]any); ok {
+				// Check if tx exists within prefer
+				if txPrefAny, txPrefExists := prefer["tx"]; txPrefExists {
+					// Check if tx is a string
+					if txPref, ok := txPrefAny.(string); ok && txPref != "" { // Ensure it's a non-empty string
+						// Validate the value
+						if txPref == "commit" || txPref == "rollback" {
+							txPreference = txPref
+						} else {
+							return "", fmt.Errorf("invalid value for prefer.tx: '%s', must be 'commit' or 'rollback'", txPref)
+						}
+					} else if !ok {
+						// If prefer.tx exists but is not a string
+						return "", fmt.Errorf("invalid type for prefer.tx: expected string, got %T", txPrefAny)
+					}
+					// If txPref is an empty string, we keep the default "commit"
+				}
+			} else {
+				// If prefer exists but is not a map[string]any
+				return "", fmt.Errorf("invalid type for prefer: expected map[string]any, got %T", preferAny)
+			}
+		}
+	}
+	return txPreference, nil
 }

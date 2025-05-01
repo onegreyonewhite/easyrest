@@ -7,7 +7,7 @@ import (
 )
 
 // Version is the plugin version.
-var Version = "v0.8.6"
+var Version = "v0.8.7"
 
 // DBPlugin – interface for DB access plugins.
 type DBPlugin interface {

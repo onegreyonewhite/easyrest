@@ -108,13 +108,20 @@ func ParseWhereClause(values map[string][]string, flatCtx map[string]string, plu
 	result := make(map[string]any, len(values))
 	for key, vals := range values {
 		if strings.HasPrefix(key, "where.") {
-			// Use strings.Cut for potentially slightly better performance than SplitN(..., 3)
-			// when we expect exactly 3 parts, although Split is fine too.
-			prefix, fieldOp, found := strings.Cut(key, ".")
-			if !found || prefix != "where" { // Check prefix just in case
+			prefix, rest, found := strings.Cut(key, ".")
+			if !found || prefix != "where" {
 				return nil, fmt.Errorf("invalid where key format: %s", key)
 			}
-			opCode, field, found := strings.Cut(fieldOp, ".")
+
+			// Check for 'not' modifier
+			opCode := ""
+			field := ""
+			isNot := false
+			if strings.HasPrefix(rest, "not.") {
+				isNot = true
+				rest = rest[len("not."):]
+			}
+			opCode, field, found = strings.Cut(rest, ".")
 			if !found {
 				return nil, fmt.Errorf("invalid where key format: %s", key)
 			}
@@ -125,12 +132,15 @@ func ParseWhereClause(values map[string][]string, flatCtx map[string]string, plu
 			}
 			op := AllowedOps[opCode]
 
+			mapKey := field
+			if isNot {
+				mapKey = "NOT " + field
+			}
+
 			substituted := ""
-			if len(vals) > 0 { // Ensure there's at least one value
+			if len(vals) > 0 {
 				if op == "IN" {
-					// Consider using strings.Builder if vals[0] is very long or has many commas
 					val_arr := strings.Split(vals[0], ",")
-					// Preallocate for substitution
 					substituted_arr := make([]string, len(val_arr))
 					for idx, v := range val_arr {
 						substituted_arr[idx] = substitutePluginContext(v, flatCtx, pluginCtx)
@@ -139,20 +149,16 @@ func ParseWhereClause(values map[string][]string, flatCtx map[string]string, plu
 				} else {
 					substituted = substitutePluginContext(vals[0], flatCtx, pluginCtx)
 				}
-			} // else: substituted remains "", which might be valid for IS NULL/IS NOT NULL
+			}
 
-			// Use map access pattern that avoids double lookup
-			if existing, found := result[field]; found {
-				// Type assertion to modify existing map
+			if existing, found := result[mapKey]; found {
 				m, ok := existing.(map[string]any)
 				if !ok {
-					// This indicates mixed condition types for the same field, handle error
-					return nil, fmt.Errorf("conflicting condition types for field %s", field)
+					return nil, fmt.Errorf("conflicting condition types for field %s", mapKey)
 				}
 				m[op] = substituted
 			} else {
-				// Create new map for the field only when it's first encountered
-				result[field] = map[string]any{op: substituted}
+				result[mapKey] = map[string]any{op: substituted}
 			}
 		}
 	}

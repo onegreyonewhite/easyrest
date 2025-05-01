@@ -552,3 +552,40 @@ func TestSelectRangeHeaders(t *testing.T) {
 		})
 	}
 }
+
+func TestSelectWhereNotEq(t *testing.T) {
+	dbPath := setupTestDB(t)
+	defer os.Remove(dbPath)
+	defer server.StopPlugins()
+
+	// Insert several users.
+	insertUser(t, dbPath, "Alice", "")
+	insertUser(t, dbPath, "Bob", "")
+	insertUser(t, dbPath, "Charlie", "")
+
+	router := setupServerWithDB(t, dbPath)
+	tokenStr := generateToken(t)
+	// Query for all users except Alice
+	req, err := http.NewRequest("GET", "/api/test/users/?select=id,name&where.not.eq.name=Alice", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tokenStr)
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d. Response: %s", rr.Code, rr.Body.String())
+	}
+	var result []map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
+		t.Fatalf("Error parsing response: %v. Response: %s", err, rr.Body.String())
+	}
+	if len(result) != 2 {
+		t.Fatalf("Expected 2 rows (not Alice), got %d", len(result))
+	}
+	for _, row := range result {
+		if row["name"] == "Alice" {
+			t.Errorf("Expected no row with name 'Alice', but got one: %v", row)
+		}
+	}
+}

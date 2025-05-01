@@ -183,41 +183,13 @@ func (s *sqlitePlugin) handleTransaction(userID string, ctxMap map[string]any, o
 
 	// Default transaction preference is commit
 	txPreference := "commit"
-	isValidPreference := true
-	preferenceError := ""
 
 	if ctxMap != nil {
 		// Check and validate prefer.tx preference
-		if preferVal, ok := ctxMap["prefer"]; ok && preferVal != nil {
-			if preferMap, ok := preferVal.(map[string]any); ok {
-				if txVal, ok := preferMap["tx"]; ok && txVal != nil {
-					// Check if 'tx' is a string
-					if txStr, ok := txVal.(string); ok {
-						if txStr != "" { // If it's a non-empty string
-							txPreference = strings.ToLower(txStr)
-							if txPreference != "commit" && txPreference != "rollback" {
-								isValidPreference = false
-								preferenceError = fmt.Sprintf("invalid value for prefer.tx: '%s'. Must be 'commit' or 'rollback'", txStr)
-							}
-							// If txStr is "", txPreference remains default "commit", isValidPreference remains true.
-						}
-						// If txStr is "", it's valid, just use default preference.
-					} else { // 'tx' exists but is NOT a string
-						isValidPreference = false
-						preferenceError = fmt.Sprintf("invalid type for prefer.tx: expected string, got %T", txVal)
-					}
-				}
-			} else {
-				isValidPreference = false
-				preferenceError = fmt.Sprintf("invalid type for prefer: expected map[string]any, got %T", preferVal)
-			}
+		txPreference, err = easyrest.GetTxPreference(ctxMap)
+		if err != nil {
+			return nil, err
 		}
-
-		if !isValidPreference {
-			// No need to rollback tx as nothing has happened yet.
-			return nil, errors.New(preferenceError)
-		}
-		// SQLite does not need injectContext like MySQL
 	}
 
 	// Execute the core operation

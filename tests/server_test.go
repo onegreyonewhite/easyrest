@@ -119,18 +119,107 @@ func TestCheckScope(t *testing.T) {
 // TestParseWhereClause checks parseWhereClause.
 func TestParseWhereClause(t *testing.T) {
 	values := map[string][]string{
-		"where.eq.name":   {"Alice"},
-		"where.gt.id":     {"100"},
+		"where.eq.name":    {"Alice"},
+		"where.neq.age":    {"30"},
+		"where.lt.id":      {"100"},
+		"where.lte.score":  {"50"},
+		"where.gt.height":  {"180"},
+		"where.gte.level":  {"2"},
+		"where.like.city":  {"Moscow%"},
+		"where.ilike.note": {"test%"},
+		"where.is.active":  {"TRUE"},
+		"where.in.group":   {"A,B,C"},
+		// NOT варианты
+		"where.not.eq.name":    {"Bob"},
+		"where.not.neq.age":    {"40"},
+		"where.not.lt.id":      {"200"},
+		"where.not.lte.score":  {"60"},
+		"where.not.gt.height":  {"190"},
+		"where.not.gte.level":  {"3"},
+		"where.not.like.city":  {"SPb%"},
+		"where.not.ilike.note": {"prod%"},
+		"where.not.is.active":  {"FALSE"},
+		"where.not.in.group":   {"X,Y,Z"},
+	}
+	whereMap, err := server.ParseWhereClause(values, map[string]string{}, map[string]any{})
+	if err != nil {
+		t.Errorf("Unexpected error from parseWhereClause: %v", err)
+	}
+	checks := []struct {
+		key   string
+		op    string
+		value string
+	}{
+		{"name", "=", "Alice"},
+		{"age", "!=", "30"},
+		{"id", "<", "100"},
+		{"score", "<=", "50"},
+		{"height", ">", "180"},
+		{"level", ">=", "2"},
+		{"city", "LIKE", "Moscow%"},
+		{"note", "ILIKE", "test%"},
+		{"active", "IS", "TRUE"},
+		{"group", "IN", "A,B,C"},
+	}
+	for _, c := range checks {
+		m, ok := whereMap[c.key].(map[string]any)
+		if !ok {
+			t.Errorf("Expected key %q in whereMap", c.key)
+			continue
+		}
+		v, ok := m[c.op]
+		if !ok {
+			t.Errorf("Expected operator %q for key %q", c.op, c.key)
+			continue
+		}
+		if v != c.value {
+			t.Errorf("Expected value %q for %q %q, got %q", c.value, c.key, c.op, v)
+		}
+	}
+	notChecks := []struct {
+		key   string
+		op    string
+		value string
+	}{
+		{"NOT name", "=", "Bob"},
+		{"NOT age", "!=", "40"},
+		{"NOT id", "<", "200"},
+		{"NOT score", "<=", "60"},
+		{"NOT height", ">", "190"},
+		{"NOT level", ">=", "3"},
+		{"NOT city", "LIKE", "SPb%"},
+		{"NOT note", "ILIKE", "prod%"},
+		{"NOT active", "IS", "FALSE"},
+		{"NOT group", "IN", "X,Y,Z"},
+	}
+	for _, c := range notChecks {
+		m, ok := whereMap[c.key].(map[string]any)
+		if !ok {
+			t.Errorf("Expected key %q in whereMap", c.key)
+			continue
+		}
+		v, ok := m[c.op]
+		if !ok {
+			t.Errorf("Expected operator %q for key %q", c.op, c.key)
+			continue
+		}
+		if v != c.value {
+			t.Errorf("Expected value %q for %q %q, got %q", c.value, c.key, c.op, v)
+		}
+	}
+	valuesErr := map[string][]string{
 		"where.unknown.x": {"foo"},
 	}
-	// Pass empty flat and plugin contexts.
-	_, err := server.ParseWhereClause(values, map[string]string{}, map[string]any{})
-	if err == nil {
+	_, err2 := server.ParseWhereClause(valuesErr, map[string]string{}, map[string]any{})
+	if err2 == nil {
 		t.Error("Expected parseWhereClause to fail with unknown operator 'unknown'")
 	}
 	// Remove the unknown operator.
-	delete(values, "where.unknown.x")
-	whereMap, err2 := server.ParseWhereClause(values, map[string]string{}, map[string]any{})
+	values = map[string][]string{
+		"where.eq.name": {"Alice"},
+		"where.gt.id":   {"100"},
+	}
+	whereMap, err2 = server.ParseWhereClause(values, map[string]string{}, map[string]any{})
 	if err2 != nil {
 		t.Errorf("Unexpected error from parseWhereClause: %v", err2)
 	}

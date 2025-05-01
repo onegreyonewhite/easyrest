@@ -697,3 +697,70 @@ func TestTableGet_ILIKE(t *testing.T) {
 		t.Fatalf("Expected 0 rows with name ILIKE 'test', got %d", len(results))
 	}
 }
+
+// --- Test TableGet with all where operators ---
+func TestTableGet_AllWhereOps(t *testing.T) {
+	uri := "sqlite://:memory:"
+	plugin := &sqlitePlugin{}
+	if err := plugin.InitConnection(uri); err != nil {
+		t.Fatalf("InitConnection failed: %v", err)
+	}
+	db, err := openInMemoryDB(uri)
+	if err != nil {
+		t.Fatalf("openInMemoryDB failed: %v", err)
+	}
+	plugin.db = db
+	if err := initTestDB(plugin.db); err != nil {
+		t.Fatalf("initTestDB failed: %v", err)
+	}
+	// Insert one row
+	_, err = plugin.db.Exec(`INSERT INTO users (name, update_field, created_at) VALUES ('Alice', 'test1', '2024-03-13 10:00:00')`)
+	if err != nil {
+		t.Fatalf("Insert failed: %v", err)
+	}
+	selectFields := []string{"id", "name", "update_field", "created_at"}
+
+	// All supported where-operators
+	whereCases := []struct {
+		desc   string
+		where  map[string]any
+		expect int // how many rows expected
+	}{
+		{"eq match", map[string]any{"name": map[string]any{"=": "Alice"}}, 1},
+		{"neq not match", map[string]any{"name": map[string]any{"!=": "Alice"}}, 0},
+		{"lt not match", map[string]any{"id": map[string]any{"<": 1}}, 0},
+		{"lte match", map[string]any{"id": map[string]any{"<=": 1}}, 1},
+		{"gt not match", map[string]any{"id": map[string]any{">": 1}}, 0},
+		{"gte match", map[string]any{"id": map[string]any{">=": 1}}, 1},
+		{"like match", map[string]any{"name": map[string]any{"LIKE": "A%"}}, 1},
+		{"ilike match", map[string]any{"name": map[string]any{"ILIKE": "a%"}}, 1},
+		{"is match", map[string]any{"update_field": map[string]any{"IS": "test1"}}, 1},
+		{"in match", map[string]any{"name": map[string]any{"IN": "Alice,Bob"}}, 1},
+		{"in match null", map[string]any{"name": map[string]any{"IN": ""}}, 0},
+		// NOT-versions
+		{"not eq not match", map[string]any{"NOT name": map[string]any{"=": "Alice"}}, 0},
+		{"not neq match", map[string]any{"NOT name": map[string]any{"!=": "Alice"}}, 1},
+		{"not lt match", map[string]any{"NOT id": map[string]any{"<": 1}}, 1},
+		{"not lte not match", map[string]any{"NOT id": map[string]any{"<=": 1}}, 0},
+		{"not gt match", map[string]any{"NOT id": map[string]any{">": 1}}, 1},
+		{"not gte not match", map[string]any{"NOT id": map[string]any{">=": 1}}, 0},
+		{"not like not match", map[string]any{"NOT name": map[string]any{"LIKE": "A%"}}, 0},
+		{"not ilike not match", map[string]any{"NOT name": map[string]any{"ILIKE": "a%"}}, 0},
+		{"not is not match", map[string]any{"NOT update_field": map[string]any{"IS": "test1"}}, 0},
+		{"not in not match", map[string]any{"NOT name": map[string]any{"IN": "Alice,Bob"}}, 0},
+		{"not in not match null", map[string]any{"NOT name": map[string]any{"IN": ""}}, 0},
+		// OLD syntax version
+		{"eq match", map[string]any{"name": "Alice"}, 1},
+		{"eq not match", map[string]any{"NOT name": "Alice"}, 0},
+	}
+	for _, tc := range whereCases {
+		results, err := plugin.TableGet("testuser", "users", selectFields, tc.where, nil, nil, 0, 0, nil)
+		if err != nil {
+			t.Errorf("%s: TableGet failed: %v", tc.desc, err)
+			continue
+		}
+		if len(results) != tc.expect {
+			t.Errorf("%s: expected %d rows, got %d", tc.desc, tc.expect, len(results))
+		}
+	}
+}
