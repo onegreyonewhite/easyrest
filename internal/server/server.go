@@ -25,6 +25,15 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/onegreyonewhite/easyrest/internal/config"
 	cachepkg "github.com/patrickmn/go-cache"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/exporters/zipkin"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
 )
 
 type contextKey string
@@ -67,8 +76,8 @@ func BuildPluginContext(r *http.Request) map[string]any {
 	tx, txAllowOverride := strings.CutSuffix(dbConfig.DbTxEnd, "-allow-override")
 	prefer := make(map[string]any)
 	if preferStr := r.Header.Get("Prefer"); preferStr != "" {
-		tokens := strings.Split(preferStr, " ")
-		for _, token := range tokens {
+		tokens := strings.SplitSeq(preferStr, " ")
+		for token := range tokens {
 			parts := strings.SplitN(token, "=", 2)
 			if len(parts) != 2 {
 				continue
@@ -91,7 +100,7 @@ func BuildPluginContext(r *http.Request) map[string]any {
 
 	prefer["tx"] = tx
 
-	return map[string]any{
+	pluginCtx := map[string]any{
 		"timezone":   timezone,
 		"headers":    headers,
 		"claims":     plainClaims,
@@ -101,6 +110,14 @@ func BuildPluginContext(r *http.Request) map[string]any {
 		"query":      r.URL.RawQuery,
 		"prefer":     prefer,
 	}
+	if cfg.Otel.Enabled {
+		carrier := propagation.HeaderCarrier(r.Header)
+		traceparent := carrier.Get("traceparent")
+		if traceparent != "" {
+			pluginCtx["traceparent"] = traceparent
+		}
+	}
+	return pluginCtx
 }
 
 // AccessLogMiddleware logs incoming HTTP requests if enabled.
@@ -320,12 +337,52 @@ func SetupRouter() *mux.Router {
 	return r
 }
 
+func InitOtel(otelCfg config.OtelConfig) (shutdown func(context.Context) error, err error) {
+	var exp sdktrace.SpanExporter
+	switch otelCfg.Protocol {
+	case "otlp":
+		exp, err = otlptracegrpc.New(context.Background(), otlptracegrpc.WithEndpoint(otelCfg.Endpoint), otlptracegrpc.WithInsecure())
+	case "otlphttp":
+		exp, err = otlptracehttp.New(context.Background(), otlptracehttp.WithEndpoint(otelCfg.Endpoint))
+	case "zipkin":
+		exp, err = zipkin.New(otelCfg.Endpoint)
+	default:
+		return nil, fmt.Errorf("unsupported otel protocol: %s", otelCfg.Protocol)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exp),
+		sdktrace.WithResource(resource.NewWithAttributes(
+			semconv.SchemaURL,
+			semconv.ServiceName(otelCfg.ServiceName),
+		)),
+	)
+	otel.SetTracerProvider(tp)
+	return tp.Shutdown, nil
+}
+
 // Run starts the HTTP server.
 func Run(conf config.Config) {
 	SetConfig(conf)
+	var otelShutdown func(context.Context) error
+	if conf.Otel.Enabled {
+		var err error
+		otelShutdown, err = InitOtel(conf.Otel)
+		if err != nil {
+			stdlog.Printf("Failed to initialize OpenTelemetry: %v", err)
+		}
+	}
 	router := SetupRouter()
 	if conf.AccessLogOn {
 		router.Use(AccessLogMiddleware)
+	}
+	if otelShutdown != nil {
+		router.Use(func(next http.Handler) http.Handler {
+			return otelhttp.NewHandler(next, "server-request")
+		})
 	}
 
 	// Create server with optimized settings
@@ -403,6 +460,15 @@ func Run(conf config.Config) {
 			}
 			StopPlugins()
 			break
+		}
+	}
+
+	// graceful shutdown OpenTelemetry
+	if otelShutdown != nil {
+		ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel2()
+		if err := otelShutdown(ctx2); err != nil {
+			stdlog.Printf("Error shutting down OpenTelemetry: %v", err)
 		}
 	}
 

@@ -63,6 +63,13 @@ type ServerConfig struct {
 	HTTP2PermitProhibitedCipherSuites bool          `yaml:"http2_permit_prohibited_cipher_suites"`
 }
 
+type OtelConfig struct {
+	Enabled     bool   `yaml:"enabled"`
+	Endpoint    string `yaml:"endpoint"`
+	Protocol    string `yaml:"protocol"` // "otlp", "otlphttp", "zipkin"
+	ServiceName string `yaml:"service_name"`
+}
+
 type Config struct {
 	Port            string `yaml:"port"`
 	CheckScope      bool   `yaml:"check_scope"`
@@ -77,6 +84,9 @@ type Config struct {
 	AuthFlow        string `yaml:"auth_flow"`
 	// CORS settings
 	CORS CORSConfig `yaml:"cors"`
+
+	// Otel settings
+	Otel OtelConfig `yaml:"otel"`
 
 	// TLS settings
 	TLSEnabled  bool   `yaml:"tls_enabled"`
@@ -446,6 +456,22 @@ func Load() Config {
 
 	if cfg.DefaultLimit == 0 {
 		cfg.DefaultLimit = 100
+	}
+
+	if cfg.Otel.Endpoint == "" {
+		cfg.Otel.Enabled = false
+	}
+
+	if cfg.Otel.Protocol == "" {
+		cfg.Otel.Protocol = "otlp"
+	}
+
+	if cfg.Otel.ServiceName == "" {
+		cfg.Otel.ServiceName = "easyrest-server"
+	}
+
+	if cfg.Otel.Enabled {
+		log.Printf("Otel enabled with protocol %s, endpoint %s and service name %s\n", cfg.Otel.Protocol, cfg.Otel.Endpoint, cfg.Otel.ServiceName)
 	}
 
 	for pluginName, pluginCfg := range cfg.PluginMap {

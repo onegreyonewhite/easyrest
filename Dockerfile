@@ -25,11 +25,11 @@ ARG GOARCH="amd64"
 RUN apk add --no-cache curl
 
 RUN curl -L -o easyrest-plugin-postgres \
-    https://github.com/onegreyonewhite/easyrest-plugin-postgres/releases/download/v0.5.1/easyrest-plugin-postgres-linux-$GOARCH && \
+    https://github.com/onegreyonewhite/easyrest-plugin-postgres/releases/download/v0.5.2/easyrest-plugin-postgres-linux-$GOARCH && \
     curl -L -o easyrest-plugin-redis \
     https://github.com/onegreyonewhite/easyrest-plugin-redis/releases/download/v0.1.0/easyrest-plugin-redis-linux-$GOARCH && \
     curl -L -o easyrest-plugin-mysql \
-    https://github.com/onegreyonewhite/easyrest-plugin-mysql/releases/download/v0.5.1/easyrest-plugin-mysql-linux-$GOARCH && \
+    https://github.com/onegreyonewhite/easyrest-plugin-mysql/releases/download/v0.6.1/easyrest-plugin-mysql-linux-$GOARCH && \
     chmod +x easyrest-plugin-postgres && \
     chmod +x easyrest-plugin-redis && \
     chmod +x easyrest-plugin-mysql && \

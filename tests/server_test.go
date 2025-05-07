@@ -270,6 +270,33 @@ func TestBuildPluginContext(t *testing.T) {
 	if jwtClaimsMap["sub"] != "Alice" {
 		t.Errorf("Expected jwt.claims.sub = 'Alice', got %v", jwtClaimsMap["sub"])
 	}
+
+	// --- New test: traceparent ---
+	// Enable Otel in config
+	oldCfg := server.GetConfig()
+	cfg := oldCfg
+	cfg.Otel.Enabled = true
+	server.SetConfig(cfg)
+	defer server.SetConfig(oldCfg)
+
+	req2, _ := http.NewRequest("GET", "/api/test/users/", nil)
+	req2.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+	ctx2 := context.WithValue(context.Background(), server.TokenClaimsKey, claims)
+	req2 = req2.WithContext(ctx2)
+	got2 := server.BuildPluginContext(req2)
+	if got2["traceparent"] != "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" {
+		t.Errorf("Expected traceparent to be set in plugin context when Otel.Enabled, got %v", got2["traceparent"])
+	}
+
+	// --- New test: traceparent not added if Otel.Enabled=false ---
+	cfg2 := oldCfg
+	cfg2.Otel.Enabled = false
+	server.SetConfig(cfg2)
+	got3 := server.BuildPluginContext(req2)
+	if _, ok := got3["traceparent"]; ok {
+		t.Errorf("Did not expect traceparent in plugin context when Otel.Enabled is false")
+	}
+	server.SetConfig(oldCfg)
 }
 
 // TestAccessLogMiddleware covers accessLogMiddleware (0% -> some coverage).
@@ -399,4 +426,82 @@ func TestHealthHandler(t *testing.T) {
 	if rr.Body.String() != "OK" {
 		t.Errorf("Expected body 'OK', got %q", rr.Body.String())
 	}
+}
+
+// New test: initOtel
+func TestInitOtel(t *testing.T) {
+	cfg := config.OtelConfig{
+		Enabled:     true,
+		Endpoint:    "localhost:4317",
+		Protocol:    "otlp",
+		ServiceName: "test-service",
+	}
+	shutdown, err := server.InitOtel(cfg)
+	if err != nil {
+		t.Errorf("initOtel failed for otlp: %v", err)
+	}
+	if shutdown != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = shutdown(ctx)
+	}
+
+	cfg.Protocol = "otlphttp"
+	shutdown, err = server.InitOtel(cfg)
+	if err != nil {
+		t.Errorf("initOtel failed for otlphttp: %v", err)
+	}
+	if shutdown != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = shutdown(ctx)
+	}
+
+	cfg.Protocol = "zipkin"
+	cfg.Endpoint = "http://localhost:9411/api/v2/spans"
+	shutdown, err = server.InitOtel(cfg)
+	if err != nil {
+		t.Errorf("initOtel failed for zipkin: %v", err)
+	}
+	if shutdown != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = shutdown(ctx)
+	}
+
+	cfg.Protocol = "unknown"
+	_, err = server.InitOtel(cfg)
+	if err == nil {
+		t.Errorf("Expected error for unsupported protocol in initOtel")
+	}
+}
+
+// New smoke-test: Run with Otel.Enabled=true
+func TestRunWithOtelEnabled(t *testing.T) {
+	cfg := config.Load()
+	cfg.Otel.Enabled = true
+	cfg.Otel.Protocol = "otlphttp"
+	cfg.Otel.Endpoint = "localhost:4318"
+	cfg.Otel.ServiceName = "test-service"
+	cfg.Port = "9997"
+	cfg.AccessLogOn = false
+	cfg.TLSEnabled = false
+	cfg.Server.ReadTimeout = time.Second
+	cfg.Server.WriteTimeout = time.Second
+	cfg.Server.IdleTimeout = time.Second
+	cfg.Server.ReadHeaderTimeout = time.Second
+	cfg.Server.KeepAlivePeriod = time.Second
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		server.Run(cfg)
+	}()
+	time.Sleep(200 * time.Millisecond)
+	// Stop server through signal
+	p, err := os.FindProcess(os.Getpid())
+	if err == nil {
+		_ = p.Signal(os.Interrupt)
+	}
+	time.Sleep(200 * time.Millisecond)
 }
