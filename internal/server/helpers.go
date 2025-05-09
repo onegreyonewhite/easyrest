@@ -26,20 +26,24 @@ import (
 	"github.com/google/uuid"
 	"github.com/hashicorp/go-hclog"
 	hplugin "github.com/hashicorp/go-plugin"
-	"github.com/onegreyonewhite/easyrest/internal/cache"
 	"github.com/onegreyonewhite/easyrest/internal/config"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
+	cache "github.com/onegreyonewhite/easyrest/plugins/lru"
 	cachepkg "github.com/patrickmn/go-cache"
 )
 
+type PreservedPluginFactory[T any] func() T
+
 // Global configuration and dbPlugins loaded only once.
 var (
-	cfg           config.Config
-	cfgOnce       sync.Once
-	DbPlugins     atomic.Pointer[map[string]easyrest.DBPlugin]
-	CachePlugins  atomic.Pointer[map[string]easyrest.CachePlugin]
-	pluginClients atomic.Pointer[map[string]*hplugin.Client]
-	AllowedOps    = map[string]string{
+	cfg                   config.Config
+	cfgOnce               sync.Once
+	DbPlugins             atomic.Pointer[map[string]easyrest.DBPlugin]
+	CachePlugins          atomic.Pointer[map[string]easyrest.CachePlugin]
+	pluginClients         atomic.Pointer[map[string]*hplugin.Client]
+	PreservedCachePlugins map[string]PreservedPluginFactory[easyrest.CachePlugin]
+	PreservedDbPlugins    map[string]PreservedPluginFactory[easyrest.DBPlugin]
+	AllowedOps            = map[string]string{
 		"eq":    "=",
 		"neq":   "!=",
 		"lt":    "<",
@@ -94,6 +98,8 @@ func init() {
 	CachePlugins.Store(&emptyCachePlugins)
 	emptyPluginClients := make(map[string]*hplugin.Client)
 	pluginClients.Store(&emptyPluginClients)
+	PreservedCachePlugins = make(map[string]PreservedPluginFactory[easyrest.CachePlugin])
+	PreservedDbPlugins = make(map[string]PreservedPluginFactory[easyrest.DBPlugin])
 }
 
 // GetConfig loads configuration only once.
@@ -795,6 +801,7 @@ func LoadPlugins() {
 		}
 		pluginTypeHint := splitURI[0] // Use this only for executable name guess
 		pluginExec := "easyrest-plugin-" + pluginTypeHint
+		logMsgParts := []string{} // To build the final log message
 		var pluginPath string
 		if pluginCfg.Path != "" {
 			pluginPath = pluginCfg.Path
@@ -807,6 +814,33 @@ func LoadPlugins() {
 				pluginPath = filepath.Join(homeDir, pluginPath[2:])
 			}
 		} else {
+			isPreserved := false
+			if NewDbPlugin, ok := PreservedDbPlugins[pluginTypeHint]; ok {
+				dbPlugin := NewDbPlugin()
+				err := dbPlugin.InitConnection(pluginCfg.Uri)
+				if err != nil {
+					stdlog.Printf("Error initializing DB connection for plugin %s: %v", connName, err)
+				} else {
+					newDbPlugins[connName] = dbPlugin
+					isPreserved = true
+					logMsgParts = append(logMsgParts, "DB")
+				}
+			}
+			if NewCachePlugin, ok := PreservedCachePlugins[pluginTypeHint]; ok {
+				cachePlugin := NewCachePlugin()
+				err := cachePlugin.InitConnection(pluginCfg.Uri)
+				if err != nil {
+					stdlog.Printf("Error initializing cache connection for plugin %s: %v", connName, err)
+				} else {
+					newCachePlugins[connName] = cachePlugin
+					isPreserved = true
+					logMsgParts = append(logMsgParts, "Cache")
+				}
+			}
+			if isPreserved {
+				stdlog.Printf("Connection %s (%s as preserved) initialized with interfaces: [%s]", connName, pluginExec, strings.Join(logMsgParts, ", "))
+				continue
+			}
 			var err error
 			pluginPath, err = findPluginPath(pluginExec)
 			if err != nil {
@@ -850,7 +884,6 @@ func LoadPlugins() {
 		}
 
 		pluginAddedSuccessfully := false
-		logMsgParts := []string{} // To build the final log message
 
 		// --- Attempt to load DB Plugin ---
 		rawDB, errDBDispense := rpcClient.Dispense("db")
@@ -912,21 +945,17 @@ func LoadPlugins() {
 	oldClientsPtr := pluginClients.Load()
 
 	// Initialize internal fallback cache if no external cache plugins were loaded or supported the cache interface
-	if len(newCachePlugins) == 0 && len(cfg.PluginMap) > 0 { // Only add internal if external were configured but none loaded/supported cache
-		stdlog.Println("No external cache plugins loaded or configured plugins did not support 'cache' interface. Initializing internal fallback cache.")
+	if len(cfg.PluginMap) > 0 { // Only add internal if external were configured but none loaded/supported cache
+		stdlog.Println("Initializing lru cache.")
 		internalCache := cache.NewSimpleCachePlugin()
 		if err := internalCache.InitConnection(""); err != nil { // Pass empty URI for internal
 			stdlog.Printf("Error initializing internal fallback cache: %v", err)
 		} else {
 			// Use a distinct key for the internal cache
-			internalCacheKey := "_internal_cache"
+			internalCacheKey := "lru"
 			newCachePlugins[internalCacheKey] = internalCache
-			stdlog.Printf("Internal fallback cache initialized successfully under key '%s'", internalCacheKey)
+			stdlog.Printf("Internal lru cache initialized successfully under key '%s'", internalCacheKey)
 		}
-	} else if len(newCachePlugins) > 0 {
-		stdlog.Printf("Loaded %d external cache plugin(s). Internal fallback cache not needed.", len(newCachePlugins))
-	} else {
-		stdlog.Println("No plugins configured, skipping cache initialization.")
 	}
 
 	// Atomically swap to the new maps

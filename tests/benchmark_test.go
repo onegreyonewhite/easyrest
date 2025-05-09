@@ -14,6 +14,8 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/onegreyonewhite/easyrest/internal/server"
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
+	sqlitePlugin "github.com/onegreyonewhite/easyrest/plugins/sqlite"
 	_ "modernc.org/sqlite"
 )
 
@@ -70,6 +72,12 @@ func BenchmarkTableGet(b *testing.B) {
 	}
 
 	// Initialize the server router
+	server.PreservedDbPlugins["sqlite"] = func() easyrest.DBPlugin {
+		return sqlitePlugin.NewSqlitePlugin()
+	}
+	server.PreservedCachePlugins["sqlite"] = func() easyrest.CachePlugin {
+		return sqlitePlugin.NewSqliteCachePlugin()
+	}
 	server.ReloadConfig()
 	router := server.SetupRouter()
 
@@ -135,6 +143,12 @@ func BenchmarkTableCreate(b *testing.B) {
 	}
 
 	// Initialize the server router
+	server.PreservedDbPlugins["sqlite"] = func() easyrest.DBPlugin {
+		return sqlitePlugin.NewSqlitePlugin()
+	}
+	server.PreservedCachePlugins["sqlite"] = func() easyrest.CachePlugin {
+		return sqlitePlugin.NewSqliteCachePlugin()
+	}
 	server.ReloadConfig()
 	router := server.SetupRouter()
 
@@ -187,7 +201,7 @@ func BenchmarkTableUpdate(b *testing.B) {
 		b.Fatalf("Failed to create table: %v", err)
 	}
 	// Insert 1000 test records with update_field = 0
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		_, err = db.Exec(`INSERT INTO users (name, update_field) VALUES (?, ?)`, fmt.Sprintf("User%d", i), 0)
 		if err != nil {
 			b.Fatalf("Failed to insert data: %v", err)
@@ -213,11 +227,16 @@ func BenchmarkTableUpdate(b *testing.B) {
 	}
 
 	// Initialize the server router
+	server.PreservedDbPlugins["sqlite"] = func() easyrest.DBPlugin {
+		return sqlitePlugin.NewSqlitePlugin()
+	}
+	server.PreservedCachePlugins["sqlite"] = func() easyrest.CachePlugin {
+		return sqlitePlugin.NewSqliteCachePlugin()
+	}
 	server.ReloadConfig()
 	router := server.SetupRouter()
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for i := 0; b.Loop(); i++ {
 		// Request body: update update_field to the iteration number
 		body := fmt.Sprintf(`{"update_field": %d}`, i)
 		// To update all records, pass an empty JSON object for where (i.e. no WHERE clause)

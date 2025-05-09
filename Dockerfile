@@ -1,43 +1,34 @@
 FROM golang:1.24-alpine AS builder
 
-RUN apk add --no-cache make
+RUN apk add --no-cache make tzdata
 
 ARG GOARCH="amd64"
 ENV CGO_ENABLED=0
 ENV GOOS=linux
 
-COPY internal /app/internal
-COPY plugin /app/plugin
-COPY cmd /app/cmd
-COPY Makefile /app/Makefile
-COPY go.mod /app/go.mod
-COPY go.sum /app/go.sum
-
 WORKDIR /app
 
-RUN make clean all
+# Use Docker BuildKit's mount=type=cache to cache Go modules
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go mod download
+
+COPY internal ./internal
+COPY plugin ./plugin
+COPY plugins ./plugins
+COPY cmd ./cmd
+COPY Makefile ./
+
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    make clean server
 
 
-FROM alpine:latest
+FROM scratch
+# Copy the timezone database from Alpine (builder) image
+COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
 
-ARG GOARCH="amd64"
+COPY --from=builder /app/bin/easyrest-server /easyrest-server
 
-RUN apk add --no-cache curl
-
-RUN curl -L -o easyrest-plugin-postgres \
-    https://github.com/onegreyonewhite/easyrest-plugin-postgres/releases/download/v0.5.2/easyrest-plugin-postgres-linux-$GOARCH && \
-    curl -L -o easyrest-plugin-redis \
-    https://github.com/onegreyonewhite/easyrest-plugin-redis/releases/download/v0.1.0/easyrest-plugin-redis-linux-$GOARCH && \
-    curl -L -o easyrest-plugin-mysql \
-    https://github.com/onegreyonewhite/easyrest-plugin-mysql/releases/download/v0.6.1/easyrest-plugin-mysql-linux-$GOARCH && \
-    chmod +x easyrest-plugin-postgres && \
-    chmod +x easyrest-plugin-redis && \
-    chmod +x easyrest-plugin-mysql && \
-    mv easyrest-plugin-postgres /usr/local/bin/easyrest-plugin-postgres && \
-    mv easyrest-plugin-redis /usr/local/bin/easyrest-plugin-redis && \
-    mv easyrest-plugin-mysql /usr/local/bin/easyrest-plugin-mysql
-
-COPY --from=builder /app/bin/easyrest-server /usr/local/bin/easyrest-server
-COPY --from=builder /app/bin/easyrest-plugin-sqlite /usr/local/bin/easyrest-plugin-sqlite
-
-ENTRYPOINT ["/usr/local/bin/easyrest-server"]
+ENTRYPOINT ["/easyrest-server"]

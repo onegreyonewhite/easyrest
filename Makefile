@@ -1,11 +1,12 @@
 PREFIX = easyrest-
-BINARIES = plugin-sqlite server
+BINARIES = $(shell ls cmd)
 SRC_DIR = ./cmd
 BUILD_DIR ?= $(shell pwd)/bin
 BIN_OUT = $(addprefix $(BUILD_DIR)/$(PREFIX), $(BINARIES))
 COVERAGE ?= cover.out
 export PATH := $(BUILD_DIR):$(PATH)
 export CGO_ENABLED := 0
+export ER_TOKEN_CACHE_TTL := 20
 
 all: $(BIN_OUT)
 
@@ -22,13 +23,16 @@ test: plugin-sqlite
 	go test -v -coverpkg=./... -coverprofile=$(COVERAGE) ./...
 	go tool cover -func=$(COVERAGE)
 
-bench: plugin-sqlite
-	go test -bench=. ./... -benchmem
+bench:
+	go test -bench=. -benchmem ./tests/benchmark_test.go
 
 run: plugin-sqlite
+	go run cmd/gateway/main.go --config test_config.yaml
+
+multirun:
 	go run cmd/server/main.go --config test_config.yaml
 
-run-perf: all
+run-perf: server
 	perf record -g ./bin/easyrest-server --config test_config.yaml
 
 .PHONY: all clean test

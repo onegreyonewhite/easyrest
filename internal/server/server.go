@@ -115,6 +115,9 @@ func BuildPluginContext(r *http.Request) map[string]any {
 		traceparent := carrier.Get("traceparent")
 		if traceparent != "" {
 			pluginCtx["traceparent"] = traceparent
+			pluginCtx["otelHost"] = cfg.Otel.Endpoint
+			pluginCtx["otelProtocol"] = cfg.Otel.Protocol
+			pluginCtx["otelServiceName"] = cfg.Otel.ServiceName
 		}
 	}
 	return pluginCtx
@@ -198,6 +201,11 @@ func Authenticate(r *http.Request) (string, *http.Request, error) {
 		q := req.URL.Query()
 		q.Add("access_token", tokenStr)
 		req.URL.RawQuery = q.Encode()
+
+		// Inject trace context into outgoing request headers
+		if cfg.Otel.Enabled {
+			otel.GetTextMapPropagator().Inject(r.Context(), propagation.HeaderCarrier(req.Header))
+		}
 
 		resp, err := httpClient.Do(req)
 		if err != nil {

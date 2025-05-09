@@ -20,12 +20,14 @@ jobs:
         with:
           go-version: '1.24'
 
+      - name: Download Dependencies
+        run: go mod download
+
       - name: Build Release Binaries
         run: |
-          mkdir -p release
           for GOOS in linux darwin; do 
             for GOARCH in amd64 arm64; do 
-              for BIN in plugin-sqlite server; do 
+              for BIN in $(ls cmd); do 
                 echo "Building $BIN for $GOOS/$GOARCH..."
                 BUILD_DIR=release GOOS=$GOOS GOARCH=$GOARCH make $BIN \
                   && mv release/easyrest-$BIN release/easyrest-$BIN-$GOOS-$GOARCH;

@@ -23,16 +23,22 @@ cors:
 plugin_configs:
   - ./test.yaml
 plugins:
-  test:
-    title: "Test API"
+  sqlite:
+    title: "SQLite API"
     uri: sqlite://./test.db
     enable_cache: true
-    exclude:
-      table:
-        - easyrest_cache
-  # cache:
+  postgres:
+    title: "Postgres API"
+    uri: postgres://postgres:root@localhost:5433/easyrestdb?maxOpenConns=100&maxIdleConns=25&connMaxLifetime=5&connMaxIdleTime=10&timeout=30&bulkThreshold=100&sslmode=disable&search_path=public&autoCleanup=true
+    enable_cache: true
+  mysql:
+    title: "MySQL API"
+    uri: mysql://root:root@localhost:3307/easyrestdb?parseTime=true&autoCleanup=true
+    enable_cache: true
+  redis:
+    uri: redis://localhost:6379/1
+  # test:
   #   uri: sqlite://./test.db
-  #   type: cache
 anon_claims:
   role: "anonymous"
   sub: 0

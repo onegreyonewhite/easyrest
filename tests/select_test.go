@@ -14,6 +14,8 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/onegreyonewhite/easyrest/internal/config"
 	"github.com/onegreyonewhite/easyrest/internal/server"
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
+	sqlitePlugin "github.com/onegreyonewhite/easyrest/plugins/sqlite"
 	_ "modernc.org/sqlite"
 )
 
@@ -38,6 +40,12 @@ func TestSelectBasic(t *testing.T) {
 	}
 	cfg.CORS.Enabled = true
 	server.SetConfig(cfg)
+	server.PreservedDbPlugins["sqlite"] = func() easyrest.DBPlugin {
+		return sqlitePlugin.NewSqlitePlugin()
+	}
+	server.PreservedCachePlugins["sqlite"] = func() easyrest.CachePlugin {
+		return sqlitePlugin.NewSqliteCachePlugin()
+	}
 	server.LoadPlugins()
 	tokenStr := generateToken(t)
 	req, err := http.NewRequest("GET", "/api/test/users/?select=id,name", nil)

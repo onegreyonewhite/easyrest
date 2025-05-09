@@ -6,25 +6,26 @@ import (
 
 	hplugin "github.com/hashicorp/go-plugin"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
-	sqlite "github.com/onegreyonewhite/easyrest/plugins/sqlite"
+	redisPlugin "github.com/onegreyonewhite/easyrest/plugins/redis"
 	_ "go.uber.org/automaxprocs"
 )
 
 func main() {
 	showVersion := flag.Bool("version", false, "Show version and exit")
 	flag.Parse()
-
 	if *showVersion {
 		fmt.Println(easyrest.Version)
 		return
 	}
 
+	cacheImpl := redisPlugin.NewRedisCachePlugin()
+
 	hplugin.Serve(&hplugin.ServeConfig{
 		HandshakeConfig: easyrest.Handshake,
 		Plugins: map[string]hplugin.Plugin{
-			"db":    &easyrest.DBPluginPlugin{Impl: sqlite.NewSqlitePlugin()},
-			"cache": &easyrest.CachePluginPlugin{Impl: sqlite.NewSqliteCachePlugin()},
+			// Only register the cache plugin
+			"cache": &easyrest.CachePluginPlugin{Impl: cacheImpl},
 		},
-		Test: nil,
 	})
+	defer cacheImpl.Close()
 }
