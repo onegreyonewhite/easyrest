@@ -64,13 +64,8 @@ EasyREST's design emphasizes simplicity, extensibility, and security. It follows
 
 ```mermaid
 flowchart TD
-    A[HTTP Request] -->|REST API| B{EasyREST Server Type}
-    B -- easyrest-gateway --> GW[Gateway: Dynamic Plugin Loading]
-    B -- easyrest-server --> SRV[Server: Built-in + Dynamic Plugins]
-    
-    GW --> C{Authentication & Validation}
-    SRV --> C
-
+    A[HTTP Request] -->|REST API| B[EasyREST Server]
+    B --> C{Authentication & Validation}
     C -- Valid --> D[Process Request]
     C -- Invalid --> E[401/400 Response]
     E --> N[HTTP Response]
@@ -79,22 +74,13 @@ flowchart TD
     X -- No --> Z[Send as is]
     Y --> J[Plugin Client RPC Call]
     Z --> J[Plugin Client RPC Call]
-    
-    J --> PLUG_LOADER{Plugin Loader}
-    PLUG_LOADER -- easyrest-gateway --> FIND_EXEC[Find easyrest-plugin-* in PATH/Config]
-    PLUG_LOADER -- easyrest-server --> CHECK_BUILTIN{Use Built-in?}
-    CHECK_BUILTIN -- Yes --> K_INT[Internal Plugin (SQLite, MySQL, PG, Redis, LRU)]
-    CHECK_BUILTIN -- No --> FIND_EXEC
-    
-    FIND_EXEC --> K_EXT[External DB/Cache Plugin Binary]
-    K_INT --> F[Build SQL/Command]
-    K_EXT --> F
-    
-    F --> L[Database/Cache System]
-    L --> M[Return Results to DB/Cache Plugin]
+    J --> K["DB Plugin (e.g., SQLite, Postgres, MySQL, etc)"]
+    K --> F[Build SQL Query]
+    F --> L[Database]
+    L --> M[Return Results to DB Plugin]
     M --> J2[Return Results to Plugin Client RPC Call]
-    J2 --> SERVER_CORE[Return to EasyREST Core]
-    SERVER_CORE --> N[HTTP Response]
+    J2 --> B2[Return to EasyREST Server]
+    B2 --> N[HTTP Response]
 ```
 
 ### Plugin Communication and Loading
