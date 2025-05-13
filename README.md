@@ -87,9 +87,9 @@ flowchart TD
 
 - **RPC Communication:** EasyREST uses Hashicorp's [go-plugin](https://github.com/hashicorp/go-plugin) system to load and communicate with plugins. The server launches plugin processes based on the `plugins` section in the YAML configuration file and establishes an RPC connection.
 - **Plugin Loading:**
-    - **`easyrest-gateway`**: This binary does not bundle any plugins. It discovers and launches plugin executables (e.g., `easyrest-plugin-sqlite`, `easyrest-plugin-mysql`) based on the URI scheme in the configuration and the `path` setting, or by searching standard system locations.
-    - **`easyrest-server`**: This binary comes with built-in support for SQLite, MySQL, PostgreSQL (DB plugins), and Redis, LRU (Cache plugins). If a configured plugin matches one of these built-in types, it's used directly. For other plugin types or if an explicit `path` is provided, it behaves like `easyrest-gateway` and attempts to load an external plugin executable.
-    - **`easyrest-plugin-*`**: These are standalone executables, each providing a specific DB or Cache implementation.
+  - **`easyrest-gateway`**: This binary does not bundle any plugins. It discovers and launches plugin executables (e.g., `easyrest-plugin-sqlite`, `easyrest-plugin-mysql`) based on the URI scheme in the configuration and the `path` setting, or by searching standard system locations.
+  - **`easyrest-server`**: This binary comes with built-in support for SQLite, MySQL, PostgreSQL (DB plugins), and Redis, LRU (Cache plugins). If a configured plugin matches one of these built-in types, it's used directly. For other plugin types or if an explicit `path` is provided, it behaves like `easyrest-gateway` and attempts to load an external plugin executable.
+  - **`easyrest-plugin-*`**: These are standalone executables, each providing a specific DB or Cache implementation.
 - **Data Exchange:** The server sends validated and sanitized SQL expressions (for DB plugins) or commands (for Cache plugins) and additional context data to the plugin. Context variables are directly substituted into the query or made available to the plugin.
 - **Type Registration:** For secure and reliable encoding/decoding over RPC, custom types (e.g., `time.Time` and flattened JWT claims) are registered with the gob package.
 

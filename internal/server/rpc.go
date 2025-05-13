@@ -30,6 +30,13 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Not found", http.StatusNotFound)
 			return
 		}
+		// Check AllowList if it's defined and not empty
+		if len(pluginCfg.AllowList.Func) > 0 {
+			if !slices.Contains(pluginCfg.AllowList.Func, funcName) {
+				http.Error(w, "Not found", http.StatusNotFound)
+				return
+			}
+		}
 	}
 
 	// Get current plugins map

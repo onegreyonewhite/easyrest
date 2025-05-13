@@ -183,6 +183,13 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Not found", http.StatusNotFound)
 			return
 		}
+		// Check AllowList if it's defined and not empty
+		if len(pluginCfg.AllowList.Table) > 0 {
+			if !slices.Contains(pluginCfg.AllowList.Table, table) {
+				http.Error(w, "Not found", http.StatusNotFound)
+				return
+			}
+		}
 	}
 
 	// Get current plugins map

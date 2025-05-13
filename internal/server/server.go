@@ -120,6 +120,9 @@ func BuildPluginContext(r *http.Request) map[string]any {
 			pluginCtx["otelServiceName"] = cfg.Otel.ServiceName
 		}
 	}
+	if role, ok := plainClaims["role"].(string); ok && role != "" {
+		pluginCtx["role"] = role
+	}
 	return pluginCtx
 }
 

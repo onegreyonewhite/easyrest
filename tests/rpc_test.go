@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/onegreyonewhite/easyrest/internal/config"
 	"github.com/onegreyonewhite/easyrest/internal/server"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
@@ -211,5 +212,76 @@ func TestRPCWithFormData(t *testing.T) {
 	}
 	if response["extra"] != "param" {
 		t.Errorf("Expected extra value to be 'param', got '%v'", response["extra"])
+	}
+}
+
+func TestRPCAllowList(t *testing.T) {
+	// Mock plugin specific to this test
+	mockPlugin := &mockDBPlugin{
+		callFunction: func(userID, funcName string, data map[string]any, ctx map[string]any) (any, error) {
+			return map[string]any{"function_called": funcName, "received_data": data}, nil
+		},
+	}
+	defer server.StopPlugins()
+
+	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
+	server.ReloadConfig()
+	router := server.SetupRouter()
+
+	cfg := server.GetConfig()
+	cfg.CheckScope = false
+	cfg.PluginMap["testrpc"] = config.PluginConfig{
+		Name: "testrpc",
+		AllowList: config.AccessConfig{
+			Func: []string{"allowed_func"},
+		},
+		Exclude: config.AccessConfig{
+			Func: []string{"excluded_func"}, // This function is also in Exclude list
+		},
+	}
+	server.SetConfig(cfg)
+
+	// Register the mock plugin under "testrpc" key
+	newPluginsMap := map[string]easyrest.DBPlugin{"testrpc": mockPlugin}
+	server.DbPlugins.Store(&newPluginsMap)
+
+	tokenStr := generateToken(t) // Assuming generateToken generates a valid JWT
+
+	tests := []struct {
+		name       string
+		funcName   string
+		wantStatus int
+	}{
+		{"allowed_function", "allowed_func", http.StatusOK},
+		{"disallowed_function", "other_func", http.StatusNotFound},
+		{"excluded_function", "excluded_func", http.StatusNotFound},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := strings.NewReader(`{"data": "test"}`)
+			req, err := http.NewRequest("POST", "/api/testrpc/rpc/"+tt.funcName+"/", body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer "+tokenStr)
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			router.ServeHTTP(rr, req)
+
+			if rr.Code != tt.wantStatus {
+				t.Errorf("Handler returned wrong status code for %s: got %v want %v. Response: %s", tt.name, rr.Code, tt.wantStatus, rr.Body.String())
+			}
+
+			if tt.wantStatus == http.StatusOK {
+				var response map[string]any
+				if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
+					t.Fatalf("Failed to decode response for %s: %v", tt.name, err)
+				}
+				if response["function_called"] != tt.funcName {
+					t.Errorf("Expected function_called to be '%s', got '%v'", tt.funcName, response["function_called"])
+				}
+			}
+		})
 	}
 }

@@ -30,6 +30,7 @@ type PluginConfig struct {
 	DbTxEnd             string              `yaml:"db_tx_end,omitempty"`
 	Public              AccessConfig        `yaml:"public,omitempty"`
 	Exclude             AccessConfig        `yaml:"exclude,omitempty"`
+	AllowList           AccessConfig        `yaml:"allow,omitempty"`
 	Title               string              `yaml:"title,omitempty"`
 	DefaultLimit        int                 `yaml:"default_limit,omitempty"`
 }

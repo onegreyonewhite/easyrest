@@ -206,12 +206,13 @@ func ApplyPluginContext(ctx context.Context, tx pgx.Tx, pluginCtx map[string]any
 		}
 		query := "SELECT set_config($1, $2, true)"
 		if _, err := tx.Exec(ctx, query, "request."+key, requestVal); err != nil {
-			return err
+			return fmt.Errorf("failed to set request.%s: %w", key, err) // Add context to error
 		}
 		if _, err := tx.Exec(ctx, query, "erctx."+key, erctxVal); err != nil {
-			return err
+			return fmt.Errorf("failed to set erctx.%s: %w", key, err) // Add context to error
 		}
 	}
+
 	return nil
 }
 

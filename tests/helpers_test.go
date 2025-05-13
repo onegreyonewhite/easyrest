@@ -82,6 +82,7 @@ func generateToken(t *testing.T) string {
 		"sub":   "testuser",
 		"exp":   time.Now().Add(time.Hour).Unix(),
 		"scope": "users-read users-write",
+		"role":  "admin",
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	tokenStr, err := token.SignedString([]byte(cfg.TokenSecret))

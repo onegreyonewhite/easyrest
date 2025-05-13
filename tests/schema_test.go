@@ -8,6 +8,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/onegreyonewhite/easyrest/internal/config"
 	"github.com/onegreyonewhite/easyrest/internal/server"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
@@ -305,5 +306,143 @@ func TestSwaggerSchemaWithRPC(t *testing.T) {
 	}
 	if _, ok := paths["/rpc/myFunc/"]; !ok {
 		t.Errorf("Expected paths to contain '/rpc/myFunc/'")
+	}
+}
+
+// fakeDBPluginWithAllowList is a fake implementation for testing AllowList in schema.
+type fakeDBPluginWithAllowList struct{}
+
+func (f *fakeDBPluginWithAllowList) InitConnection(uri string) error { return nil }
+func (f *fakeDBPluginWithAllowList) TableGet(userID, table string, selectFields []string, where map[string]any,
+	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, error) {
+	return nil, nil
+}
+func (f *fakeDBPluginWithAllowList) TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, error) {
+	return nil, nil
+}
+func (f *fakeDBPluginWithAllowList) TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, error) {
+	return 0, nil
+}
+func (f *fakeDBPluginWithAllowList) TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, error) {
+	return 0, nil
+}
+func (f *fakeDBPluginWithAllowList) CallFunction(userID, funcName string, data map[string]any, ctx map[string]any) (any, error) {
+	return nil, nil
+}
+func (f *fakeDBPluginWithAllowList) GetSchema(ctx map[string]any) (any, error) {
+	// Return a fake schema with tables, views, and RPCs.
+	return map[string]any{
+		"tables": map[string]any{
+			"allowed_table":  map[string]any{"type": "object", "properties": map[string]any{"id": map[string]any{"type": "integer"}}},  // Allowed
+			"other_table":    map[string]any{"type": "object", "properties": map[string]any{"name": map[string]any{"type": "string"}}}, // Not in allow list
+			"excluded_table": map[string]any{"type": "object", "properties": map[string]any{"data": map[string]any{"type": "string"}}}, // Excluded
+		},
+		"views": map[string]any{
+			"allowed_view": map[string]any{"type": "object", "properties": map[string]any{"code": map[string]any{"type": "string"}}}, // Allowed
+			"other_view":   map[string]any{"type": "object", "properties": map[string]any{"desc": map[string]any{"type": "string"}}}, // Not in allow list
+		},
+		"rpc": map[string]any{
+			"allowed_func":  []any{map[string]any{"type": "object"}, map[string]any{"type": "object"}}, // Allowed
+			"other_func":    []any{map[string]any{"type": "object"}, map[string]any{"type": "object"}}, // Not in allow list
+			"excluded_func": []any{map[string]any{"type": "object"}, map[string]any{"type": "object"}}, // Excluded
+		},
+	}, nil
+}
+
+func TestSwaggerSchemaWithAllowList(t *testing.T) {
+	os.Unsetenv("ER_DB_TEST")
+	defer server.StopPlugins()
+
+	mockPlugin := &fakeDBPluginWithAllowList{}
+	newPluginsMap := map[string]easyrest.DBPlugin{"mockallow": mockPlugin}
+	server.DbPlugins.Store(&newPluginsMap)
+
+	server.ReloadConfig()
+	cfg := server.GetConfig()
+	cfg.PluginMap["mockallow"] = config.PluginConfig{
+		Name: "mockallow",
+		AllowList: config.AccessConfig{
+			Table: []string{"allowed_table", "allowed_view"},
+			Func:  []string{"allowed_func"},
+		},
+		Exclude: config.AccessConfig{
+			Table: []string{"excluded_table"},
+			Func:  []string{"excluded_func"},
+		},
+	}
+	server.SetConfig(cfg)
+	router := server.SetupRouter()
+
+	newPluginsMap = map[string]easyrest.DBPlugin{"mockallow": mockPlugin}
+	server.DbPlugins.Store(&newPluginsMap)
+
+	req, err := http.NewRequest("GET", "/api/mockallow/", nil)
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d, body: %s", rr.Code, rr.Body.String())
+	}
+
+	var swaggerSpec map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &swaggerSpec); err != nil {
+		t.Fatalf("Failed to unmarshal swagger spec: %v", err)
+	}
+
+	definitions, ok := swaggerSpec["definitions"].(map[string]any)
+	if !ok {
+		t.Fatalf("definitions is not a map")
+	}
+	paths, ok := swaggerSpec["paths"].(map[string]any)
+	if !ok {
+		t.Fatalf("paths is not a map")
+	}
+
+	// Check definitions
+	if _, ok := definitions["allowed_table"]; !ok {
+		t.Errorf("Expected definitions to contain 'allowed_table'")
+	}
+	if _, ok := definitions["allowed_view"]; !ok {
+		t.Errorf("Expected definitions to contain 'allowed_view'")
+	}
+	if _, ok := definitions["other_table"]; ok {
+		t.Errorf("Expected definitions to NOT contain 'other_table'")
+	}
+	if _, ok := definitions["other_view"]; ok {
+		t.Errorf("Expected definitions to NOT contain 'other_view'")
+	}
+	if _, ok := definitions["excluded_table"]; ok {
+		t.Errorf("Expected definitions to NOT contain 'excluded_table'")
+	}
+
+	// Check paths
+	if _, ok := paths["/allowed_table/"]; !ok {
+		t.Errorf("Expected paths to contain '/allowed_table/'")
+	}
+	if _, ok := paths["/allowed_view/"]; !ok {
+		t.Errorf("Expected paths to contain '/allowed_view/'")
+	}
+	if _, ok := paths["/other_table/"]; ok {
+		t.Errorf("Expected paths to NOT contain '/other_table/'")
+	}
+	if _, ok := paths["/other_view/"]; ok {
+		t.Errorf("Expected paths to NOT contain '/other_view/'")
+	}
+	if _, ok := paths["/excluded_table/"]; ok {
+		t.Errorf("Expected paths to NOT contain '/excluded_table/'")
+	}
+
+	// Check RPC paths
+	if _, ok := paths["/rpc/allowed_func/"]; !ok {
+		t.Errorf("Expected paths to contain '/rpc/allowed_func/'")
+	}
+	if _, ok := paths["/rpc/other_func/"]; ok {
+		t.Errorf("Expected paths to NOT contain '/rpc/other_func/'")
+	}
+	if _, ok := paths["/rpc/excluded_func/"]; ok {
+		t.Errorf("Expected paths to NOT contain '/rpc/excluded_func/'")
 	}
 }

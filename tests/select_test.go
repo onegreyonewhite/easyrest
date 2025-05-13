@@ -597,3 +597,94 @@ func TestSelectWhereNotEq(t *testing.T) {
 		}
 	}
 }
+
+func TestSelectAllowList(t *testing.T) {
+	dbPath := setupTestDB(t)
+	defer os.Remove(dbPath)
+	defer server.StopPlugins()
+
+	// Create tables: users (allowed), products (not allowed), orders (excluded)
+	db := openDB(t, dbPath)
+	_, err := db.Exec(`CREATE TABLE products (id INTEGER PRIMARY KEY, name TEXT);`)
+	if err != nil {
+		t.Fatalf("Failed to create products table: %v", err)
+	}
+	_, err = db.Exec(`INSERT INTO products (name) VALUES ('Laptop');`)
+	if err != nil {
+		t.Fatalf("Failed to insert into products: %v", err)
+	}
+	_, err = db.Exec(`CREATE TABLE orders (id INTEGER PRIMARY KEY, item TEXT);`)
+	if err != nil {
+		t.Fatalf("Failed to create orders table: %v", err)
+	}
+	_, err = db.Exec(`INSERT INTO orders (item) VALUES ('Keyboard');`)
+	if err != nil {
+		t.Fatalf("Failed to insert into orders: %v", err)
+	}
+	_, err = db.Exec(`INSERT INTO users (name) VALUES ('Alice');`)
+	if err != nil {
+		t.Fatalf("Failed to insert into users: %v", err)
+	}
+	db.Close()
+
+	os.Setenv("ER_CACHE_TEST", "sqlite://"+dbPath)
+	os.Setenv("ER_CACHE_ENABLE_TEST", "1")
+	os.Setenv("ER_CORS_ENABLED", "1")
+
+	router := setupServerWithDB(t, dbPath)
+	cfg := server.GetConfig()
+	cfg.PluginMap["test"] = config.PluginConfig{
+		Name:        "test",
+		Uri:         "sqlite://" + dbPath,
+		EnableCache: true,
+		DbTxEnd:     "commit-allow-override",
+		AllowList: config.AccessConfig{
+			Table: []string{"users"},
+		},
+		Exclude: config.AccessConfig{
+			Table: []string{"orders"}, // orders is also excluded
+		},
+	}
+	cfg.CORS.Enabled = true
+	cfg.CheckScope = false // Disable scope check for simplicity
+	server.SetConfig(cfg)
+	server.LoadPlugins()
+
+	tokenStr := generateToken(t)
+
+	// 1. Access allowed table (users)
+	req, err := http.NewRequest("GET", "/api/test/users/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tokenStr)
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected status 200 for allowed table 'users', got %d. Response: %s", rr.Code, rr.Body.String())
+	}
+
+	// 2. Access disallowed table (products - not in AllowList)
+	req, err = http.NewRequest("GET", "/api/test/products/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tokenStr)
+	rr = httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("Expected status 404 for disallowed table 'products', got %d. Response: %s", rr.Code, rr.Body.String())
+	}
+
+	// 3. Access excluded table (orders - in Exclude list)
+	req, err = http.NewRequest("GET", "/api/test/orders/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tokenStr)
+	rr = httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("Expected status 404 for excluded table 'orders', got %d. Response: %s", rr.Code, rr.Body.String())
+	}
+}

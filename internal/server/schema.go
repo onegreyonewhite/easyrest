@@ -77,6 +77,13 @@ func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs, viewDefs, rpcDef
 		for k := range mergedDefs {
 			if slices.Contains(pluginCfg.Exclude.Table, k) {
 				delete(mergedDefs, k)
+				continue // Skip AllowList check if already excluded
+			}
+			// Apply AllowList filter if defined and not empty
+			if len(pluginCfg.AllowList.Table) > 0 {
+				if !slices.Contains(pluginCfg.AllowList.Table, k) {
+					delete(mergedDefs, k)
+				}
 			}
 		}
 	}
@@ -157,6 +164,12 @@ func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs, viewDefs, rpcDef
 		if hasPluginCfg {
 			if slices.Contains(pluginCfg.Exclude.Func, funcName) {
 				continue
+			}
+			// Apply AllowList filter if defined and not empty
+			if pluginCfg.AllowList.Func != nil && len(pluginCfg.AllowList.Func) > 0 {
+				if !slices.Contains(pluginCfg.AllowList.Func, funcName) {
+					continue
+				}
 			}
 		}
 		reqSchema := arr[0]
