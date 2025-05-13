@@ -36,27 +36,9 @@ jobs:
             done; 
           done
 
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Get lowercase repository name
         id: string_ops
         run: echo "repository_lowercase=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: |
-            ghcr.io/${{ steps.string_ops.outputs.repository_lowercase }}:${{ github.ref_name }}
-            ghcr.io/${{ steps.string_ops.outputs.repository_lowercase }}:latest
 
       - name: Get Commit Message (without first line)
         id: commit
@@ -73,3 +55,27 @@ jobs:
           name: ${{ github.ref_name }}
           body: ${{ steps.commit.outputs.message }}
           artifacts: release/*
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ghcr.io/${{ steps.string_ops.outputs.repository_lowercase }}:${{ github.ref_name }}
+            ghcr.io/${{ steps.string_ops.outputs.repository_lowercase }}:latest
