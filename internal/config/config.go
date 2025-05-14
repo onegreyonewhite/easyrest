@@ -115,7 +115,7 @@ func LoadPluginConfigs(configs []string) map[string]PluginConfig {
 			plugins[connName] = PluginConfig{
 				Name:        connName,
 				Uri:         parts[1],
-				EnableCache: os.Getenv(fmt.Sprintf("ER_CACHE_ENABLE_%s", connName)) == "1",
+				EnableCache: os.Getenv(fmt.Sprintf("ER_CACHE_ENABLE_%s", strings.ToUpper(connName))) == "1",
 				CacheName:   cacheName,
 				DbTxEnd:     "commit-allow-override",
 			}

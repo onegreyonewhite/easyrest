@@ -22,8 +22,6 @@ import (
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
 
-var Version = "v0.5.3"
-
 var bgCtx = context.Background()
 
 // DBPool abstracts pgxpool.Pool and pgxmock.PgxPoolIface for production and testing

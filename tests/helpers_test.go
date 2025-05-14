@@ -65,12 +65,12 @@ func insertUser(t *testing.T, dbPath, name, updateField string) int {
 func setupServerWithDB(t *testing.T, dbPath string) *mux.Router {
 	t.Helper()
 	os.Setenv("ER_DB_TEST", "sqlite://"+dbPath)
+	os.Setenv("ER_CACHE_ENABLE_TEST", "1")
 	os.Setenv("ER_CHECK_SCOPE", "0")
 	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
 	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
 	cfg := config.Load()
 	server.SetConfig(cfg)
-	server.ReloadConfig()
 	return server.SetupRouter()
 }
 

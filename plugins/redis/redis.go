@@ -10,9 +10,6 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// Version can be set during build time
-var Version = "v0.2.0"
-
 // redisCachePlugin implements the CachePlugin interface using Redis.
 type redisCachePlugin struct {
 	client *redis.Client

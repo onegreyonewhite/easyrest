@@ -56,6 +56,9 @@ func TestCreateWithContextValues(t *testing.T) {
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("Expected status 201, got %d, response: %s", rr.Code, rr.Body.String())
 	}
+	if rr.Header().Get("ETag") == "" {
+		t.Fatal("Expected ETag header, got empty")
+	}
 
 	// Check that records were created with correct values
 	rows := getAllUsers(t, dbPath)

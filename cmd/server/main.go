@@ -4,6 +4,7 @@ import (
 	"github.com/onegreyonewhite/easyrest/internal/cli"
 	"github.com/onegreyonewhite/easyrest/internal/server"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
+	memcachedPlugin "github.com/onegreyonewhite/easyrest/plugins/memcached"
 	mysqlPlugin "github.com/onegreyonewhite/easyrest/plugins/mysql"
 	postgresPlugin "github.com/onegreyonewhite/easyrest/plugins/postgres"
 	redisPlugin "github.com/onegreyonewhite/easyrest/plugins/redis"
@@ -37,6 +38,9 @@ func main() {
 		}
 		server.PreservedCachePlugins["rediss"] = func() easyrest.CachePlugin {
 			return redisPlugin.NewRedisCachePlugin()
+		}
+		server.PreservedCachePlugins["memcached"] = func() easyrest.CachePlugin {
+			return memcachedPlugin.NewMemcachedCachePlugin()
 		}
 		server.Run(cfg)
 	}
