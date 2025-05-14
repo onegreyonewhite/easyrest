@@ -65,11 +65,14 @@ EasyREST's design emphasizes simplicity, extensibility, and security. It follows
 ```mermaid
 flowchart TD
     A[HTTP Request] -->|REST API| B[EasyREST Server]
-    B --> C{Authentication & Validation}
-    C -- Valid --> D[Process Request]
-    C -- Invalid --> E[401/400 Response]
+    B --> C{Authentication}
+    C -- Authenticated --> D[Process Request]
+    C -- Failed/No Auth --> E[401/403 Response]
     E --> N[HTTP Response]
-    D --> X{Apply Context?}
+    D -- Validate Scopes & Params --> D_VALID
+    D_VALID -- Valid --> X{Apply Context?}
+    D_VALID -- Invalid --> E2[400/403 Response]
+    E2 --> N
     X -- Yes --> Y[Replace request.* and erctx.* values]
     X -- No --> Z[Send as is]
     Y --> J[Plugin Client RPC Call]
@@ -81,23 +84,38 @@ flowchart TD
     M --> J2[Return Results to Plugin Client RPC Call]
     J2 --> B2[Return to EasyREST Server]
     B2 --> N[HTTP Response]
+
+    subgraph "Authentication Layer"
+        C
+        subgraph "Auth Plugins (Optional)"
+            P_Auth[Auth Plugin 1 e.g. JWT]
+            P_Auth2[Auth Plugin 2 e.g. OIDC]
+        end
+        C -->|Via Auth Plugins or Internal| P_Auth
+        C -->|Via Auth Plugins or Internal| P_Auth2
+        P_Auth ----> C
+        P_Auth2 ----> C
+    end
 ```
 
 ### Plugin Communication and Loading
 
-- **RPC Communication:** EasyREST uses Hashicorp's [go-plugin](https://github.com/hashicorp/go-plugin) system to load and communicate with plugins. The server launches plugin processes based on the `plugins` section in the YAML configuration file and establishes an RPC connection.
+- **RPC Communication:** EasyREST uses Hashicorp's [go-plugin](https://github.com/hashicorp/go-plugin) system to load and communicate with plugins. The server launches plugin processes based on the configuration file and establishes an RPC connection.
 - **Plugin Loading:**
-  - **`easyrest-gateway`**: This binary does not bundle any plugins. It discovers and launches plugin executables (e.g., `easyrest-plugin-sqlite`, `easyrest-plugin-mysql`) based on the URI scheme in the configuration and the `path` setting, or by searching standard system locations.
-  - **`easyrest-server`**: This binary comes with built-in support for SQLite, MySQL, PostgreSQL (DB plugins), and Redis, LRU (Cache plugins). If a configured plugin matches one of these built-in types, it's used directly. For other plugin types or if an explicit `path` is provided, it behaves like `easyrest-gateway` and attempts to load an external plugin executable.
-  - **`easyrest-plugin-*`**: These are standalone executables, each providing a specific DB or Cache implementation.
-- **Data Exchange:** The server sends validated and sanitized SQL expressions (for DB plugins) or commands (for Cache plugins) and additional context data to the plugin. Context variables are directly substituted into the query or made available to the plugin.
-- **Type Registration:** For secure and reliable encoding/decoding over RPC, custom types (e.g., `time.Time` and flattened JWT claims) are registered with the gob package.
+  - **`easyrest-gateway`**: This binary does not bundle any plugins. It discovers and launches plugin executables (e.g., `easyrest-plugin-sqlite`, `easyrest-plugin-mysql`, `easyrest-auth-jwt`) based on the URI scheme (for DB/Cache) or plugin name (for Auth), and the `path` setting, or by searching standard system locations.
+  - **`easyrest-server`**: This binary comes with built-in support for SQLite, MySQL, PostgreSQL (DB plugins), and Redis, LRU (Cache plugins). If a configured DB/Cache plugin matches one of these built-in types, it's used directly. For other plugin types or if an explicit `path` is provided, it behaves like `easyrest-gateway` and attempts to load an external plugin executable. Auth plugins are typically loaded externally by `easyrest-server` as well.
+  - **`easyrest-plugin-*`**: These are standalone executables, each providing a specific DB or Cache implementation (e.g., `easyrest-plugin-mysql`).
+  - **`easyrest-auth-*`**: These are standalone executables, each providing a specific Authentication implementation (e.g., `easyrest-auth-jwt`).
+- **Data Exchange:** The server sends validated and sanitized SQL expressions (for DB plugins), commands (for Cache plugins), or authentication-related data (for Auth plugins) and additional context data to the plugin. Context variables are directly substituted into the query or made available to the plugin.
+- **Type Registration:** For secure and reliable encoding/decoding over RPC, custom types (e.g., `time.Time` and flattened JWT claims) are registered with the gob package on both the server and plugin sides.
 
 ### Authentication and Authorization
 
-- **JWT Authentication:** Requests must include a Bearer token. The server verifies the token signature (using a secret from configuration) and extracts claims.
-- **Scope-based Authorization:** The service verifies that the token's claims include the required scope (e.g., `users-read` for GET operations, `users-write` for modifications or wide `read` and `write` for all table names).
-- **Token Claims:** The claims are flattened and passed to plugins (under the key `claims` in the context map) so that plugins can leverage user-specific information if needed.
+- **Pluggable Authentication:** Authentication can be handled by one or more configured `AuthPlugin` instances. Each `AuthPlugin` is responsible for validating credentials (e.g., a token from the `Authorization` header) and returning claims.
+- **Swagger Security Definitions:** `AuthPlugin` instances also provide Swagger 2.0 Security Definition Objects during their initialization. These are merged into the main API's Swagger schema, allowing API clients to understand the authentication methods.
+- **JWT Authentication (Legacy/Fallback):** If no `AuthPlugin` is configured or if they don't handle a request, the server can fall back to its legacy JWT verification (using `token_secret` from configuration) and extracts claims.
+- **Scope-based Authorization:** The service verifies that the claims (from an AuthPlugin or legacy JWT) include the required scope (e.g., `users-read` for GET operations, `users-write` for modifications or wide `read` and `write` for all table names). This is controlled by the `check_scope` setting.
+- **Token Claims:** The claims are flattened and passed to DB/Cache plugins (under the key `claims` in the context map) so that plugins can leverage user-specific information if needed.
 
 ---
 
@@ -108,25 +126,34 @@ EasyREST is available in different binary forms to suit various deployment needs
 ### `easyrest-gateway`
 
 - A lean, minimal server binary that **contains no built-in plugins**.
-- It relies entirely on external `easyrest-plugin-*` executables.
-- For each plugin defined in the configuration, `easyrest-gateway` will search for the corresponding plugin binary (e.g., `easyrest-plugin-mysql` for a `mysql://` URI) in standard system `PATH` directories or at the explicit `path` specified in the plugin's configuration.
+- It relies entirely on external `easyrest-plugin-*` (for DB/Cache) and `easyrest-auth-*` (for authentication) executables.
+- For each plugin defined in the configuration, `easyrest-gateway` will search for the corresponding plugin binary (e.g., `easyrest-plugin-mysql` for a `mysql://` URI, or `easyrest-auth-jwt` for an auth plugin named `jwt`) in standard system `PATH` directories or at the explicit `path` specified in the plugin's configuration.
 - Ideal for environments where you want to manage plugin binaries separately or use custom-built plugins.
 
 ### `easyrest-server`
 
-- A comprehensive server binary that **includes built-in support for common plugins**:
+- A comprehensive server binary that **includes built-in support for common DB and Cache plugins**:
   - **Database Plugins:** MySQL, SQLite, PostgreSQL.
   - **Cache Plugins:** Redis, LRU (in-memory).
-- If a plugin configured in `plugins` matches one of these built-in types (e.g., `uri: "sqlite://..."`), the embedded plugin is used by default.
-- If a plugin type is not among the built-ins, or if an explicit `path` is provided in its configuration, `easyrest-server` will attempt to load it as an external plugin executable, similar to `easyrest-gateway`.
-- Suitable for most common use cases, providing out-of-the-box support for popular databases and caches.
+- If a DB/Cache plugin configured in `plugins` matches one of these built-in types (e.g., `uri: "sqlite://..."`), the embedded plugin is used by default.
+- For DB/Cache plugin types not among the built-ins, or if an explicit `path` is provided in its configuration, `easyrest-server` will attempt to load it as an external plugin executable, similar to `easyrest-gateway`.
+- **Authentication plugins (`AuthPlugin`) are typically loaded as external `easyrest-auth-*` executables by `easyrest-server`**.
+- Suitable for most common use cases, providing out-of-the-box support for popular databases and caches, with flexible external authentication.
 
 ### `easyrest-plugin-*`
 
 - These are individual, standalone plugin executables (e.g., `easyrest-plugin-mysql`, `easyrest-plugin-postgres`, `easyrest-plugin-redis`).
-- They are used by `easyrest-gateway` for all plugin needs and by `easyrest-server` for plugins not built into it or when an external version is preferred.
+- They implement the `DBPlugin` or `CachePlugin` interface.
+- They are used by `easyrest-gateway` for all DB/Cache plugin needs and by `easyrest-server` for DB/Cache plugins not built into it or when an external version is preferred.
 - You can build these plugins from their respective source code or use pre-compiled versions if available.
-- Currently supported standalone plugins include: MySQL, SQLite, PostgreSQL, and Redis.
+
+### `easyrest-auth-*`
+
+- These are individual, standalone plugin executables (e.g., `easyrest-auth-jwt`, `easyrest-auth-oidc`).
+- They implement the `AuthPlugin` interface.
+- They are used by both `easyrest-gateway` and `easyrest-server` to provide authentication mechanisms.
+- The server loads these based on the `auth_plugins` section in the configuration.
+- You build these plugins from their source code.
 
 ---
 
@@ -425,10 +452,7 @@ access_log: false # Enable access logging (default: false)
 
 # Authentication & Authorization
 check_scope: true # Enable JWT scope checking (default: true)
-token_secret: "your-jwt-secret" # REQUIRED: Secret for JWT verification
 token_user_search: "sub" # JWT claim for user ID (default: "sub")
-token_url: "" # Optional: URL for external token validation/retrieval
-auth_flow: "password" # Optional: OAuth flow type (default: "password")
 
 # CORS settings (optional)
 cors:
@@ -446,23 +470,24 @@ tls_key_file: "/path/to/key.pem"
 # Plugin settings
 plugin_log: true # Enable logging from plugins (default: false). Set to false to disable.
 
-# --- Plugin Definitions ---
+# --- Plugin Definitions (DB & Cache) ---
 
-# Option 1: Include external YAML files containing plugin definitions
+# Option 1: Include external YAML files containing DB/Cache plugin definitions
 plugin_configs:
   - ./plugins/database1.yaml
   - /etc/easyrest/shared_plugins.yaml
 
-# Option 2: Define plugins directly in the main config file
+# Option 2: Define DB/Cache plugins directly in the main config file
 plugins:
   # The key ('test', 'orders', 'inventory') becomes the API path segment (/api/test/, /api/orders/, /api/inventory)
   test:
     # URI format: <plugin_type>://<connection_details>
     # The plugin_type (e.g., 'sqlite') determines the executable name (easyrest-plugin-sqlite)
     uri: "sqlite://./test.db"
+    path: "" # Optional: Explicit path to plugin binary. If empty, server searches.
     title: "Main Test Database API" # Optional: Custom title for this API in Swagger
     enable_cache: true # Enable ETag caching for this connection
-    cache_name: test
+    cache_name: "redis_cache" # Specify which cache plugin to use for ETags for this DB plugin
     db_tx_end: commit-allow-override # Explicitly set default behavior
     # Define tables/functions accessible without authentication
     public:
@@ -484,27 +509,52 @@ plugins:
   orders:
     uri: "sqlite:///data/orders.db"
     enable_cache: true
-    cache_name: orders
-    # Example: Invalidate 'orders' and 'order_items' ETags when 'process_order' RPC is called
+    cache_name: "redis_cache"
     cache_invalidation_map:
       process_order:
         - orders
         - order_items
   inventory:
     uri: "sqlite:///data/inventory.db"
-    # enable_cache defaults to false if not specified
 
   # Example for a postgres plugin:
-  # postgres_db:
-  #   uri: "postgres://user:password@host:port/database?sslmode=disable"
-  #   enable_cache: true
+  postgres_db:
+    uri: "postgres://user:password@host:port/database?sslmode=disable"
+    enable_cache: true
+    cache_name: "redis_cache" # Assuming a redis cache plugin named "redis_cache" is defined
+  # Example for an external Redis Cache Plugin
+  redis_cache:
+    uri: "redis://localhost:6379/0"
+    # path: "/opt/plugins/easyrest-plugin-redis" # Optional if in PATH
 
-# --- Example External Plugin File (e.g., ./plugins/database1.yaml) --- Structure:
+# --- Authentication Plugin Definitions ---
+auth_plugins:
+  # The key (e.g., 'jwt_main', 'oidc_provider') is an identifier for the auth plugin instance.
+  # It's also used to find the plugin binary if 'path' is not specified (e.g., 'easyrest-auth-jwt_main').
+  jwt_main:
+    path: "" # Optional: Explicit path to the 'easyrest-auth-jwt_main' binary.
+             # If empty, server searches for 'easyrest-auth-jwt_main' in standard locations.
+    settings: # This map[string]any is passed directly to the AuthPlugin's Init method.
+      jwt_secret: "a-very-secure-secret-for-jwt"
+      token_type: "Bearer"
+      # other JWT specific settings like userinfo_endpoint etc.
+  
+  # Example for another auth plugin, perhaps OpenID Connect
+  # oidc_provider:
+  #   path: "/opt/custom_plugins/easyrest-auth-myoidc" # Path to a custom OIDC auth plugin
+  #   settings:
+  #     discovery_url: "https://example.com/.well-known/openid-configuration"
+  #     client_id: "my-client-id"
+  #     scopes_supported: ["openid", "profile", "email"]
+
+
+# --- Example External Plugin File (e.g., ./plugins/database1.yaml) --- Structure for DB/Cache plugins:
 # - name: plugin_name # Name used in API path
 #   uri: "plugin_type://connection_string"
 #   path: "/path/to/plugin/binary" # Optional: Explicit path to plugin binary
 #   title: "Custom API Title" # Optional: Override the default API title in Swagger
 #   enable_cache: true # Optional: Enable ETag caching (default: false)
+#   cache_name: "specific_cache_plugin_name" # Optional
 #   public: # Optional: Define tables/functions accessible without JWT authentication
 #     table:
 #       - public_table1
@@ -520,6 +570,7 @@ plugins:
 #     rpc_function_name:
 #       - table1_to_invalidate
 #       - table2_to_invalidate
+#   db_tx_end: "commit" # Optional
 ```
 
 **Key Configuration Sections:**
@@ -548,12 +599,17 @@ plugins:
     - `public`: (Optional) Defines tables and RPC functions within this plugin that are accessible **without any authentication** (no JWT required).
             - `table`: A list of table names that can be accessed publicly.
             - `func`: A list of RPC function names that can be called publicly.
-            Scope checks (`check_scope`) are skipped for these public resources.
     - `exclude`: (Optional) Defines tables and RPC functions within this plugin that should be completely **hidden** from the API. They will not appear in the generated Swagger schema.
             - `table`: A list of table names to exclude.
             - `func`: A list of RPC function names to exclude.
 
-- The server merges plugin definitions from `plugin_configs` files and the inline `plugins` map. Definitions in the inline map take precedence if names conflict.
+- **Auth Plugin Definitions (`auth_plugins` section)**:
+  - This is a map where each key is a unique name for an authentication plugin instance (e.g., `jwt_main`, `oidc_internal`).
+  - **Auth Plugin Attributes**:
+    - `path`: (Optional) Explicit path to the authentication plugin executable (e.g., `/usr/local/bin/easyrest-auth-myjwt`). If omitted, the server searches for an executable named `easyrest-auth-<key_name>` (e.g., if config has `auth_plugins: { myjwt: { ... } }`, the binary should be `easyrest-auth-myjwt`).
+    - `settings`: (Required) A `map[string]any` that is passed directly to the `AuthPlugin`'s `Init(settings map[string]any)` method. This allows passing arbitrary configuration to the authentication plugin (e.g., JWT secrets, OIDC discovery URLs, API keys, etc.). The structure of this map is defined by the specific auth plugin.
+
+- The server merges plugin definitions from `plugin_configs` files and the inline `plugins` map. Definitions in the inline map take precedence if names conflict. Auth plugins are defined separately in `auth_plugins`.
 
 ---
 
@@ -628,12 +684,12 @@ Returns a Swagger 2.0 JSON schema for all tables in the test database.
 
 ## Developing External Plugins
 
-External plugins allow you to extend EasyREST with support for different database backends or caching systems. A single plugin binary can provide implementations for either the `DBPlugin` interface, the `CachePlugin` interface, or both.
+External plugins allow you to extend EasyREST with support for different database backends, caching systems, or authentication mechanisms. A single plugin binary can provide implementations for the `DBPlugin` interface, the `CachePlugin` interface, the `AuthPlugin` interface, or any combination of them.
 
-To create an external plugin (e.g., for MySQL DB and Redis Cache):
+To create an external plugin:
 
 1.  **Create a New Repository:**
-    For instance, create a repository named `easyrest-plugin-mysql-redis`.
+    For instance, create a repository named `easyrest-my-custom-plugin`.
 
 2.  **Import Required Modules:**
     In your plugin's `go.mod`, add the necessary EasyREST and go-plugin dependencies:
@@ -652,87 +708,84 @@ To create an external plugin (e.g., for MySQL DB and Redis Cache):
         easyrest "github.com/onegreyonewhite/easyrest/plugin"
         hplugin "github.com/hashicorp/go-plugin"
 
-        // Your specific DB/Cache driver imports, e.g.:
+        // Your specific DB/Cache/Auth driver or library imports, e.g.:
         // _ "github.com/go-sql-driver/mysql"
         // "github.com/redis/go-redis/v9"
+        // "github.com/golang-jwt/jwt/v5"
     )
     ```
 
 3.  **Implement the Interface(s):**
-    Create a struct (or structs) that implements the methods defined in the `easyrest.DBPlugin` and/or `easyrest.CachePlugin` interfaces from `github.com/onegreyonewhite/easyrest/plugin`.
+    Create a struct (or structs) that implements the methods defined in `easyrest.DBPlugin`, `easyrest.CachePlugin`, and/or `easyrest.AuthPlugin` interfaces from `github.com/onegreyonewhite/easyrest/plugin`.
 
     ```go
-    // Example structure implementing both interfaces
-    type MyPlugin struct {
-        // Add fields for DB connections, cache clients, etc.
-        // e.g., db *sql.DB
-        // e.g., redisClient *redis.Client
+    // Example structure implementing all three interfaces
+    type MyCustomPlugin struct {
+        // Add fields for DB connections, cache clients, auth settings, etc.
     }
 
-    // --- DBPlugin Implementation ---
+    // --- DBPlugin Implementation (Example) ---
+    func (p *MyCustomPlugin) InitConnection(uri string) error { /* ... */ return nil }
+    func (p *MyCustomPlugin) TableGet(userID string, table string, selectFields []string, where map[string]any, ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, error) { /* ... */ return nil, nil }
+    func (p *MyCustomPlugin) TableCreate(userID string, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, error) { /* ... */ return nil, nil }
+    func (p *MyCustomPlugin) TableUpdate(userID string, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, error) { /* ... */ return 0, nil }
+    func (p *MyCustomPlugin) TableDelete(userID string, table string, where map[string]any, ctx map[string]any) (int, error) { /* ... */ return 0, nil }
+    func (p *MyCustomPlugin) CallFunction(userID string, funcName string, data map[string]any, ctx map[string]any) (any, error) { /* ... */ return nil, nil }
+    func (p *MyCustomPlugin) GetSchema(ctx map[string]any) (any, error) { /* ... */ return nil, nil }
 
-    func (p *MyPlugin) InitConnection(uri string) error {
-        // Parse URI, establish DB connection (e.g., MySQL)
-        // Store connection in p.db
-        return nil
-    }
+    // --- CachePlugin Implementation (Example) ---
+    // InitConnection can be shared if URI contains info for both DB and Cache, or distinct if plugin handles them separately.
+    // For simplicity, assuming it's called if "cache" is in pluginMap.
+    // func (p *MyCustomPlugin) InitConnection(uri string) error { /* Cache specific init if needed */ return nil }
+    func (p *MyCustomPlugin) Get(key string) (string, error) { /* ... */ return "", nil }
+    func (p *MyCustomPlugin) Set(key string, value string, ttl time.Duration) error { /* ... */ return nil }
+    // Delete method signature might have changed, refer to the interface in plugin/plugin.go
+    // func (p *MyCustomPlugin) Delete(keys []string) error { /* ... */ return nil }
 
-    func (p *MyPlugin) TableGet(userID, table string, selectFields []string, where map[string]any, ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, error) {
-        // Implement logic to SELECT data from the database
+
+    // --- AuthPlugin Implementation (Example) ---
+    func (p *MyCustomPlugin) Init(settings map[string]any) (map[string]any, error) {
+        // Initialize authentication mechanism with provided settings.
+        // 'settings' comes from the `auth_plugins.<plugin_name>.settings` in server config.
+        // Example: read a JWT secret or OIDC discovery URL from settings.
+
+        // Return a Swagger 2.0 Security Definition Object as map[string]any
+        // For example, for an API Key:
+        // return map[string]any{
+        //  "type": "apiKey",
+        //  "name": "X-API-KEY",
+        //  "in":   "header",
+        // }, nil
+        // Or for OAuth2:
+        // return map[string]any{
+        //  "type": "oauth2",
+        //  "flow": "implicit",
+        //  "authorizationUrl": "https://example.com/oauth/authorize",
+        //  "scopes": map[string]string{
+        //      "read:stuff": "read your stuff",
+        //      "write:stuff": "write your stuff",
+        //  },
+        // }, nil
+        // If no security definition is provided by this plugin, return nil for the schema.
         return nil, nil
     }
 
-    func (p *MyPlugin) TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, error) {
-        // Implement logic to INSERT data into the database
+    func (p *MyCustomPlugin) Authenticate(authHeader string) (map[string]any, error) {
+        // Authenticate the request based on the authHeader (e.g., "Bearer <token>").
+        // Parse the token, validate it, etc.
+        // Return claims as map[string]any or an error.
+        // Example:
+        // if authHeader == "Bearer valid_token" {
+        //  return map[string]any{"sub": "user123", "scope": "read write"}, nil
+        // }
+        // return nil, errors.New("invalid token")
         return nil, nil
     }
 
-    func (p *MyPlugin) TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, error) {
-        // Implement logic to UPDATE data in the database
-        return 0, nil
-    }
-
-    func (p *MyPlugin) TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, error) {
-        // Implement logic to DELETE data from the database
-        return 0, nil
-    }
-
-    func (p *MyPlugin) CallFunction(userID, funcName string, data map[string]any, ctx map[string]any) (any, error) {
-        // Implement logic for custom RPC functions (stored procedures, etc.)
-        return nil, nil
-    }
-
-    func (p *MyPlugin) GetSchema(ctx map[string]any) (any, error) {
-        // Implement logic to return the database schema in the expected format
-        return nil, nil
-    }
-
-    // --- CachePlugin Implementation ---
-
-    func (p *MyPlugin) InitConnection(uri string) error { // Can reuse or have separate logic from DB init
-         // Parse URI, establish Cache connection (e.g., Redis)
-         // Store connection in p.redisClient
-         return nil
-    }
-
-    func (p *MyPlugin) Get(key string) (string, error) {
-        // Implement logic to GET value from cache
-        return "", nil
-    }
-
-    func (p *MyPlugin) Set(key string, value string, ttl time.Duration) error {
-        // Implement logic to SET value in cache with TTL
-        return nil
-    }
-
-    func (p *MyPlugin) Delete(keys []string) error {
-        // Implement logic to DELETE keys from cache
-        return nil
-    }
-
-    // Note: A plugin doesn't *have* to implement both interfaces.
+    // Note: A plugin doesn't *have* to implement all interfaces.
     // If it only implements DBPlugin, only register "db".
     // If it only implements CachePlugin, only register "cache".
+    // If it only implements AuthPlugin, only register "auth".
     ```
 
 4.  **Register and Serve the Plugin:**
@@ -741,46 +794,60 @@ To create an external plugin (e.g., for MySQL DB and Redis Cache):
     ```go
     func main() {
         // Create an instance of your plugin implementation
-        impl := &MyPlugin{}
+        impl := &MyCustomPlugin{} // Assuming MyCustomPlugin implements one or more interfaces
 
         // Define the plugins provided by this binary
         pluginMap := map[string]hplugin.Plugin{}
 
-        // Register DBPlugin implementation if provided
-        // Make sure 'impl' actually implements easyrest.DBPlugin
-        pluginMap["db"] = &easyrest.DBPluginPlugin{Impl: impl}
+        // Conditionally register implementations based on what MyCustomPlugin provides:
 
-        // Register CachePlugin implementation if provided
-        // Make sure 'impl' actually implements easyrest.CachePlugin
-        pluginMap["cache"] = &easyrest.CachePluginPlugin{Impl: impl}
+        // If MyCustomPlugin implements easyrest.DBPlugin
+        // pluginMap["db"] = &easyrest.DBPluginPlugin{Impl: impl}
+
+        // If MyCustomPlugin implements easyrest.CachePlugin
+        // pluginMap["cache"] = &easyrest.CachePluginPlugin{Impl: impl}
+
+        // If MyCustomPlugin implements easyrest.AuthPlugin
+        pluginMap["auth"] = &easyrest.AuthPluginPlugin{Impl: impl}
+
 
         // Serve the plugin(s)
         hplugin.Serve(&hplugin.ServeConfig{
             HandshakeConfig: easyrest.Handshake,
-            Plugins:         pluginMap,
+            Plugins:         pluginMap, // Only include the services this plugin binary actually provides
         })
     }
     ```
-    *Important:* Ensure your struct `impl` actually implements the methods for the interfaces you are registering (`DBPlugin` for `"db"`, `CachePlugin` for `"cache"`).
+    *Important:* Ensure your struct `impl` actually implements the methods for the interfaces you are registering. The keys `"db"`, `"cache"`, and `"auth"` are fixed and tell the EasyREST server which interface to expect.
 
 5.  **Build and Deploy:**
-    Build the plugin binary (e.g., `go build -o easyrest-plugin-mysql-redis`). The binary name should ideally follow the convention `easyrest-plugin-<type>` (e.g., `easyrest-plugin-mysql`, `easyrest-plugin-redis`). EasyREST will look for these binaries:
-    *   In the directories listed in your system's `PATH` environment variable.
-    *   In the current working directory where EasyREST is run.
-    *   In the same directory as the EasyREST executable itself.
-    *   It also checks for OS/Arch specific names like `easyrest-plugin-mysql-linux-amd64`.
+    Build the plugin binary. The naming convention is important for auto-discovery if a `path` is not specified in the server configuration:
+    *   For DB or Cache plugins, the name typically relates to the `uri` scheme (e.g., `easyrest-plugin-mysql` for `mysql://`).
+    *   For Auth plugins, the name should be `easyrest-auth-<key_name_in_config>` (e.g., if config has `auth_plugins: { myjwt: { ... } }`, the binary should be `easyrest-auth-myjwt`).
+    *   The server searches in `PATH`, current working directory, and the server's executable directory. OS/Arch specific names are also checked (e.g., `easyrest-auth-myjwt-linux-amd64`).
 
-    Alternatively, you can specify the exact path to the plugin binary in the EasyREST configuration file (`ER_DB_<NAME>_PATH` or `ER_CACHE_<NAME>_PATH`).
+    Alternatively, specify the exact path to the plugin binary in the EasyREST configuration file.
 
 6.  **Configure EasyREST:**
-    Update your EasyREST configuration (environment variables or config file) to use your new plugin, referencing the connection name you used in `main.go` (e.g., `mysql` if the binary is `easyrest-plugin-mysql`).
-    ```bash
-    export ER_DB_PRIMARY="mysql://user:password@tcp(host:port)/database"
-    # If the binary name doesn't match the type hint in the URI, or isn't in PATH:
-    # export ER_DB_PRIMARY_PATH="/path/to/your/easyrest-plugin-mysql-redis"
+    Update your EasyREST YAML configuration:
+    *   For DB/Cache plugins, use the `plugins` section.
+    *   For Auth plugins, use the new `auth_plugins` section, providing the necessary `settings` for your plugin's `Init` method.
+    ```yaml
+    # In your server's config.yaml
 
-    export ER_CACHE_PRIMARY="redis://host:port/0"
-    # export ER_CACHE_PRIMARY_PATH="/path/to/your/easyrest-plugin-mysql-redis"
+    plugins:
+      # ... your DB/Cache plugin configurations ...
+      # my_database:
+      #   uri: "customdb://..." # Assuming your plugin handles 'customdb'
+      #   path: "/path/to/your/easyrest-my-custom-plugin" # If it also serves DB
+
+    auth_plugins:
+      my_auth_instance_name: # This name is used for auto-discovery if path is empty (easyrest-auth-my_auth_instance_name)
+        path: "/path/to/your/easyrest-my-custom-plugin" # Or specify path directly
+        settings:
+          # Settings specific to your MyCustomPlugin's Init method
+          api_key_secret: "some_secret_value_for_auth"
+          # ... other settings
     ```
 
 ---
