@@ -7,7 +7,7 @@ import (
 )
 
 // Version is the plugin version.
-var Version = "v0.10.3"
+var Version = "v0.11.0"
 
 // DBPlugin – interface for DB access plugins.
 type DBPlugin interface {
@@ -146,6 +146,35 @@ type CacheGetRequest struct {
 type CacheGetResponse struct {
 	Value string
 	Error string
+}
+
+// --- AuthPlugin ---
+// AuthPlugin defines the interface for authentication plugins.
+type AuthPlugin interface {
+	Init(settings map[string]any) (map[string]any, error) // Returns Swagger 2.0 security definition and error
+	Authenticate(authHeader string) (map[string]any, error)
+}
+
+// AuthInitRequest holds the settings for authentication plugin initialization.
+type AuthInitRequest struct {
+	Settings map[string]any
+}
+
+// AuthInitResponse indicates success or error during authentication plugin initialization.
+type AuthInitResponse struct {
+	Schema map[string]any // Swagger 2.0 security definition
+	Error  string
+}
+
+// AuthAuthenticateRequest holds the authorization header for authentication.
+type AuthAuthenticateRequest struct {
+	AuthHeader string
+}
+
+// AuthAuthenticateResponse holds the claims or an error.
+type AuthAuthenticateResponse struct {
+	Claims map[string]any
+	Error  string
 }
 
 // Handshake configuration for plugin security.

@@ -88,21 +88,12 @@ func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs, viewDefs, rpcDef
 		}
 	}
 
-	var jwtTokenSecurity map[string]any
-	if cfg.TokenURL != "" {
-		jwtTokenSecurity = map[string]any{
-			"type":     "oauth2",
-			"flow":     cfg.AuthFlow,
-			"tokenUrl": cfg.TokenURL,
-			"scopes":   map[string]any{},
-		}
-	} else {
-		jwtTokenSecurity = map[string]any{
-			"type":        "apiKey",
-			"name":        "Authorization",
-			"in":          "header",
-			"description": "Enter token in format 'Bearer {token}'",
-		}
+	// Load AuthSecurityDefinitions
+	currentAuthSecDefs := *AuthSecurityDefinitions.Load()
+	swaggerSecurityDefinitions := make(map[string]any)
+
+	for k, v := range currentAuthSecDefs {
+		swaggerSecurityDefinitions[k] = v
 	}
 
 	// Get public tables and funcs for this dbKey
@@ -130,9 +121,7 @@ func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs, viewDefs, rpcDef
 		isPublicTable := slices.Contains(publicTables, tableName)
 
 		getOp := buildGETEndpoint(tableName, properties)
-		if isPublicTable {
-			getOp.Security = []map[string]any{} // No security for public
-		}
+		getOp.Security = buildOperationSecurity(isPublicTable, currentAuthSecDefs)
 		pathItem.Get = getOp
 
 		if _, ok := tableDefs[tableName]; ok {
@@ -140,11 +129,11 @@ func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs, viewDefs, rpcDef
 			postOp := buildPOSTEndpoint(tableName)
 			patchOp := buildPATCHEndpoint(tableName, properties)
 			deleteOp := buildDELETEEndpoint(tableName, properties)
-			if isPublicTable {
-				postOp.Security = []map[string]any{}
-				patchOp.Security = []map[string]any{}
-				deleteOp.Security = []map[string]any{}
-			}
+
+			postOp.Security = buildOperationSecurity(isPublicTable, currentAuthSecDefs)
+			patchOp.Security = buildOperationSecurity(isPublicTable, currentAuthSecDefs)
+			deleteOp.Security = buildOperationSecurity(isPublicTable, currentAuthSecDefs)
+
 			pathItem.Post = postOp
 			pathItem.Patch = patchOp
 			pathItem.Delete = deleteOp
@@ -176,10 +165,7 @@ func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs, viewDefs, rpcDef
 		respSchema := arr[1]
 		path := "/rpc/" + funcName + "/"
 		isPublicFunc := slices.Contains(publicFuncs, funcName)
-		security := []map[string]any{{"jwtToken": []string{}}}
-		if isPublicFunc {
-			security = []map[string]any{} // No security for public
-		}
+		security := buildOperationSecurity(isPublicFunc, currentAuthSecDefs)
 		op := &Operation{
 			Summary:     fmt.Sprintf("Call RPC function %s", funcName),
 			Description: fmt.Sprintf("Invoke the RPC function %s", funcName),
@@ -209,22 +195,33 @@ func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs, viewDefs, rpcDef
 			Title:   title,
 			Version: easyrest.Version,
 		},
-		Host:        r.Host,
-		BasePath:    "/api/" + dbKey,
-		Schemes:     []string{"http"},
-		Consumes:    []string{"application/json"},
-		Produces:    []string{"application/json"},
-		Definitions: mergedDefs,
-		SecurityDefinitions: map[string]any{
-			"jwtToken": jwtTokenSecurity,
-		},
-		Paths: make(map[string]any),
+		Host:                r.Host,
+		BasePath:            "/api/" + dbKey,
+		Schemes:             []string{"http"},
+		Consumes:            []string{"application/json"},
+		Produces:            []string{"application/json"},
+		Definitions:         mergedDefs,
+		SecurityDefinitions: swaggerSecurityDefinitions,
+		Paths:               make(map[string]any),
 	}
 	for k, v := range paths {
 		swaggerDef.Paths[k] = v
 	}
 
 	return swaggerDef
+}
+
+// buildOperationSecurity constructs the Security array for Swagger operations.
+func buildOperationSecurity(isPublic bool, authSecurityDefinitions map[string]map[string]any) []map[string]any {
+	if isPublic {
+		return []map[string]any{} // No security for public resources
+	}
+
+	var securityRequirements []map[string]any
+	for key := range authSecurityDefinitions {
+		securityRequirements = append(securityRequirements, map[string]any{key: []string{}})
+	}
+	return securityRequirements
 }
 
 // buildGETEndpoint constructs a GET operation map with query parameters for the given name and property set.
@@ -249,9 +246,7 @@ func buildGETEndpoint(name string, properties map[string]any) *Operation {
 				},
 			},
 		},
-		Security: []map[string]any{
-			{"jwtToken": []string{}},
-		},
+		// Security will be set by the caller (buildSwaggerSpec)
 	}
 }
 
@@ -362,9 +357,7 @@ func buildPOSTEndpoint(name string) *Operation {
 				"description": "Rows created",
 			},
 		},
-		Security: []map[string]any{
-			{"jwtToken": []string{}},
-		},
+		// Security will be set by the caller (buildSwaggerSpec)
 	}
 }
 
@@ -397,9 +390,7 @@ func buildPATCHEndpoint(name string, properties map[string]any) *Operation {
 				},
 			},
 		},
-		Security: []map[string]any{
-			{"jwtToken": []string{}},
-		},
+		// Security will be set by the caller (buildSwaggerSpec)
 	}
 }
 
@@ -421,9 +412,7 @@ func buildDELETEEndpoint(name string, properties map[string]any) *Operation {
 				"description": "Rows deleted",
 			},
 		},
-		Security: []map[string]any{
-			{"jwtToken": []string{}},
-		},
+		// Security will be set by the caller (buildSwaggerSpec)
 	}
 }
 

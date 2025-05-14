@@ -20,6 +20,10 @@ cors:
     - "Authorization"
     - "X-Requested-With"
   max_age: 86400
+auth_plugins:
+  jwt:
+    settings: {}
+      # jwt_secret: "mytestsecret"
 plugin_configs:
   - ./test.yaml
 plugins:

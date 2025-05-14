@@ -43,8 +43,10 @@ func TestConfigLoad(t *testing.T) {
 	if cfg.CheckScope {
 		t.Errorf("Expected CheckScope = false when ER_CHECK_SCOPE=0, got true")
 	}
-	if cfg.TokenSecret != "mytestsecret" {
-		t.Errorf("Expected TokenSecret = 'mytestsecret', got %s", cfg.TokenSecret)
+	jwtPlugin := cfg.AuthPlugins["jwt"]
+	secret := jwtPlugin.Settings["jwt_secret"]
+	if secret != "mytestsecret" {
+		t.Errorf("Expected TokenSecret = 'mytestsecret', got %s", secret)
 	}
 	if cfg.TokenUserSearch != "sub" {
 		t.Errorf("Expected TokenUserSearch = 'sub', got %s", cfg.TokenUserSearch)

@@ -6,7 +6,7 @@ import (
 
 	hplugin "github.com/hashicorp/go-plugin"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
-	memcachedPlugin "github.com/onegreyonewhite/easyrest/plugins/memcached"
+	memcachedPlugin "github.com/onegreyonewhite/easyrest/plugins/data/memcached"
 	_ "go.uber.org/automaxprocs"
 )
 

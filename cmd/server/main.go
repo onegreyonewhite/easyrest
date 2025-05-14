@@ -4,11 +4,12 @@ import (
 	"github.com/onegreyonewhite/easyrest/internal/cli"
 	"github.com/onegreyonewhite/easyrest/internal/server"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
-	memcachedPlugin "github.com/onegreyonewhite/easyrest/plugins/memcached"
-	mysqlPlugin "github.com/onegreyonewhite/easyrest/plugins/mysql"
-	postgresPlugin "github.com/onegreyonewhite/easyrest/plugins/postgres"
-	redisPlugin "github.com/onegreyonewhite/easyrest/plugins/redis"
-	sqlitePlugin "github.com/onegreyonewhite/easyrest/plugins/sqlite"
+	jwtplugin "github.com/onegreyonewhite/easyrest/plugins/auth/jwt"
+	memcachedPlugin "github.com/onegreyonewhite/easyrest/plugins/data/memcached"
+	mysqlPlugin "github.com/onegreyonewhite/easyrest/plugins/data/mysql"
+	postgresPlugin "github.com/onegreyonewhite/easyrest/plugins/data/postgres"
+	redisPlugin "github.com/onegreyonewhite/easyrest/plugins/data/redis"
+	sqlitePlugin "github.com/onegreyonewhite/easyrest/plugins/data/sqlite"
 	_ "go.uber.org/automaxprocs"
 )
 
@@ -41,6 +42,9 @@ func main() {
 		}
 		server.PreservedCachePlugins["memcached"] = func() easyrest.CachePlugin {
 			return memcachedPlugin.NewMemcachedCachePlugin()
+		}
+		server.PreservedAuthPlugins["jwt"] = func() easyrest.AuthPlugin {
+			return &jwtplugin.JWTAuthPlugin{}
 		}
 		server.Run(cfg)
 	}

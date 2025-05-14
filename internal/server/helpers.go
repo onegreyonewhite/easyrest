@@ -29,7 +29,7 @@ import (
 	hplugin "github.com/hashicorp/go-plugin"
 	"github.com/onegreyonewhite/easyrest/internal/config"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
-	cache "github.com/onegreyonewhite/easyrest/plugins/lru"
+	cache "github.com/onegreyonewhite/easyrest/plugins/data/lru"
 	cachepkg "github.com/patrickmn/go-cache"
 )
 
@@ -37,15 +37,19 @@ type PreservedPluginFactory[T any] func() T
 
 // Global configuration and dbPlugins loaded only once.
 var (
-	cfg                   config.Config
-	cfgOnce               sync.Once
-	DbPlugins             atomic.Pointer[map[string]easyrest.DBPlugin]
-	CachePlugins          atomic.Pointer[map[string]easyrest.CachePlugin]
-	pluginClients         atomic.Pointer[map[string]*hplugin.Client]
-	PreservedCachePlugins map[string]PreservedPluginFactory[easyrest.CachePlugin]
-	PreservedDbPlugins    map[string]PreservedPluginFactory[easyrest.DBPlugin]
-	identifierRegex       = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-	AllowedOps            = map[string]string{
+	cfg                     config.Config
+	cfgOnce                 sync.Once
+	DbPlugins               atomic.Pointer[map[string]easyrest.DBPlugin]
+	CachePlugins            atomic.Pointer[map[string]easyrest.CachePlugin]
+	AuthPlugins             atomic.Pointer[map[string]easyrest.AuthPlugin]
+	AuthSecurityDefinitions atomic.Pointer[map[string]map[string]any]
+	pluginClients           atomic.Pointer[map[string]*hplugin.Client]
+	authPluginClients       atomic.Pointer[map[string]*hplugin.Client]
+	PreservedCachePlugins   map[string]PreservedPluginFactory[easyrest.CachePlugin]
+	PreservedDbPlugins      map[string]PreservedPluginFactory[easyrest.DBPlugin]
+	PreservedAuthPlugins    map[string]PreservedPluginFactory[easyrest.AuthPlugin]
+	identifierRegex         = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	AllowedOps              = map[string]string{
 		"eq":    "=",
 		"neq":   "!=",
 		"lt":    "<",
@@ -100,8 +104,18 @@ func init() {
 	CachePlugins.Store(&emptyCachePlugins)
 	emptyPluginClients := make(map[string]*hplugin.Client)
 	pluginClients.Store(&emptyPluginClients)
+
+	// New initializations for Auth plugins
+	emptyAuthPlugins := make(map[string]easyrest.AuthPlugin)
+	AuthPlugins.Store(&emptyAuthPlugins)
+	emptyAuthSecDefs := make(map[string]map[string]any)
+	AuthSecurityDefinitions.Store(&emptyAuthSecDefs)
+	emptyAuthPluginClients := make(map[string]*hplugin.Client)
+	authPluginClients.Store(&emptyAuthPluginClients)
+
 	PreservedCachePlugins = make(map[string]PreservedPluginFactory[easyrest.CachePlugin])
 	PreservedDbPlugins = make(map[string]PreservedPluginFactory[easyrest.DBPlugin])
+	PreservedAuthPlugins = make(map[string]PreservedPluginFactory[easyrest.AuthPlugin])
 }
 
 // GetConfig loads configuration only once.
@@ -126,6 +140,7 @@ func ReloadConfig() {
 func StopPlugins() {
 	// Get the current clients map pointer
 	oldClientsPtr := pluginClients.Load()
+	oldAuthClientsPtr := authPluginClients.Load()
 
 	// Atomically set empty maps
 	emptyDbPlugins := make(map[string]easyrest.DBPlugin)
@@ -135,11 +150,27 @@ func StopPlugins() {
 	emptyPluginClients := make(map[string]*hplugin.Client)
 	pluginClients.Store(&emptyPluginClients)
 
+	// New for AuthPlugins
+	emptyAuthPlugins := make(map[string]easyrest.AuthPlugin)
+	AuthPlugins.Store(&emptyAuthPlugins)
+	emptyAuthSecDefs := make(map[string]map[string]any)
+	AuthSecurityDefinitions.Store(&emptyAuthSecDefs)
+	emptyAuthPluginClients := make(map[string]*hplugin.Client)
+	authPluginClients.Store(&emptyAuthPluginClients)
+
 	// Kill clients from the old map
 	if oldClientsPtr != nil {
 		oldClients := *oldClientsPtr
 		for connName, client := range oldClients {
 			stdlog.Printf("Stopping plugin client for connection: %s", connName)
+			client.Kill()
+		}
+	}
+	// New: Kill auth plugin clients
+	if oldAuthClientsPtr != nil {
+		oldAuthClients := *oldAuthClientsPtr
+		for name, client := range oldAuthClients {
+			stdlog.Printf("Stopping auth plugin client for: %s", name)
 			client.Kill()
 		}
 	}
@@ -810,6 +841,9 @@ func LoadPlugins() {
 	newDbPlugins := make(map[string]easyrest.DBPlugin)
 	newCachePlugins := make(map[string]easyrest.CachePlugin)
 	newPluginClients := make(map[string]*hplugin.Client)
+	// New maps for auth plugins
+	newAuthPlugins := make(map[string]easyrest.AuthPlugin)
+	newAuthSecurityDefinitions := make(map[string]map[string]any)
 
 	for connName, pluginCfg := range cfg.PluginMap {
 		// Determine executable path (same as before)
@@ -960,8 +994,143 @@ func LoadPlugins() {
 		}
 	} // End loop over cfg.PluginMap
 
-	// Get the pointer to the old clients map *before* swapping
-	oldClientsPtr := pluginClients.Load()
+	// --- Load Auth Plugins ---
+	for authPluginName, authPluginCfg := range cfg.AuthPlugins {
+		pluginInitialized := false // Tracks if *any* form (preserved or RPC) of this auth plugin was inited
+
+		// Attempt 1: Preserved Auth Plugin
+		// Considered if Path is empty and authPluginName matches a key in PreservedAuthPlugins.
+		if authPluginCfg.Path == "" {
+			if factory, ok := PreservedAuthPlugins[authPluginName]; ok {
+				authPluginInstance := factory()
+				schema, errInitPreserved := authPluginInstance.Init(authPluginCfg.Settings)
+				if errInitPreserved != nil {
+					stdlog.Printf("Error initializing preserved Auth plugin '%s': %v", authPluginName, errInitPreserved)
+				} else {
+					newAuthPlugins[authPluginName] = authPluginInstance
+					if schema != nil {
+						newAuthSecurityDefinitions[authPluginName] = schema
+					}
+					pluginInitialized = true
+					stdlog.Printf("Auth plugin '%s' (preserved) initialized.", authPluginName)
+				}
+				continue // Move to the next auth plugin in config
+			}
+		}
+
+		// Attempt 2: External (RPC) Auth Plugin
+		// Reaches here if:
+		// 1. authPluginCfg.Path is specified (explicit external plugin).
+		// 2. authPluginCfg.Path is empty, AND it was not found/handled as a preserved plugin.
+		var determinedPluginPath string
+		var errResolvingPath error
+		var pathSearchOrigin string // For logging, what name/path was used for searching
+
+		if authPluginCfg.Path != "" {
+			pathSearchOrigin = authPluginCfg.Path
+			candidatePath := authPluginCfg.Path
+			if strings.HasPrefix(candidatePath, "~/") {
+				homeDir, err := os.UserHomeDir()
+				if err != nil {
+					errResolvingPath = fmt.Errorf("error getting home directory for auth plugin %s: %w", authPluginName, err)
+					stdlog.Print(errResolvingPath) // Log and continue to next plugin
+					continue
+				}
+				candidatePath = filepath.Join(homeDir, candidatePath[2:])
+			}
+
+			// Try to verify the path directly (e.g. if it's absolute/relative and valid)
+			verifiedPath, checkErr := checkFile(candidatePath)
+			if checkErr == nil {
+				determinedPluginPath = verifiedPath
+			} else {
+				// If direct check fails, try findPluginPath (treat candidatePath as a name to search in standard locations)
+				foundPath, findErr := findPluginPath(candidatePath) // `candidatePath` here is the original from config or ~ resolved
+				if findErr == nil {
+					determinedPluginPath = foundPath
+				} else {
+					errResolvingPath = fmt.Errorf("path '%s' not directly executable (err: %v) and not found via search (err: %v)", candidatePath, checkErr, findErr)
+				}
+			}
+		} else { // Path is empty in config, AND it was not a preserved plugin (handled above).
+			// Construct default name and try to find it.
+			defaultExecName := "easyrest-auth-" + authPluginName
+			pathSearchOrigin = defaultExecName
+			var findErr error
+			determinedPluginPath, findErr = findPluginPath(defaultExecName)
+			if findErr != nil {
+				errResolvingPath = fmt.Errorf("default executable '%s' not found: %w", defaultExecName, findErr)
+			}
+		}
+
+		if errResolvingPath != nil {
+			stdlog.Printf("Auth plugin '%s': Could not find/validate executable (searched as '%s'): %v. Skipping.", authPluginName, pathSearchOrigin, errResolvingPath)
+			continue
+		}
+
+		// External plugin RPC setup
+		absPluginPath, err := filepath.Abs(determinedPluginPath)
+		if err != nil {
+			stdlog.Printf("Error getting absolute path for auth plugin %s (%s): %v", authPluginName, determinedPluginPath, err)
+			continue
+		}
+
+		authPluginInterfaceMap := map[string]hplugin.Plugin{
+			"auth": &easyrest.AuthPluginPlugin{},
+		}
+
+		pluginClientConfig := hplugin.ClientConfig{
+			HandshakeConfig:  easyrest.Handshake,
+			Plugins:          authPluginInterfaceMap,
+			Cmd:              exec.Command(absPluginPath),
+			AllowedProtocols: []hplugin.Protocol{hplugin.ProtocolNetRPC},
+		}
+		if cfg.NoPluginLog {
+			pluginClientConfig.Logger = hclog.New(&hclog.LoggerOptions{
+				Output: io.Discard,
+			})
+		}
+
+		client := hplugin.NewClient(&pluginClientConfig)
+		rpcClient, err := client.Client()
+		if err != nil {
+			stdlog.Printf("Error creating RPC client for auth plugin %s (%s): %v", authPluginName, absPluginPath, err)
+			client.Kill()
+			continue
+		}
+
+		rawAuth, errDispense := rpcClient.Dispense("auth")
+		if errDispense == nil {
+			authPlug, ok := rawAuth.(easyrest.AuthPlugin)
+			if ok {
+				schema, errInit := authPlug.Init(authPluginCfg.Settings)
+				if errInit == nil {
+					newAuthPlugins[authPluginName] = authPlug
+					if schema != nil {
+						newAuthSecurityDefinitions[authPluginName] = schema
+					}
+					pluginInitialized = true
+				} else {
+					stdlog.Printf("Error initializing Auth interface for plugin %s (RPC): %v", authPluginName, errInit)
+				}
+			} else {
+				stdlog.Printf("Error: Auth plugin %s (%s) dispensed 'auth' but type assertion to AuthPlugin failed", authPluginName, absPluginPath)
+			}
+		} else {
+			if !strings.Contains(errDispense.Error(), "unknown service") {
+				stdlog.Printf("Error dispensing 'auth' interface for plugin %s: %v", authPluginName, errDispense)
+			}
+		}
+
+		if pluginInitialized {
+			newPluginClients[authPluginName] = client // Store the client process for this auth plugin
+			stdlog.Printf("Auth plugin '%s' (executable: %s) initialized.", authPluginName, filepath.Base(absPluginPath))
+		} else {
+			// If not preserved and RPC init failed for any reason
+			stdlog.Printf("Auth plugin '%s' (executable: %s) failed to initialize. Stopping client.", authPluginName, filepath.Base(absPluginPath))
+			client.Kill() // Kill the client if no interfaces were loaded or init failed
+		}
+	} // End loop over cfg.AuthPlugins
 
 	// Initialize internal fallback cache if no external cache plugins were loaded or supported the cache interface
 	if len(cfg.PluginMap) > 0 { // Only add internal if external were configured but none loaded/supported cache
@@ -977,12 +1146,21 @@ func LoadPlugins() {
 		}
 	}
 
-	// Atomically swap to the new maps
+	// Get the pointer to the old clients map *before* swapping for DB/Cache/Auth
+	oldClientsPtr := pluginClients.Load()
+
+	// Atomically swap to the new maps for DB/Cache
 	DbPlugins.Store(&newDbPlugins)
 	CachePlugins.Store(&newCachePlugins)
+
+	// Atomically swap for Auth
+	AuthPlugins.Store(&newAuthPlugins)
+	AuthSecurityDefinitions.Store(&newAuthSecurityDefinitions)
+
+	// Swap the plugin clients
 	pluginClients.Store(&newPluginClients)
 
-	// Kill the old clients *after* the swap
+	// Kill the old clients *after* the swap for DB/Cache
 	if oldClientsPtr != nil {
 		oldClients := *oldClientsPtr
 		if len(oldClients) > 0 {

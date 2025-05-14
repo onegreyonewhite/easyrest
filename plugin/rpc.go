@@ -313,8 +313,77 @@ func (p *CachePluginPlugin) Client(broker *plugin.MuxBroker, c *rpc.Client) (any
 	return &CachePluginRPC{client: c}, nil
 }
 
+// AuthPluginRPC is the client wrapper for AuthPlugin.
+type AuthPluginRPC struct{ client *rpc.Client }
+
+func (a *AuthPluginRPC) Init(settings map[string]any) (map[string]any, error) {
+	req := AuthInitRequest{Settings: settings}
+	var resp AuthInitResponse
+	err := a.client.Call("Plugin.Init", req, &resp)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Error != "" {
+		return resp.Schema, errors.New(resp.Error)
+	}
+	return resp.Schema, nil
+}
+
+func (a *AuthPluginRPC) Authenticate(authHeader string) (map[string]any, error) {
+	req := AuthAuthenticateRequest{AuthHeader: authHeader}
+	var resp AuthAuthenticateResponse
+	err := a.client.Call("Plugin.Authenticate", req, &resp)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Error != "" {
+		return nil, errors.New(resp.Error)
+	}
+	return resp.Claims, nil
+}
+
+// AuthPluginRPCServer is the server-side RPC implementation for AuthPlugin.
+type AuthPluginRPCServer struct {
+	Impl AuthPlugin
+}
+
+func (s *AuthPluginRPCServer) Init(req AuthInitRequest, resp *AuthInitResponse) error {
+	schema, err := s.Impl.Init(req.Settings)
+	resp.Schema = schema
+	if err != nil {
+		resp.Error = err.Error()
+	}
+	return nil
+}
+
+func (s *AuthPluginRPCServer) Authenticate(req AuthAuthenticateRequest, resp *AuthAuthenticateResponse) error {
+	claims, err := s.Impl.Authenticate(req.AuthHeader)
+	if err != nil {
+		resp.Error = err.Error()
+		return nil
+	}
+	resp.Claims = claims
+	return nil
+}
+
+// AuthPluginPlugin wraps the AuthPlugin implementation for go-plugin.
+type AuthPluginPlugin struct {
+	Impl AuthPlugin
+}
+
+func (p *AuthPluginPlugin) Server(broker *plugin.MuxBroker) (any, error) {
+	return &AuthPluginRPCServer{Impl: p.Impl}, nil
+}
+
+func (p *AuthPluginPlugin) Client(broker *plugin.MuxBroker, c *rpc.Client) (any, error) {
+	return &AuthPluginRPC{client: c}, nil
+}
+
+// --- End AuthPlugin ---
+
 func init() {
 	gob.Register(map[string]any(nil))
+	gob.Register(map[string]string{})
 	gob.Register([]map[string]any{})
 	gob.Register(time.Time{})
 	gob.Register([]any{})

@@ -6,7 +6,7 @@ import (
 
 	hplugin "github.com/hashicorp/go-plugin"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
-	mysqlPlugin "github.com/onegreyonewhite/easyrest/plugins/mysql"
+	mysqlPlugin "github.com/onegreyonewhite/easyrest/plugins/data/mysql"
 	_ "go.uber.org/automaxprocs"
 )
 

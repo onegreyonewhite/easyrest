@@ -15,7 +15,7 @@ import (
 	"github.com/onegreyonewhite/easyrest/internal/config"
 	"github.com/onegreyonewhite/easyrest/internal/server"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
-	sqlitePlugin "github.com/onegreyonewhite/easyrest/plugins/sqlite"
+	sqlitePlugin "github.com/onegreyonewhite/easyrest/plugins/data/sqlite"
 	_ "modernc.org/sqlite"
 )
 

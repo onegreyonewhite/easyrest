@@ -20,7 +20,6 @@ import (
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 
-	"github.com/goccy/go-json"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/mux"
 	"github.com/onegreyonewhite/easyrest/internal/config"
@@ -149,11 +148,7 @@ func Authenticate(r *http.Request) (string, *http.Request, error) {
 		return "", r, errors.New("missing authorization header")
 	}
 
-	matches := bearerRegex.FindStringSubmatch(authHeader)
-	if len(matches) != 2 {
-		return "", r, errors.New("invalid authorization header format")
-	}
-	tokenStr := matches[1]
+	tokenStr := authHeader
 
 	// Check cache for claims and user_id
 	if claimsCache != nil {
@@ -166,83 +161,21 @@ func Authenticate(r *http.Request) (string, *http.Request, error) {
 		}
 	}
 
-	if config.TokenSecret != "" {
-		parsed, err := jwt.Parse(tokenStr, func(token *jwt.Token) (any, error) {
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-			}
-			return []byte(config.TokenSecret), nil
-		})
-		if err != nil || !parsed.Valid {
-			return "", r, errors.New("invalid token")
-		}
-		claims, ok := parsed.Claims.(jwt.MapClaims)
-		if !ok {
-			return "", r, errors.New("invalid claims")
-		}
+	authPlugins := AuthPlugins.Load()
+	claims := jwt.MapClaims{}
+	authorized := false
 
-		expTime, err := claims.GetExpirationTime()
-		if err == nil && expTime != nil && expTime.Before(time.Now()) {
-			return "", r, errors.New("token expired")
-		}
-
-		r = r.WithContext(context.WithValue(r.Context(), TokenClaimsKey, claims))
-		userID := extractUserIDFromClaims(claims)
-		// Store in cache
-		if claimsCache != nil {
-			claimsCache.SetDefault(tokenStr, claimsCacheEntry{Claims: claims, UserID: userID})
-		}
-		return userID, r, nil
-	}
-
-	tokenURL := os.Getenv("ER_TOKEN_URL")
-	if tokenURL != "" {
-		req, err := http.NewRequestWithContext(r.Context(), "GET", tokenURL, nil)
+	for _, plugin := range *authPlugins {
+		claimsData, err := plugin.Authenticate(tokenStr)
 		if err != nil {
-			return "", r, fmt.Errorf("error creating request: %v", err)
+			continue
 		}
-		q := req.URL.Query()
-		q.Add("access_token", tokenStr)
-		req.URL.RawQuery = q.Encode()
-
-		// Inject trace context into outgoing request headers
-		if cfg.Otel.Enabled {
-			otel.GetTextMapPropagator().Inject(r.Context(), propagation.HeaderCarrier(req.Header))
-		}
-
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			return "", r, errors.New("error validating token")
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			return "", r, errors.New("invalid token (via URL)")
-		}
-
-		var authResponse map[string]any
-		if err := json.NewDecoder(resp.Body).Decode(&authResponse); err != nil {
-			return "", r, errors.New("invalid response from auth server")
-		}
-
-		claims := jwt.MapClaims(authResponse)
-		r = r.WithContext(context.WithValue(r.Context(), TokenClaimsKey, claims))
-		userID := extractUserIDFromClaims(claims)
-		// Store in cache
-		if claimsCache != nil {
-			claimsCache.SetDefault(tokenStr, claimsCacheEntry{Claims: claims, UserID: userID})
-		}
-		return userID, r, nil
+		maps.Copy(claims, claimsData)
+		authorized = true
 	}
 
-	claims, err := DecodeTokenWithoutValidation(tokenStr)
-	if err != nil {
-		return "", r, err
-	}
-
-	expTime, err := claims.GetExpirationTime()
-	if err == nil && expTime != nil && expTime.Before(time.Now()) {
-		return "", r, errors.New("token expired")
+	if !authorized {
+		return "", r, errors.New("invalid token")
 	}
 
 	r = r.WithContext(context.WithValue(r.Context(), TokenClaimsKey, claims))

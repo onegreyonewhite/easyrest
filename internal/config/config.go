@@ -35,6 +35,11 @@ type PluginConfig struct {
 	DefaultLimit        int                 `yaml:"default_limit,omitempty"`
 }
 
+type AuthConfig struct {
+	Path     string         `yaml:"path,omitempty"`
+	Settings map[string]any `yaml:"settings,omitempty"`
+}
+
 type CORSConfig struct {
 	Enabled bool     `yaml:"enabled"`
 	Origins []string `yaml:"origins"`
@@ -74,15 +79,12 @@ type OtelConfig struct {
 type Config struct {
 	Port            string `yaml:"port"`
 	CheckScope      bool   `yaml:"check_scope"`
-	TokenSecret     string `yaml:"token_secret"`
 	TokenUserSearch string `yaml:"token_user_search"`
 	NoPluginLog     bool   `yaml:"plugin_log"`
 	AccessLogOn     bool   `yaml:"access_log"`
 	DefaultTimezone string `yaml:"default_timezone"`
 	DefaultLimit    int    `yaml:"default_limit"`
-	TokenURL        string `yaml:"token_url"`
 	TokenCacheTTL   int    `yaml:"token_cache_ttl"`
-	AuthFlow        string `yaml:"auth_flow"`
 	// CORS settings
 	CORS CORSConfig `yaml:"cors"`
 
@@ -94,10 +96,11 @@ type Config struct {
 	TLSCertFile string `yaml:"tls_cert_file"`
 	TLSKeyFile  string `yaml:"tls_key_file"`
 	// Plugin settings
-	Plugins    []string                `yaml:"plugin_configs"`
-	PluginMap  map[string]PluginConfig `yaml:"plugins"`
-	AnonClaims map[string]any          `yaml:"anon_claims,omitempty"`
-	Server     ServerConfig            `yaml:"server"`
+	Plugins     []string                `yaml:"plugin_configs"`
+	PluginMap   map[string]PluginConfig `yaml:"plugins"`
+	AuthPlugins map[string]AuthConfig   `yaml:"auth_plugins"`
+	AnonClaims  map[string]any          `yaml:"anon_claims,omitempty"`
+	Server      ServerConfig            `yaml:"server"`
 }
 
 func LoadPluginConfigs(configs []string) map[string]PluginConfig {
@@ -228,9 +231,6 @@ func Load() Config {
 			}
 		}
 	}
-
-	// TokenURL: HTTP path for authorization from ER_TOKEN_AUTHURL
-	tokenURL := os.Getenv("ER_TOKEN_AUTHURL")
 
 	authFlow := os.Getenv("ER_TOKEN_AUTHFLOW")
 
@@ -382,14 +382,11 @@ func Load() Config {
 	cfg := Config{
 		Port:            port,
 		CheckScope:      checkScope,
-		TokenSecret:     tokenSecret,
 		TokenUserSearch: tokenUserSearch,
 		NoPluginLog:     noPluginLog,
 		AccessLogOn:     accessLogOn,
 		DefaultTimezone: defaultTimezone,
-		TokenURL:        tokenURL,
 		TokenCacheTTL:   tokenCacheTTL,
-		AuthFlow:        authFlow,
 		// CORS settings
 		CORS: CORSConfig{
 			Enabled: corsEnabled,
@@ -403,9 +400,10 @@ func Load() Config {
 		TLSCertFile: tlsCertFile,
 		TLSKeyFile:  tlsKeyFile,
 		// Plugin settings
-		Plugins:    pluginsList,
-		PluginMap:  make(map[string]PluginConfig),
-		AnonClaims: make(map[string]any),
+		Plugins:     pluginsList,
+		PluginMap:   make(map[string]PluginConfig),
+		AuthPlugins: make(map[string]AuthConfig),
+		AnonClaims:  make(map[string]any),
 		Server: ServerConfig{
 			ReadTimeout:                       serverReadTimeout,
 			WriteTimeout:                      serverWriteTimeout,
@@ -475,6 +473,16 @@ func Load() Config {
 		log.Printf("Otel enabled with protocol %s, endpoint %s and service name %s\n", cfg.Otel.Protocol, cfg.Otel.Endpoint, cfg.Otel.ServiceName)
 	}
 
+	if len(cfg.AuthPlugins) == 0 {
+		cfg.AuthPlugins = map[string]AuthConfig{
+			"jwt": {
+				Settings: map[string]any{
+					"jwt_secret": tokenSecret,
+					"flow":       authFlow,
+				},
+			},
+		}
+	}
 	for pluginName, pluginCfg := range cfg.PluginMap {
 		pluginCfg.Name = pluginName
 		if pluginCfg.DbTxEnd == "" {

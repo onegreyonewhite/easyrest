@@ -13,9 +13,11 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/onegreyonewhite/easyrest/internal/config"
 	"github.com/onegreyonewhite/easyrest/internal/server"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
-	sqlitePlugin "github.com/onegreyonewhite/easyrest/plugins/sqlite"
+	jwtplugin "github.com/onegreyonewhite/easyrest/plugins/auth/jwt"
+	sqlitePlugin "github.com/onegreyonewhite/easyrest/plugins/data/sqlite"
 	_ "modernc.org/sqlite"
 )
 
@@ -78,6 +80,9 @@ func BenchmarkTableGet(b *testing.B) {
 	server.PreservedCachePlugins["sqlite"] = func() easyrest.CachePlugin {
 		return sqlitePlugin.NewSqliteCachePlugin()
 	}
+	server.PreservedAuthPlugins["jwt"] = func() easyrest.AuthPlugin {
+		return &jwtplugin.JWTAuthPlugin{}
+	}
 	server.ReloadConfig()
 	router := server.SetupRouter()
 
@@ -93,6 +98,7 @@ func BenchmarkTableGet(b *testing.B) {
 		router.ServeHTTP(rr, req)
 		if rr.Code != http.StatusOK {
 			b.Errorf("Expected status 200, got %d", rr.Code)
+			break
 		}
 	}
 }
@@ -149,6 +155,9 @@ func BenchmarkTableCreate(b *testing.B) {
 	server.PreservedCachePlugins["sqlite"] = func() easyrest.CachePlugin {
 		return sqlitePlugin.NewSqliteCachePlugin()
 	}
+	server.PreservedAuthPlugins["jwt"] = func() easyrest.AuthPlugin {
+		return &jwtplugin.JWTAuthPlugin{}
+	}
 	server.ReloadConfig()
 	router := server.SetupRouter()
 
@@ -167,6 +176,7 @@ func BenchmarkTableCreate(b *testing.B) {
 		router.ServeHTTP(rr, req)
 		if rr.Code != http.StatusCreated {
 			b.Errorf("Expected status 201, got %d", rr.Code)
+			break
 		}
 	}
 }
@@ -233,6 +243,9 @@ func BenchmarkTableUpdate(b *testing.B) {
 	server.PreservedCachePlugins["sqlite"] = func() easyrest.CachePlugin {
 		return sqlitePlugin.NewSqliteCachePlugin()
 	}
+	server.PreservedAuthPlugins["jwt"] = func() easyrest.AuthPlugin {
+		return &jwtplugin.JWTAuthPlugin{}
+	}
 	server.ReloadConfig()
 	router := server.SetupRouter()
 
@@ -250,6 +263,7 @@ func BenchmarkTableUpdate(b *testing.B) {
 		router.ServeHTTP(rr, req)
 		if rr.Code != http.StatusOK {
 			b.Errorf("Expected status 200, got %d", rr.Code)
+			break
 		}
 	}
 }
@@ -434,6 +448,21 @@ func BenchmarkAuthenticate(b *testing.B) {
 	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
 	secret := "mytestsecret"
 	os.Setenv("ER_TOKEN_SECRET", secret)
+
+	cfg := server.GetConfig()
+	cfg.AuthPlugins = map[string]config.AuthConfig{
+		"jwt": {
+			Settings: map[string]interface{}{
+				"jwt_secret": secret,
+			},
+		},
+	}
+	server.PreservedAuthPlugins["jwt"] = func() easyrest.AuthPlugin {
+		return &jwtplugin.JWTAuthPlugin{}
+	}
+	server.ReloadConfig()
+	server.SetConfig(cfg)
+	server.LoadPlugins()
 
 	// Generate a JWT token with custom claims
 	claims := jwt.MapClaims{

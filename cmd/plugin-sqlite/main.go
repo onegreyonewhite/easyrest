@@ -6,7 +6,7 @@ import (
 
 	hplugin "github.com/hashicorp/go-plugin"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
-	sqlite "github.com/onegreyonewhite/easyrest/plugins/sqlite"
+	sqlite "github.com/onegreyonewhite/easyrest/plugins/data/sqlite"
 	_ "go.uber.org/automaxprocs"
 )
 

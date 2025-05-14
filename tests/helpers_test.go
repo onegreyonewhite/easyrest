@@ -85,7 +85,9 @@ func generateToken(t *testing.T) string {
 		"role":  "admin",
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	tokenStr, err := token.SignedString([]byte(cfg.TokenSecret))
+	jwtPlugin := cfg.AuthPlugins["jwt"]
+	secret := jwtPlugin.Settings["jwt_secret"]
+	tokenStr, err := token.SignedString([]byte(secret.(string)))
 	if err != nil {
 		t.Fatalf("Failed to sign token: %v", err)
 	}

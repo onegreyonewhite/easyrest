@@ -6,7 +6,7 @@ import (
 
 	hplugin "github.com/hashicorp/go-plugin"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
-	redisPlugin "github.com/onegreyonewhite/easyrest/plugins/redis"
+	redisPlugin "github.com/onegreyonewhite/easyrest/plugins/data/redis"
 	_ "go.uber.org/automaxprocs"
 )
 

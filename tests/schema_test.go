@@ -176,7 +176,7 @@ func TestSwaggerSchema(t *testing.T) {
 	if !ok {
 		t.Fatalf("securityDefinitions is not a map")
 	}
-	oauth2, ok := secDefs["jwtToken"].(map[string]any)
+	oauth2, ok := secDefs["jwt"].(map[string]any)
 	if !ok {
 		t.Fatalf("securityDefinitions missing 'oauth2'")
 	}
