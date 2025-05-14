@@ -18,6 +18,11 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 	dbKey := strings.ToLower(vars["db"])
 	funcName := vars["func"]
 
+	if err := sanitizeIdentifier(funcName); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	// Get global config
 	config := GetConfig()
 

@@ -46,6 +46,9 @@ func processSelectParam(param string, flatCtx map[string]string, pluginCtx map[s
 			// Process function syntax like "amount.sum()"
 			subParts := strings.SplitN(raw, ".", 2)
 			fieldPart := strings.TrimSpace(subParts[0])
+			if err := sanitizeIdentifier(fieldPart); err != nil {
+				return nil, nil, fmt.Errorf("invalid field name in select field: %s", part)
+			}
 			funcPart := strings.TrimSpace(subParts[1])
 			if len(funcPart) < 3 || funcPart[len(funcPart)-2:] != "()" {
 				return nil, nil, fmt.Errorf("invalid function syntax in select field: %s", part)
@@ -88,8 +91,14 @@ func processSelectParam(param string, flatCtx map[string]string, pluginCtx map[s
 				exprBuilder.WriteString("' AS ")
 				exprBuilder.WriteString(alias)
 			} else {
+				if err := sanitizeIdentifier(raw); err != nil {
+					return nil, nil, fmt.Errorf("invalid field name in select field: %s", part)
+				}
 				exprBuilder.WriteString(raw)
 				if alias != "" {
+					if err := sanitizeIdentifier(alias); err != nil {
+						return nil, nil, fmt.Errorf("invalid alias in select field: %s", part)
+					}
 					exprBuilder.WriteString(" AS ")
 					exprBuilder.WriteString(alias)
 				}
@@ -125,6 +134,10 @@ func ParseWhereClause(values map[string][]string, flatCtx map[string]string, plu
 			if !found {
 				return nil, fmt.Errorf("invalid where key format: %s", key)
 			}
+			if err := sanitizeIdentifier(field); err != nil {
+				return nil, fmt.Errorf("invalid field name in where clause: %s", key)
+			}
+
 			opCode = strings.ToLower(opCode)
 
 			if _, ok := AllowedOps[opCode]; !ok {
@@ -170,6 +183,11 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	dbKey := strings.ToLower(vars["db"])
 	table := vars["table"]
+
+	if err := sanitizeIdentifier(table); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	// Get global config
 	config := GetConfig()
@@ -335,6 +353,10 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		ordering := ParseCSV(queryValues.Get("ordering"))
+		if err := sanitizeIdentifierList(ordering); err != nil {
+			http.Error(w, "Error processing ordering parameter: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 
 		startTime := time.Now()
 		rows, err := dbPlug.TableGet(userID, table, selectFields, where, ordering, groupBy, limit, offset, pluginCtx)

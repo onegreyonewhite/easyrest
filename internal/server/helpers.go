@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -43,6 +44,7 @@ var (
 	pluginClients         atomic.Pointer[map[string]*hplugin.Client]
 	PreservedCachePlugins map[string]PreservedPluginFactory[easyrest.CachePlugin]
 	PreservedDbPlugins    map[string]PreservedPluginFactory[easyrest.DBPlugin]
+	identifierRegex       = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	AllowedOps            = map[string]string{
 		"eq":    "=",
 		"neq":   "!=",
@@ -162,6 +164,23 @@ func IsAllowedFunction(item string) bool {
 // escapeSQLLiteral escapes single quotes in SQL string literals.
 func escapeSQLLiteral(s string) string {
 	return strings.ReplaceAll(s, "'", "''")
+}
+
+func sanitizeIdentifier(id string) error {
+	if identifierRegex.MatchString(id) {
+		return nil
+	}
+	return fmt.Errorf("invalid identifier: %s", id)
+}
+
+func sanitizeIdentifierList(list []string) error {
+	for _, raw := range list {
+		err := sanitizeIdentifier(raw)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // getNestedValue traverses a nested map using dot-separated keys.
