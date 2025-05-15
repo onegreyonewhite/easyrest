@@ -531,16 +531,16 @@ plugins:
 auth_plugins:
   # The key (e.g., 'jwt_main', 'oidc_provider') is an identifier for the auth plugin instance.
   # It's also used to find the plugin binary if 'path' is not specified (e.g., 'easyrest-auth-jwt_main').
-  jwt_main:
-    path: "" # Optional: Explicit path to the 'easyrest-auth-jwt_main' binary.
-             # If empty, server searches for 'easyrest-auth-jwt_main' in standard locations.
+  jwt:
+    path: "" # Optional: Explicit path to the 'easyrest-auth-jwt' binary.
+             # If empty, server searches for 'easyrest-auth-jwt' in standard locations.
     settings: # This map[string]any is passed directly to the AuthPlugin's Init method.
       jwt_secret: "a-very-secure-secret-for-jwt"
       token_type: "Bearer"
       # other JWT specific settings like userinfo_endpoint etc.
   
   # Example for another auth plugin, perhaps OpenID Connect
-  # oidc_provider:
+  # oidc:
   #   path: "/opt/custom_plugins/easyrest-auth-myoidc" # Path to a custom OIDC auth plugin
   #   settings:
   #     discovery_url: "https://example.com/.well-known/openid-configuration"

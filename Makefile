@@ -19,14 +19,14 @@ $(BUILD_DIR)/$(PREFIX)%: $(SRC_DIR)/%/*.go
 clean:
 	rm -rf $(BUILD_DIR)
 
-test: plugin-sqlite
+test: plugin-sqlite auth-jwt
 	go test -v -coverpkg=./... -coverprofile=$(COVERAGE) ./...
 	go tool cover -func=$(COVERAGE)
 
 bench:
 	go test -bench=. -benchmem ./tests/benchmark_test.go
 
-run: plugin-sqlite
+run: plugin-sqlite auth-jwt
 	go run cmd/gateway/main.go --config test_config.yaml
 
 multirun:

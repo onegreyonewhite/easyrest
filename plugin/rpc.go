@@ -329,8 +329,8 @@ func (a *AuthPluginRPC) Init(settings map[string]any) (map[string]any, error) {
 	return resp.Schema, nil
 }
 
-func (a *AuthPluginRPC) Authenticate(authHeader string) (map[string]any, error) {
-	req := AuthAuthenticateRequest{AuthHeader: authHeader}
+func (a *AuthPluginRPC) Authenticate(headers map[string]string, method string, path string, query string) (map[string]any, error) {
+	req := AuthAuthenticateRequest{Headers: headers, Method: method, Path: path, Query: query}
 	var resp AuthAuthenticateResponse
 	err := a.client.Call("Plugin.Authenticate", req, &resp)
 	if err != nil {
@@ -357,7 +357,7 @@ func (s *AuthPluginRPCServer) Init(req AuthInitRequest, resp *AuthInitResponse) 
 }
 
 func (s *AuthPluginRPCServer) Authenticate(req AuthAuthenticateRequest, resp *AuthAuthenticateResponse) error {
-	claims, err := s.Impl.Authenticate(req.AuthHeader)
+	claims, err := s.Impl.Authenticate(req.Headers, req.Method, req.Path, req.Query)
 	if err != nil {
 		resp.Error = err.Error()
 		return nil

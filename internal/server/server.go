@@ -2,14 +2,12 @@ package server
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	stdlog "log"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
-	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -38,21 +36,6 @@ import (
 type contextKey string
 
 const TokenClaimsKey contextKey = "tokenClaims"
-
-var (
-	bearerRegex = regexp.MustCompile(`^Bearer\s+(.+)$`)
-)
-
-var httpClient = &http.Client{
-	Timeout: 5 * time.Second,
-	Transport: &http.Transport{
-		MaxIdleConns:        100,
-		IdleConnTimeout:     90 * time.Second,
-		DisableCompression:  true,
-		MaxConnsPerHost:     100,
-		MaxIdleConnsPerHost: 100,
-	},
-}
 
 // BuildPluginContext extracts context variables from the HTTP request.
 func BuildPluginContext(r *http.Request) map[string]any {
@@ -136,23 +119,12 @@ func AccessLogMiddleware(next http.Handler) http.Handler {
 
 // Authenticate extracts and validates the JWT token.
 func Authenticate(r *http.Request) (string, *http.Request, error) {
-	authHeader := r.Header.Get("Authorization")
+	authHeaderValue := r.Header.Get("Authorization")
 	config := GetConfig()
-	if authHeader == "" {
-		if len(config.AnonClaims) > 0 {
-			claims := jwt.MapClaims{}
-			maps.Copy(claims, config.AnonClaims)
-			r = r.WithContext(context.WithValue(r.Context(), TokenClaimsKey, claims))
-			return "", r, nil
-		}
-		return "", r, errors.New("missing authorization header")
-	}
 
-	tokenStr := authHeader
-
-	// Check cache for claims and user_id
-	if claimsCache != nil {
-		if cached, found := claimsCache.Get(tokenStr); found {
+	// Check cache for claims and user_id using the raw Authorization header value as key
+	if claimsCache != nil && authHeaderValue != "" {
+		if cached, found := claimsCache.Get(authHeaderValue); found {
 			if entry, ok := cached.(claimsCacheEntry); ok {
 				// Set claims in context and return cached user_id
 				r = r.WithContext(context.WithValue(r.Context(), TokenClaimsKey, entry.Claims))
@@ -164,25 +136,42 @@ func Authenticate(r *http.Request) (string, *http.Request, error) {
 	authPlugins := AuthPlugins.Load()
 	claims := jwt.MapClaims{}
 	authorized := false
+	var authErr error
 
-	for _, plugin := range *authPlugins {
-		claimsData, err := plugin.Authenticate(tokenStr)
-		if err != nil {
-			continue
+	// Prepare headers map for plugins
+	headersForPlugin := make(map[string]string)
+	for k, v := range r.Header {
+		headersForPlugin[strings.ToLower(k)] = strings.Join(v, ", ")
+	}
+	pluginMethod := r.Method
+	pluginPath := r.URL.Path
+	pluginQuery := r.URL.RawQuery
+
+	for pluginName, plugin := range *authPlugins {
+		pluginClaims, err := plugin.Authenticate(headersForPlugin, pluginMethod, pluginPath, pluginQuery)
+		if err == nil {
+			maps.Copy(claims, pluginClaims)
+			authorized = true
+			break
 		}
-		maps.Copy(claims, claimsData)
-		authorized = true
+		authErr = fmt.Errorf("plugin %s: %w", pluginName, err)
 	}
 
 	if !authorized {
-		return "", r, errors.New("invalid token")
+		if len(config.AnonClaims) > 0 {
+			claims := jwt.MapClaims{}
+			maps.Copy(claims, config.AnonClaims)
+			r = r.WithContext(context.WithValue(r.Context(), TokenClaimsKey, claims))
+			return "", r, nil
+		}
+		return "", r, fmt.Errorf("authentication failed: %w", authErr)
 	}
 
 	r = r.WithContext(context.WithValue(r.Context(), TokenClaimsKey, claims))
 	userID := extractUserIDFromClaims(claims)
-	// Store in cache
+	// Store in cache using the raw Authorization header value as key
 	if claimsCache != nil {
-		claimsCache.SetDefault(tokenStr, claimsCacheEntry{Claims: claims, UserID: userID})
+		claimsCache.SetDefault(authHeaderValue, claimsCacheEntry{Claims: claims, UserID: userID})
 	}
 	return userID, r, nil
 }
