@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/docker/go-units"
-	"gopkg.in/yaml.v3"
+	yaml "github.com/goccy/go-yaml"
 )
 
 type AccessConfig struct {

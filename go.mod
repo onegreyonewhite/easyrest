@@ -9,6 +9,7 @@ require (
 	github.com/go-redis/redismock/v9 v9.2.0
 	github.com/go-sql-driver/mysql v1.9.2
 	github.com/goccy/go-json v0.10.5
+	github.com/goccy/go-yaml v1.17.1
 	github.com/golang-jwt/jwt/v5 v5.2.2
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/mux v1.8.1
@@ -29,7 +30,6 @@ require (
 	go.uber.org/automaxprocs v1.6.0
 	golang.org/x/net v0.40.0
 	golang.org/x/sync v0.14.0
-	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.37.0
 )
 
@@ -70,6 +70,7 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250519155744-55703ea1f237 // indirect
 	google.golang.org/grpc v1.72.1 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 	modernc.org/libc v1.65.7 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
