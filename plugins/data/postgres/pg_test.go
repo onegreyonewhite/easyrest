@@ -238,6 +238,7 @@ func TestCallFunction(t *testing.T) {
 
 func TestGetSchema(t *testing.T) {
 	plugin, mock := newTestPlugin(t)
+	plugin.searchPath = "public" // Set default search path for test
 	ctxData := map[string]any{"timezone": "UTC"}
 	mock.ExpectBegin()
 	// Expect exact SQL string
@@ -249,57 +250,59 @@ func TestGetSchema(t *testing.T) {
 		WillReturnResult(pgxmock.NewResult("SELECT", 1))
 	// Base tables.
 	tableRows := pgxmock.NewRows([]string{"table_name"}).AddRow("users").AddRow("orders")
-	// Expect exact SQL string
-	mock.ExpectQuery(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`).
+	// Expect exact SQL string with parameterized schema
+	mock.ExpectQuery(`SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE'`).
+		WithArgs("public").
 		WillReturnRows(tableRows)
 	// Columns for "users".
 	userCols := pgxmock.NewRows([]string{"column_name", "data_type", "is_nullable", "column_default"}).
 		AddRow("id", "integer", "NO", nil).
 		AddRow("name", "character varying", "YES", nil)
-	// Expect exact SQL string
-	mock.ExpectQuery(`SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1`).
-		WithArgs("users").
+	// Expect exact SQL string with parameterized schema
+	mock.ExpectQuery(`SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2`).
+		WithArgs("public", "users").
 		WillReturnRows(userCols)
 	// Columns for "orders".
 	orderCols := pgxmock.NewRows([]string{"column_name", "data_type", "is_nullable", "column_default"}).
 		AddRow("id", "integer", "NO", nil).
 		AddRow("amount", "numeric", "YES", nil)
-	// Expect exact SQL string
-	mock.ExpectQuery(`SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1`).
-		WithArgs("orders").
+	// Expect exact SQL string with parameterized schema
+	mock.ExpectQuery(`SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2`).
+		WithArgs("public", "orders").
 		WillReturnRows(orderCols)
 	// Views.
 	viewRows := pgxmock.NewRows([]string{"table_name"}).AddRow("myview")
-	// Expect exact SQL string
-	mock.ExpectQuery(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'VIEW'`).
+	// Expect exact SQL string with parameterized schema
+	mock.ExpectQuery(`SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'VIEW'`).
+		WithArgs("public").
 		WillReturnRows(viewRows)
 	// Columns for view "myview".
 	viewCols := pgxmock.NewRows([]string{"column_name", "data_type", "is_nullable", "column_default"}).
 		AddRow("vcol", "text", "YES", nil)
-	// Expect exact SQL string
-	mock.ExpectQuery(`SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1`).
-		WithArgs("myview").
+	// Expect exact SQL string with parameterized schema
+	mock.ExpectQuery(`SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2`).
+		WithArgs("public", "myview").
 		WillReturnRows(viewCols)
 	// RPC functions.
 	rpcRows := pgxmock.NewRows([]string{"routine_name", "specific_name", "data_type"}).
 		AddRow("fnTest", "fnTest", "integer")
-	// Expect exact SQL string
+	// Expect exact SQL string with parameterized schema
 	mock.ExpectQuery(`
 	SELECT r.routine_name, r.specific_name, r.data_type
 	FROM information_schema.routines r
 	JOIN pg_catalog.pg_proc p ON r.routine_name = p.proname
 	JOIN pg_catalog.pg_namespace n ON p.pronamespace = n.oid
 	LEFT JOIN pg_catalog.pg_depend dep ON dep.objid = p.oid AND dep.classid = 'pg_catalog.pg_proc'::regclass AND dep.deptype = 'e'
-	WHERE r.specific_schema = 'public'
-	  AND n.nspname = 'public' -- Ensure the schema matches in both catalogs
+	WHERE r.specific_schema = $1
+	  AND n.nspname = $2 -- Ensure the schema matches in both catalogs
 	  AND r.routine_type = 'FUNCTION'
 	  AND dep.objid IS NULL -- Only include functions NOT dependent on an extension
-	`).WillReturnRows(rpcRows)
+	`).WithArgs("public", "public").WillReturnRows(rpcRows)
 	paramRows := pgxmock.NewRows([]string{"parameter_name", "data_type", "parameter_mode", "ordinal_position"}).
 		AddRow("x", "integer", "IN", 1)
-	// Expect exact SQL string
-	mock.ExpectQuery(`SELECT parameter_name, data_type, parameter_mode, ordinal_position FROM information_schema.parameters WHERE specific_schema = 'public' AND specific_name = $1 ORDER BY ordinal_position`).
-		WithArgs("fnTest").
+	// Expect exact SQL string with parameterized schema
+	mock.ExpectQuery(`SELECT parameter_name, data_type, parameter_mode, ordinal_position FROM information_schema.parameters WHERE specific_schema = $1 AND specific_name = $2 ORDER BY ordinal_position`).
+		WithArgs("public", "fnTest").
 		WillReturnRows(paramRows)
 	mock.ExpectCommit()
 	schema, err := plugin.GetSchema(ctxData)
@@ -390,48 +393,49 @@ func TestTableCreateWithBulkOperations(t *testing.T) {
 
 func TestGetSchemaComprehensive(t *testing.T) {
 	plugin, mock := newTestPlugin(t)
+	plugin.searchPath = "public" // Set default search path for test
 	mock.ExpectBegin()
 	// Expect exact SQL string
 	mock.ExpectExec(`SELECT set_config($1, $2, true)`).WithArgs("request.user", "test_user").WillReturnResult(pgxmock.NewResult("SELECT", 1))
 	mock.ExpectExec(`SELECT set_config($1, $2, true)`).WithArgs("erctx.user", "test_user").WillReturnResult(pgxmock.NewResult("SELECT", 1))
 	// Mock tables query
 	tableRows := pgxmock.NewRows([]string{"table_name"}).AddRow("users").AddRow("products")
-	// Expect exact SQL string
-	mock.ExpectQuery(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`).WillReturnRows(tableRows)
+	// Expect exact SQL string with parameterized schema
+	mock.ExpectQuery(`SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE'`).WithArgs("public").WillReturnRows(tableRows)
 	// Mock columns query for users table
 	userColumns := pgxmock.NewRows([]string{"column_name", "data_type", "is_nullable", "column_default"}).AddRow("id", "integer", "NO", nil).AddRow("name", "character varying", "NO", nil).AddRow("created_at", "timestamp", "YES", "CURRENT_TIMESTAMP")
-	// Expect exact SQL string
-	mock.ExpectQuery(`SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1`).WithArgs("users").WillReturnRows(userColumns)
+	// Expect exact SQL string with parameterized schema
+	mock.ExpectQuery(`SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2`).WithArgs("public", "users").WillReturnRows(userColumns)
 	// Mock columns query for products table
 	productColumns := pgxmock.NewRows([]string{"column_name", "data_type", "is_nullable", "column_default"}).AddRow("id", "integer", "NO", nil).AddRow("name", "character varying", "NO", nil).AddRow("price", "numeric", "NO", nil)
-	// Expect exact SQL string
-	mock.ExpectQuery(`SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1`).WithArgs("products").WillReturnRows(productColumns)
+	// Expect exact SQL string with parameterized schema
+	mock.ExpectQuery(`SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2`).WithArgs("public", "products").WillReturnRows(productColumns)
 	// Mock views query
 	viewRows := pgxmock.NewRows([]string{"table_name"}).AddRow("user_stats")
-	// Expect exact SQL string - Note: Adjusted regex slightly if it was .*VIEW
-	mock.ExpectQuery(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'VIEW'`).WillReturnRows(viewRows)
+	// Expect exact SQL string with parameterized schema - Note: Adjusted regex slightly if it was .*VIEW
+	mock.ExpectQuery(`SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'VIEW'`).WithArgs("public").WillReturnRows(viewRows)
 	// Mock columns query for view
 	viewColumns := pgxmock.NewRows([]string{"column_name", "data_type", "is_nullable", "column_default"}).AddRow("user_id", "integer", "YES", nil).AddRow("total_orders", "bigint", "YES", nil)
-	// Expect exact SQL string
-	mock.ExpectQuery(`SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1`).WithArgs("user_stats").WillReturnRows(viewColumns)
+	// Expect exact SQL string with parameterized schema
+	mock.ExpectQuery(`SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2`).WithArgs("public", "user_stats").WillReturnRows(viewColumns)
 	// Mock functions query
 	functionRows := pgxmock.NewRows([]string{"routine_name", "specific_name", "data_type"}).AddRow("calculate_total", "calculate_total_123", "numeric")
-	// Expect exact SQL string
+	// Expect exact SQL string with parameterized schema
 	mock.ExpectQuery(`
 	SELECT r.routine_name, r.specific_name, r.data_type
 	FROM information_schema.routines r
 	JOIN pg_catalog.pg_proc p ON r.routine_name = p.proname
 	JOIN pg_catalog.pg_namespace n ON p.pronamespace = n.oid
 	LEFT JOIN pg_catalog.pg_depend dep ON dep.objid = p.oid AND dep.classid = 'pg_catalog.pg_proc'::regclass AND dep.deptype = 'e'
-	WHERE r.specific_schema = 'public'
-	  AND n.nspname = 'public' -- Ensure the schema matches in both catalogs
+	WHERE r.specific_schema = $1
+	  AND n.nspname = $2 -- Ensure the schema matches in both catalogs
 	  AND r.routine_type = 'FUNCTION'
 	  AND dep.objid IS NULL -- Only include functions NOT dependent on an extension
-	`).WillReturnRows(functionRows)
+	`).WithArgs("public", "public").WillReturnRows(functionRows)
 	// Mock function parameters query
 	paramRows := pgxmock.NewRows([]string{"parameter_name", "data_type", "parameter_mode", "ordinal_position"}).AddRow("user_id", "integer", "IN", 1).AddRow("start_date", "date", "IN", 2)
-	// Expect exact SQL string
-	mock.ExpectQuery(`SELECT parameter_name, data_type, parameter_mode, ordinal_position FROM information_schema.parameters WHERE specific_schema = 'public' AND specific_name = $1 ORDER BY ordinal_position`).WithArgs("calculate_total_123").WillReturnRows(paramRows)
+	// Expect exact SQL string with parameterized schema
+	mock.ExpectQuery(`SELECT parameter_name, data_type, parameter_mode, ordinal_position FROM information_schema.parameters WHERE specific_schema = $1 AND specific_name = $2 ORDER BY ordinal_position`).WithArgs("public", "calculate_total_123").WillReturnRows(paramRows)
 	mock.ExpectCommit()
 	schema, err := plugin.GetSchema(map[string]any{"user": "test_user"})
 	if err != nil {
@@ -668,7 +672,7 @@ func TestPgCachePluginExpiration(t *testing.T) {
 
 func TestParseConnectionParams_Defaults(t *testing.T) {
 	uri := "postgres://user:pass@host:5432/db"
-	dsn, maxConns, minConns, maxLifetime, maxIdleTime, timeout, bulkThreshold, autoCleanup, err := parseConnectionParams(uri)
+	dsn, maxConns, minConns, maxLifetime, maxIdleTime, timeout, bulkThreshold, autoCleanup, searchPath, err := parseConnectionParams(uri)
 
 	require.NoError(t, err)
 	assert.Equal(t, uri, dsn) // DSN should be unchanged as no params were removed
@@ -679,12 +683,13 @@ func TestParseConnectionParams_Defaults(t *testing.T) {
 	assert.Equal(t, 30*time.Second, timeout)
 	assert.Equal(t, 100, bulkThreshold)
 	assert.Equal(t, "", autoCleanup)
+	assert.Equal(t, "public", searchPath) // Default value
 }
 
 func TestParseConnectionParams_CustomValues(t *testing.T) {
 	uri := "postgres://user:pass@host:5432/db?maxOpenConns=50&maxIdleConns=10&connMaxLifetime=15&connMaxIdleTime=20&timeout=60&bulkThreshold=500&autoCleanup=true"
 	expectedDSN := "postgres://user:pass@host:5432/db" // Params should be removed
-	dsn, maxConns, minConns, maxLifetime, maxIdleTime, timeout, bulkThreshold, autoCleanup, err := parseConnectionParams(uri)
+	dsn, maxConns, minConns, maxLifetime, maxIdleTime, timeout, bulkThreshold, autoCleanup, searchPath, err := parseConnectionParams(uri)
 
 	require.NoError(t, err)
 	assert.Equal(t, expectedDSN, dsn)
@@ -695,12 +700,13 @@ func TestParseConnectionParams_CustomValues(t *testing.T) {
 	assert.Equal(t, 60*time.Second, timeout)
 	assert.Equal(t, 500, bulkThreshold)
 	assert.Equal(t, "true", autoCleanup)
+	assert.Equal(t, "public", searchPath) // Default value
 }
 
 func TestParseConnectionParams_OnlySomeValues(t *testing.T) {
 	uri := "postgres://user:pass@host:5432/db?maxOpenConns=75&timeout=45"
 	expectedDSN := "postgres://user:pass@host:5432/db"
-	dsn, maxConns, minConns, maxLifetime, maxIdleTime, timeout, bulkThreshold, autoCleanup, err := parseConnectionParams(uri)
+	dsn, maxConns, minConns, maxLifetime, maxIdleTime, timeout, bulkThreshold, autoCleanup, searchPath, err := parseConnectionParams(uri)
 
 	require.NoError(t, err)
 	assert.Equal(t, expectedDSN, dsn)
@@ -711,6 +717,7 @@ func TestParseConnectionParams_OnlySomeValues(t *testing.T) {
 	assert.Equal(t, 45*time.Second, timeout)     // Custom
 	assert.Equal(t, 100, bulkThreshold)          // Default
 	assert.Equal(t, "", autoCleanup)             // Default
+	assert.Equal(t, "public", searchPath)        // Default
 }
 
 func TestParseConnectionParams_InvalidValues(t *testing.T) {
@@ -731,7 +738,7 @@ func TestParseConnectionParams_InvalidValues(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, _, _, _, _, _, _, err := parseConnectionParams(tc.uri)
+			_, _, _, _, _, _, _, _, _, err := parseConnectionParams(tc.uri)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantErr)
 		})
@@ -742,7 +749,7 @@ func TestParseConnectionParams_DSNEncoding(t *testing.T) {
 	uri := "postgres://user%20name:p@ssw%2Frd@host:5432/db%20name?maxOpenConns=50&other=param"
 	// Correct expected DSN with @ encoded as %40
 	expectedDSN := "postgres://user%20name:p%40ssw%2Frd@host:5432/db%20name?other=param"
-	dsn, _, _, _, _, _, _, _, err := parseConnectionParams(uri)
+	dsn, _, _, _, _, _, _, _, _, err := parseConnectionParams(uri)
 	require.NoError(t, err)
 	assert.Equal(t, expectedDSN, dsn)
 }
@@ -761,5 +768,110 @@ func TestDeleteExpiredCacheEntries(t *testing.T) {
 	require.NoError(t, err)
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unfulfilled expectations in TestDeleteExpiredCacheEntries: %s", err)
+	}
+}
+
+func TestParseConnectionParams_CustomSearchPath(t *testing.T) {
+	uri := "postgres://user:pass@host:5432/db?search_path=custom_schema&maxOpenConns=50"
+	expectedDSN := "postgres://user:pass@host:5432/db?search_path=custom_schema" // Both search_path and maxOpenConns should be removed
+	dsn, maxConns, minConns, maxLifetime, maxIdleTime, timeout, bulkThreshold, autoCleanup, searchPath, err := parseConnectionParams(uri)
+
+	require.NoError(t, err)
+	assert.Equal(t, expectedDSN, dsn)
+	assert.Equal(t, int32(50), maxConns)         // Custom
+	assert.Equal(t, int32(25), minConns)         // Default
+	assert.Equal(t, 5*time.Minute, maxLifetime)  // Default
+	assert.Equal(t, 10*time.Minute, maxIdleTime) // Default
+	assert.Equal(t, 30*time.Second, timeout)     // Default
+	assert.Equal(t, 100, bulkThreshold)          // Default
+	assert.Equal(t, "", autoCleanup)             // Default
+	assert.Equal(t, "custom_schema", searchPath) // Custom value
+}
+
+func TestGetSchemaWithCustomSearchPath(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	plugin.searchPath = "my_schema" // Set custom search path for test
+	ctxData := map[string]any{"timezone": "UTC"}
+	mock.ExpectBegin()
+	// Expect exact SQL string
+	mock.ExpectExec(`SELECT set_config($1, $2, true)`).
+		WithArgs("request.timezone", "UTC").
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectExec(`SELECT set_config($1, $2, true)`).
+		WithArgs("erctx.timezone", "UTC").
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	// Base tables.
+	tableRows := pgxmock.NewRows([]string{"table_name"}).AddRow("users").AddRow("orders")
+	// Expect exact SQL string with custom schema
+	mock.ExpectQuery(`SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE'`).
+		WithArgs("my_schema").
+		WillReturnRows(tableRows)
+	// Columns for "users".
+	userCols := pgxmock.NewRows([]string{"column_name", "data_type", "is_nullable", "column_default"}).
+		AddRow("id", "integer", "NO", nil).
+		AddRow("name", "character varying", "YES", nil)
+	// Expect exact SQL string with custom schema
+	mock.ExpectQuery(`SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2`).
+		WithArgs("my_schema", "users").
+		WillReturnRows(userCols)
+	// Columns for "orders".
+	orderCols := pgxmock.NewRows([]string{"column_name", "data_type", "is_nullable", "column_default"}).
+		AddRow("id", "integer", "NO", nil).
+		AddRow("amount", "numeric", "YES", nil)
+	// Expect exact SQL string with custom schema
+	mock.ExpectQuery(`SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2`).
+		WithArgs("my_schema", "orders").
+		WillReturnRows(orderCols)
+	// Views.
+	viewRows := pgxmock.NewRows([]string{"table_name"}).AddRow("myview")
+	// Expect exact SQL string with custom schema
+	mock.ExpectQuery(`SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'VIEW'`).
+		WithArgs("my_schema").
+		WillReturnRows(viewRows)
+	// Columns for view "myview".
+	viewCols := pgxmock.NewRows([]string{"column_name", "data_type", "is_nullable", "column_default"}).
+		AddRow("vcol", "text", "YES", nil)
+	// Expect exact SQL string with custom schema
+	mock.ExpectQuery(`SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2`).
+		WithArgs("my_schema", "myview").
+		WillReturnRows(viewCols)
+	// RPC functions.
+	rpcRows := pgxmock.NewRows([]string{"routine_name", "specific_name", "data_type"}).
+		AddRow("fnTest", "fnTest", "integer")
+	// Expect exact SQL string with custom schema
+	mock.ExpectQuery(`
+	SELECT r.routine_name, r.specific_name, r.data_type
+	FROM information_schema.routines r
+	JOIN pg_catalog.pg_proc p ON r.routine_name = p.proname
+	JOIN pg_catalog.pg_namespace n ON p.pronamespace = n.oid
+	LEFT JOIN pg_catalog.pg_depend dep ON dep.objid = p.oid AND dep.classid = 'pg_catalog.pg_proc'::regclass AND dep.deptype = 'e'
+	WHERE r.specific_schema = $1
+	  AND n.nspname = $2 -- Ensure the schema matches in both catalogs
+	  AND r.routine_type = 'FUNCTION'
+	  AND dep.objid IS NULL -- Only include functions NOT dependent on an extension
+	`).WithArgs("my_schema", "my_schema").WillReturnRows(rpcRows)
+	paramRows := pgxmock.NewRows([]string{"parameter_name", "data_type", "parameter_mode", "ordinal_position"}).
+		AddRow("x", "integer", "IN", 1)
+	// Expect exact SQL string with custom schema
+	mock.ExpectQuery(`SELECT parameter_name, data_type, parameter_mode, ordinal_position FROM information_schema.parameters WHERE specific_schema = $1 AND specific_name = $2 ORDER BY ordinal_position`).
+		WithArgs("my_schema", "fnTest").
+		WillReturnRows(paramRows)
+	mock.ExpectCommit()
+	schema, err := plugin.GetSchema(ctxData)
+	if err != nil {
+		t.Fatalf("GetSchema error: %v", err)
+	}
+	js, _ := json.MarshalIndent(schema, "", "  ")
+	if !strings.Contains(string(js), `"tables"`) {
+		t.Errorf("expected 'tables' key, got: %s", js)
+	}
+	if !strings.Contains(string(js), `"views"`) {
+		t.Errorf("expected 'views' key, got: %s", js)
+	}
+	if !strings.Contains(string(js), `"rpc"`) {
+		t.Errorf("expected 'rpc' key, got: %s", js)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled expectations in TestGetSchemaWithCustomSearchPath: %v", err)
 	}
 }

@@ -39,6 +39,7 @@ type pgPlugin struct {
 	defaultTimeout time.Duration             // Default timeout for operations
 	bulkThreshold  int                       // Threshold for bulk operations
 	timezoneCache  map[string]*time.Location // Cache for loaded timezones
+	searchPath     string                    // Schema search path
 }
 
 // newContextWithTimeout creates a new context with timeout
@@ -51,7 +52,7 @@ func (p *pgPlugin) newContextWithTimeout() (context.Context, context.CancelFunc)
 
 // parseConnectionParams extracts plugin-specific parameters from the URI query,
 // returning the base DSN and parsed values.
-func parseConnectionParams(uri string) (dsn string, maxConns int32, minConns int32, maxLifetime, maxIdleTime time.Duration, timeout time.Duration, bulkThreshold int, autoCleanup string, err error) {
+func parseConnectionParams(uri string) (dsn string, maxConns int32, minConns int32, maxLifetime, maxIdleTime time.Duration, timeout time.Duration, bulkThreshold int, autoCleanup string, searchPath string, err error) {
 	if !strings.HasPrefix(uri, "postgres://") {
 		err = errors.New("invalid postgres URI")
 		return
@@ -108,6 +109,12 @@ func parseConnectionParams(uri string) (dsn string, maxConns int32, minConns int
 	autoCleanup = queryParams.Get("autoCleanup")
 	queryParams.Del("autoCleanup") // Remove even if empty
 
+	// Get search_path (string)
+	searchPath = queryParams.Get("search_path")
+	if searchPath == "" {
+		searchPath = "public" // Default to public schema
+	}
+
 	// Re-encode URI to form the base DSN
 	parsedURI.RawQuery = queryParams.Encode()
 	dsn = parsedURI.String()
@@ -125,7 +132,7 @@ func parseConnectionParams(uri string) (dsn string, maxConns int32, minConns int
 
 // InitConnection opens a PostgreSQL connection using a URI with the prefix "postgres://".
 func (p *pgPlugin) InitConnection(uri string) error {
-	dsn, maxConns, minConns, maxLifetime, maxIdleTime, timeout, bulkThreshold, _, err := parseConnectionParams(uri)
+	dsn, maxConns, minConns, maxLifetime, maxIdleTime, timeout, bulkThreshold, _, searchPath, err := parseConnectionParams(uri)
 	if err != nil {
 		// Propagate parsing errors
 		return err
@@ -151,6 +158,7 @@ func (p *pgPlugin) InitConnection(uri string) error {
 	// Assign plugin settings
 	p.defaultTimeout = timeout
 	p.bulkThreshold = bulkThreshold
+	p.searchPath = searchPath
 
 	// Ping the database to verify connection
 	pingCtx, cancel := context.WithTimeout(bgCtx, 5*time.Second) // Use a short ping timeout
@@ -797,9 +805,14 @@ func convertPlaceholders(query string) string {
 
 // getTablesSchema builds a schema for each base table from information_schema.
 func (p *pgPlugin) getTablesSchema(tx pgx.Tx) (map[string]any, error) {
+	searchPath := p.searchPath
+	if searchPath == "" {
+		searchPath = "public" // Default fallback
+	}
+
 	result := make(map[string]any)
-	tableQuery := "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'"
-	rows, err := tx.Query(bgCtx, tableQuery)
+	tableQuery := "SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE'"
+	rows, err := tx.Query(bgCtx, tableQuery, searchPath)
 	if err != nil {
 		return nil, err
 	}
@@ -817,8 +830,8 @@ func (p *pgPlugin) getTablesSchema(tx pgx.Tx) (map[string]any, error) {
 	}
 	rows.Close()
 	for _, tn := range tableNames {
-		colQuery := "SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1"
-		colRows, err := tx.Query(bgCtx, colQuery, tn)
+		colQuery := "SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2"
+		colRows, err := tx.Query(bgCtx, colQuery, searchPath, tn)
 		if err != nil {
 			return nil, err
 		}
@@ -858,9 +871,14 @@ func (p *pgPlugin) getTablesSchema(tx pgx.Tx) (map[string]any, error) {
 
 // getViewsSchema builds a schema for each view from information_schema.
 func (p *pgPlugin) getViewsSchema(tx pgx.Tx) (map[string]any, error) {
+	searchPath := p.searchPath
+	if searchPath == "" {
+		searchPath = "public" // Default fallback
+	}
+
 	result := make(map[string]any)
-	query := "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'VIEW'"
-	rows, err := tx.Query(bgCtx, query)
+	query := "SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'VIEW'"
+	rows, err := tx.Query(bgCtx, query, searchPath)
 	if err != nil {
 		return nil, err
 	}
@@ -875,8 +893,8 @@ func (p *pgPlugin) getViewsSchema(tx pgx.Tx) (map[string]any, error) {
 	}
 	rows.Close()
 	for _, vn := range viewNames {
-		colQuery := "SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1"
-		colRows, err := tx.Query(bgCtx, colQuery, vn)
+		colQuery := "SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2"
+		colRows, err := tx.Query(bgCtx, colQuery, searchPath, vn)
 		if err != nil {
 			return nil, err
 		}
@@ -916,6 +934,11 @@ func (p *pgPlugin) getViewsSchema(tx pgx.Tx) (map[string]any, error) {
 
 // getRPCSchema builds schemas for stored functions.
 func (p *pgPlugin) getRPCSchema(tx pgx.Tx) (map[string]any, error) {
+	searchPath := p.searchPath
+	if searchPath == "" {
+		searchPath = "public" // Default fallback
+	}
+
 	result := make(map[string]any)
 	// Exclude functions belonging to extensions by checking pg_depend
 	rpcQuery := `
@@ -924,12 +947,12 @@ func (p *pgPlugin) getRPCSchema(tx pgx.Tx) (map[string]any, error) {
 	JOIN pg_catalog.pg_proc p ON r.routine_name = p.proname
 	JOIN pg_catalog.pg_namespace n ON p.pronamespace = n.oid
 	LEFT JOIN pg_catalog.pg_depend dep ON dep.objid = p.oid AND dep.classid = 'pg_catalog.pg_proc'::regclass AND dep.deptype = 'e'
-	WHERE r.specific_schema = 'public'
-	  AND n.nspname = 'public' -- Ensure the schema matches in both catalogs
+	WHERE r.specific_schema = $1
+	  AND n.nspname = $2 -- Ensure the schema matches in both catalogs
 	  AND r.routine_type = 'FUNCTION'
 	  AND dep.objid IS NULL -- Only include functions NOT dependent on an extension
 	`
-	rows, err := tx.Query(bgCtx, rpcQuery)
+	rows, err := tx.Query(bgCtx, rpcQuery, searchPath, searchPath)
 	if err != nil {
 		return nil, err
 	}
@@ -952,8 +975,8 @@ func (p *pgPlugin) getRPCSchema(tx pgx.Tx) (map[string]any, error) {
 	}
 	rows.Close()
 	for _, r := range routines {
-		paramQuery := "SELECT parameter_name, data_type, parameter_mode, ordinal_position FROM information_schema.parameters WHERE specific_schema = 'public' AND specific_name = $1 ORDER BY ordinal_position"
-		paramRows, err := tx.Query(bgCtx, paramQuery, r.specificName)
+		paramQuery := "SELECT parameter_name, data_type, parameter_mode, ordinal_position FROM information_schema.parameters WHERE specific_schema = $1 AND specific_name = $2 ORDER BY ordinal_position"
+		paramRows, err := tx.Query(bgCtx, paramQuery, searchPath, r.specificName)
 		if err != nil {
 			return nil, err
 		}
@@ -1073,7 +1096,7 @@ type pgCachePlugin struct {
 // by the plugin framework to establish the database connection.
 func (p *pgCachePlugin) InitConnection(uri string) error {
 	// Parse params to get autoCleanup and the base DSN for the main plugin
-	dsn, _, _, _, _, _, _, autoCleanup, err := parseConnectionParams(uri)
+	dsn, _, _, _, _, _, _, autoCleanup, _, err := parseConnectionParams(uri)
 	if err != nil {
 		return fmt.Errorf("failed to parse URI for cache: %w", err)
 	}
