@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/gorilla/mux"
 	_ "modernc.org/sqlite"
 
 	"github.com/onegreyonewhite/easyrest/internal/config"
@@ -62,7 +62,7 @@ func insertUser(t *testing.T, dbPath, name, updateField string) int {
 }
 
 // setupServerWithDB sets up a test server with the given database.
-func setupServerWithDB(t *testing.T, dbPath string) *mux.Router {
+func setupServerWithDB(t *testing.T, dbPath string) chi.Router {
 	t.Helper()
 	os.Setenv("ER_DB_TEST", "sqlite://"+dbPath)
 	os.Setenv("ER_CACHE_ENABLE_TEST", "1")

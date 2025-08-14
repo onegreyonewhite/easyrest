@@ -18,8 +18,9 @@ import (
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/gorilla/mux"
 	"github.com/onegreyonewhite/easyrest/internal/config"
 	cachepkg "github.com/patrickmn/go-cache"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -40,8 +41,7 @@ const TokenClaimsKey contextKey = "tokenClaims"
 // BuildPluginContext extracts context variables from the HTTP request.
 func BuildPluginContext(r *http.Request) map[string]any {
 	cfg := GetConfig()
-	vars := mux.Vars(r)
-	dbKey := vars["db"]
+	dbKey := chi.URLParam(r, "db")
 	dbConfig := cfg.PluginMap[dbKey]
 	headers := make(map[string]any)
 	for k, vals := range r.Header {
@@ -200,13 +200,16 @@ func proxyHeadersHandler(next http.Handler) http.Handler {
 // corsMiddleware handles CORS headers based on configuration
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cfg := GetConfig()
 		origin := r.Header.Get("Origin")
 		if origin == "" {
 			next.ServeHTTP(w, r)
 			return
+		} else if len(origin) > 1024 {
+			w.WriteHeader(http.StatusForbidden)
+			return
 		}
 
+		cfg := GetConfig()
 		// Check if origin is allowed
 		allowed := false
 		for _, allowedOrigin := range cfg.CORS.Origins {
@@ -240,7 +243,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // SetupRouter initializes the router and endpoints.
-func SetupRouter() *mux.Router {
+func SetupRouter() chi.Router {
 	cfg := GetConfig()
 	// Initialize claims cache with default expiration and cleanup interval
 	if claimsCache == nil && cfg.TokenCacheTTL >= 0 {
@@ -249,7 +252,7 @@ func SetupRouter() *mux.Router {
 		claimsCache = cachepkg.New(defaultExpiration, cleanupInterval)
 	}
 	LoadPlugins()
-	r := mux.NewRouter()
+	r := chi.NewRouter()
 
 	// Add CORS middleware first
 	if cfg.CORS.Enabled {
@@ -259,14 +262,17 @@ func SetupRouter() *mux.Router {
 	// Add proxy headers handler
 	r.Use(proxyHeadersHandler)
 
+	r.Use(middleware.GetHead)
+	r.Use(middleware.Recoverer)
+
 	// Schema endpoint.
-	r.HandleFunc("/api/{db}/", schemaHandler).Methods("GET")
+	r.Get("/api/{db}/", schemaHandler)
 	// Call RPC function endpoint.
-	r.HandleFunc("/api/{db}/rpc/{func}/", rpcHandler).Methods("POST")
-	// Call table endpoint.
+	r.Post("/api/{db}/rpc/{func}/", rpcHandler)
+	// Call table endpoint (supports multiple methods inside handler).
 	r.HandleFunc("/api/{db}/{table}/", tableHandler)
 	// Add health check endpoint.
-	r.HandleFunc("/health", healthHandler).Methods("GET")
+	r.Get("/health", healthHandler)
 	return r
 }
 
@@ -309,19 +315,18 @@ func Run(conf config.Config) {
 		}
 	}
 	router := SetupRouter()
+	var handler http.Handler = router
 	if conf.AccessLogOn {
-		router.Use(AccessLogMiddleware)
+		handler = AccessLogMiddleware(handler)
 	}
 	if otelShutdown != nil {
-		router.Use(func(next http.Handler) http.Handler {
-			return otelhttp.NewHandler(next, "server-request")
-		})
+		handler = otelhttp.NewHandler(handler, "server-request")
 	}
 
 	// Create server with optimized settings
 	srv := &http.Server{
 		Addr:              ":" + conf.Port,
-		Handler:           router,
+		Handler:           handler,
 		ReadTimeout:       conf.Server.ReadTimeout,
 		WriteTimeout:      conf.Server.WriteTimeout,
 		IdleTimeout:       conf.Server.IdleTimeout,
@@ -370,7 +375,7 @@ func Run(conf config.Config) {
 			}
 		} else {
 			stdlog.Printf("Server listening on port %s...", conf.Port)
-			srv.Handler = h2c.NewHandler(router, h2s)
+			srv.Handler = h2c.NewHandler(handler, h2s)
 			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				stdlog.Fatalf("Server error: %v", err)
 			}

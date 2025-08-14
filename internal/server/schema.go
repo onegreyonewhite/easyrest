@@ -9,7 +9,7 @@ import (
 
 	"maps"
 
-	"github.com/gorilla/mux"
+	"github.com/go-chi/chi/v5"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
 
@@ -155,7 +155,7 @@ func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs, viewDefs, rpcDef
 				continue
 			}
 			// Apply AllowList filter if defined and not empty
-			if pluginCfg.AllowList.Func != nil && len(pluginCfg.AllowList.Func) > 0 {
+			if len(pluginCfg.AllowList.Func) > 0 {
 				if !slices.Contains(pluginCfg.AllowList.Func, funcName) {
 					continue
 				}
@@ -418,8 +418,7 @@ func buildDELETEEndpoint(name string, properties map[string]any) *Operation {
 
 // schemaHandler now builds and returns a full swagger 2.0 spec.
 func schemaHandler(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	dbKey := strings.ToLower(vars["db"])
+	dbKey := strings.ToLower(chi.URLParam(r, "db"))
 
 	// Get current plugins map
 	currentDbPlugins := *DbPlugins.Load()

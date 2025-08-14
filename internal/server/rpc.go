@@ -8,15 +8,14 @@ import (
 
 	stdlog "log" // Added for logging cache invalidation errors
 
-	"github.com/gorilla/mux"
+	"github.com/go-chi/chi/v5"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
 
 // rpcHandler processes RPC calls to plugin functions.
 func rpcHandler(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	dbKey := strings.ToLower(vars["db"])
-	funcName := vars["func"]
+	dbKey := strings.ToLower(chi.URLParam(r, "db"))
+	funcName := chi.URLParam(r, "func")
 
 	if err := sanitizeIdentifier(funcName); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)

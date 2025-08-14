@@ -9,7 +9,7 @@ import (
 
 	"slices"
 
-	"github.com/gorilla/mux"
+	"github.com/go-chi/chi/v5"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
 
@@ -180,9 +180,8 @@ func ParseWhereClause(values map[string][]string, flatCtx map[string]string, plu
 
 // tableHandler processes CRUD operations on tables.
 func tableHandler(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	dbKey := strings.ToLower(vars["db"])
-	table := vars["table"]
+	dbKey := strings.ToLower(chi.URLParam(r, "db"))
+	table := chi.URLParam(r, "table")
 
 	if err := sanitizeIdentifier(table); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
