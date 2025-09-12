@@ -7,7 +7,6 @@ import (
 	hplugin "github.com/hashicorp/go-plugin"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 	postgresPlugin "github.com/onegreyonewhite/easyrest/plugins/data/postgres"
-	_ "go.uber.org/automaxprocs"
 )
 
 func main() {

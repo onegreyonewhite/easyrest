@@ -3,8 +3,6 @@ package main
 import (
 	"github.com/onegreyonewhite/easyrest/internal/cli"
 	"github.com/onegreyonewhite/easyrest/internal/server"
-
-	_ "go.uber.org/automaxprocs"
 )
 
 func main() {

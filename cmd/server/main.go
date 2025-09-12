@@ -13,7 +13,6 @@ import (
 	postgresPlugin "github.com/onegreyonewhite/easyrest/plugins/data/postgres"
 	redisPlugin "github.com/onegreyonewhite/easyrest/plugins/data/redis"
 	sqlitePlugin "github.com/onegreyonewhite/easyrest/plugins/data/sqlite"
-	_ "go.uber.org/automaxprocs"
 )
 
 func main() {
