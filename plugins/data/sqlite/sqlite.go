@@ -481,9 +481,10 @@ func (s *sqlitePlugin) GetSchema(ctx map[string]any) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		if typ == "table" {
+		switch typ {
+		case "table":
 			tables[name] = schema
-		} else if typ == "view" {
+		case "view":
 			views[name] = schema
 		}
 	}
