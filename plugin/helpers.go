@@ -3,6 +3,7 @@ package plugin
 import (
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -16,6 +17,7 @@ type whereCondEntry struct {
 // buildWhereCondEntries processes the where map and returns a slice of whereCondEntry.
 func buildWhereCondEntries(where map[string]any) []whereCondEntry {
 	entries := make([]whereCondEntry, 0, len(where))
+	var sb strings.Builder
 
 	addEntry := func(cond string, args []any, sortKey string) {
 		entries = append(entries, whereCondEntry{
@@ -30,7 +32,7 @@ func buildWhereCondEntries(where map[string]any) []whereCondEntry {
 		baseField := field
 		if strings.HasPrefix(field, "NOT ") {
 			isNot = true
-			baseField = strings.TrimPrefix(field, "NOT ")
+			baseField = field[4:]
 		}
 		switch v := val.(type) {
 		case map[string]any:
@@ -44,40 +46,64 @@ func buildWhereCondEntries(where map[string]any) []whereCondEntry {
 							arr = slices.Delete(arr, i, i+1)
 						}
 					}
-					placeholders := make([]string, len(arr))
-					for i := range arr {
-						placeholders[i] = "?"
+					sb.Reset()
+					if isNot {
+						sb.WriteString("NOT (")
 					}
-					inVals := make([]any, len(arr))
-					for i, val := range arr {
-						inVals[i] = val
-					}
+					sb.WriteString(baseField)
 					if len(arr) == 0 {
+						sb.WriteString(" IN (NULL)")
 						if isNot {
-							addEntry(fmt.Sprintf("NOT (%s IN (NULL))", baseField), nil, field+"|IN")
-						} else {
-							addEntry(fmt.Sprintf("%s IN (NULL)", baseField), nil, field+"|IN")
+							sb.WriteByte(')')
 						}
+						addEntry(sb.String(), nil, field+"|IN")
 					} else {
-						if isNot {
-							addEntry(fmt.Sprintf("NOT (%s IN (%s))", baseField, strings.Join(placeholders, ",")), inVals, field+"|IN")
-						} else {
-							addEntry(fmt.Sprintf("%s IN (%s)", baseField, strings.Join(placeholders, ",")), inVals, field+"|IN")
+						sb.WriteString(" IN (")
+						for i := range arr {
+							if i > 0 {
+								sb.WriteByte(',')
+							}
+							sb.WriteByte('?')
 						}
+						sb.WriteByte(')')
+						if isNot {
+							sb.WriteByte(')')
+						}
+						inVals := make([]any, len(arr))
+						for i, val := range arr {
+							inVals[i] = val
+						}
+						addEntry(sb.String(), inVals, field+"|IN")
 					}
 				} else {
+					sb.Reset()
 					if isNot {
-						addEntry(fmt.Sprintf("NOT (%s %s ?)", baseField, op), []any{operand}, field+"|NOT "+op)
+						sb.WriteString("NOT (")
+						sb.WriteString(baseField)
+						sb.WriteByte(' ')
+						sb.WriteString(op)
+						sb.WriteString(" ?)")
+						addEntry(sb.String(), []any{operand}, field+"|NOT "+op)
 					} else {
-						addEntry(fmt.Sprintf("%s %s ?", baseField, op), []any{operand}, field+"|"+op)
+						sb.WriteString(baseField)
+						sb.WriteByte(' ')
+						sb.WriteString(op)
+						sb.WriteString(" ?")
+						addEntry(sb.String(), []any{operand}, field+"|"+op)
 					}
 				}
 			}
 		default:
+			sb.Reset()
 			if isNot {
-				addEntry(fmt.Sprintf("NOT (%s = ?)", baseField), []any{v}, field+"|NOT =")
+				sb.WriteString("NOT (")
+				sb.WriteString(baseField)
+				sb.WriteString(" = ?)")
+				addEntry(sb.String(), []any{v}, field+"|NOT =")
 			} else {
-				addEntry(fmt.Sprintf("%s = ?", baseField), []any{v}, field+"|=")
+				sb.WriteString(baseField)
+				sb.WriteString(" = ?")
+				addEntry(sb.String(), []any{v}, field+"|=")
 			}
 		}
 	}
@@ -138,6 +164,12 @@ func BuildWhereClauseSorted(where map[string]any) (string, []any, error) {
 // It replaces dots and dashes with underscores and converts keys to lowercase.
 // For arrays, it uses the index as part of the key.
 // It also validates that the final values do not contain dangerous characters.
+var keyNormalizer = strings.NewReplacer(".", "_", "-", "_")
+
+func normalizeKey(k string) string {
+	return strings.ToLower(keyNormalizer.Replace(k))
+}
+
 func FormatToContext(input map[string]any) (map[string]string, error) {
 	output := make(map[string]string, len(input))
 	var flatten func(prefix string, val any) error
@@ -145,13 +177,12 @@ func FormatToContext(input map[string]any) (map[string]string, error) {
 		switch v := val.(type) {
 		case map[string]any:
 			for k, v2 := range v {
-				var keyBuilder strings.Builder
-				keyBuilder.WriteString(strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(k, ".", "_"), "-", "_")))
+				nk := normalizeKey(k)
 				var newPrefix string
 				if prefix == "" {
-					newPrefix = keyBuilder.String()
+					newPrefix = nk
 				} else {
-					newPrefix = prefix + "_" + keyBuilder.String()
+					newPrefix = prefix + "_" + nk
 				}
 				if err := flatten(newPrefix, v2); err != nil {
 					return err
@@ -159,13 +190,23 @@ func FormatToContext(input map[string]any) (map[string]string, error) {
 			}
 		case []any:
 			for i, item := range v {
-				newPrefix := fmt.Sprintf("%s_%d", prefix, i)
+				newPrefix := prefix + "_" + strconv.Itoa(i)
 				if err := flatten(newPrefix, item); err != nil {
 					return err
 				}
 			}
 		default:
-			s := fmt.Sprintf("%v", v)
+			var s string
+			switch vv := v.(type) {
+			case string:
+				s = vv
+			case float64:
+				s = strconv.FormatFloat(vv, 'f', -1, 64)
+			case bool:
+				s = strconv.FormatBool(vv)
+			default:
+				s = fmt.Sprintf("%v", vv)
+			}
 			if !(strings.Contains(s, ";") || strings.Contains(s, "--")) {
 				output[prefix] = s
 			}
@@ -173,9 +214,8 @@ func FormatToContext(input map[string]any) (map[string]string, error) {
 		return nil
 	}
 	for k, v := range input {
-		var keyBuilder strings.Builder
-		keyBuilder.WriteString(strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(k, ".", "_"), "-", "_")))
-		if err := flatten(keyBuilder.String(), v); err != nil {
+		nk := normalizeKey(k)
+		if err := flatten(nk, v); err != nil {
 			return nil, err
 		}
 	}

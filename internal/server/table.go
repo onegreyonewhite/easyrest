@@ -253,21 +253,18 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 	var etagKey string
 
 	if cachePlugin != nil {
-		etagKey = fmt.Sprintf("etag:%s:%s", dbKey, table)
+		etagKey = "etag:" + dbKey + ":" + table
 		ifMatch := r.Header.Get("If-Match")
 		ifNoneMatch := r.Header.Get("If-None-Match")
-		cachePlugin = getFirstCachePlugin(dbKey)
 
 		// Only get cache plugin and ETag if cache is enabled AND relevant headers are present/needed
 		if ifMatch != "" || ifNoneMatch != "" || r.Method == http.MethodGet || r.Method == http.MethodHead {
-			if cachePlugin != nil {
-				currentETag = getOrGenerateETag(cachePlugin, etagKey)
-			}
+			currentETag = getOrGenerateETag(cachePlugin, etagKey)
 		}
 
 		// Check If-None-Match for GET/HEAD requests (only if cache is enabled)
 		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && ifNoneMatch != "" {
-			if cachePlugin != nil && ifNoneMatch == currentETag {
+			if ifNoneMatch == currentETag {
 				w.Header().Set("ETag", currentETag)
 				w.WriteHeader(http.StatusNotModified)
 				return
@@ -276,7 +273,7 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 
 		// Check If-Match for write operations (POST, PATCH, DELETE) (only if cache is enabled)
 		if (r.Method == http.MethodPost || r.Method == http.MethodPatch || r.Method == http.MethodDelete) && ifMatch != "" {
-			if cachePlugin == nil || ifMatch != currentETag {
+			if ifMatch != currentETag {
 				w.WriteHeader(http.StatusPreconditionFailed)
 				return
 			}
@@ -361,7 +358,7 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 		rows, err := dbPlug.TableGet(userID, table, selectFields, where, ordering, groupBy, limit, offset, pluginCtx)
 		queryTime := time.Since(startTime)
 
-		w.Header().Set("Server-Timing", fmt.Sprintf("db;dur=%.3f", float64(queryTime.Milliseconds())))
+		w.Header().Set("Server-Timing", "db;dur="+strconv.FormatFloat(float64(queryTime.Milliseconds()), 'f', 3, 64))
 
 		if err != nil {
 			http.Error(w, "Error in TableGet: "+err.Error(), http.StatusInternalServerError)
@@ -393,7 +390,7 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			rows = []map[string]any{} // always return [] for JSON
 		}
-		w.Header().Set("Content-Range", fmt.Sprintf("%d-%d/*", startIdx, endIdx))
+		w.Header().Set("Content-Range", strconv.Itoa(startIdx)+"-"+strconv.Itoa(endIdx)+"/*")
 		w.Header().Set("Range-Unit", "items")
 		w.Header().Set("Accept-Ranges", "items")
 
@@ -418,7 +415,7 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 		startTime := time.Now()
 		rows, err := dbPlug.TableCreate(userID, table, data, pluginCtx)
 		queryTime := time.Since(startTime)
-		w.Header().Set("Server-Timing", fmt.Sprintf("db;dur=%.3f", float64(queryTime.Milliseconds())))
+		w.Header().Set("Server-Timing", "db;dur="+strconv.FormatFloat(float64(queryTime.Milliseconds()), 'f', 3, 64))
 		if err != nil {
 			http.Error(w, "Error in TableCreate: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -453,7 +450,7 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 		startTime := time.Now()
 		updated, err := dbPlug.TableUpdate(userID, table, data, where, pluginCtx)
 		queryTime := time.Since(startTime)
-		w.Header().Set("Server-Timing", fmt.Sprintf("db;dur=%.3f", float64(queryTime.Milliseconds())))
+		w.Header().Set("Server-Timing", "db;dur="+strconv.FormatFloat(float64(queryTime.Milliseconds()), 'f', 3, 64))
 		if err != nil {
 			http.Error(w, "Error in TableUpdate: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -476,7 +473,7 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 		startTime := time.Now()
 		_, err = dbPlug.TableDelete(userID, table, where, pluginCtx)
 		queryTime := time.Since(startTime)
-		w.Header().Set("Server-Timing", fmt.Sprintf("db;dur=%.3f", float64(queryTime.Milliseconds())))
+		w.Header().Set("Server-Timing", "db;dur="+strconv.FormatFloat(float64(queryTime.Milliseconds()), 'f', 3, 64))
 		if err != nil {
 			http.Error(w, "Error in TableDelete: "+err.Error(), http.StatusInternalServerError)
 			return

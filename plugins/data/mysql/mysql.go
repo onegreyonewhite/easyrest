@@ -788,10 +788,15 @@ func (m *mysqlPlugin) TableUpdate(userID, table string, data map[string]any, whe
 		var setParts []string
 		var args []any
 		for _, k := range keys {
-			setParts = append(setParts, fmt.Sprintf("%s = ?", k))
+			setParts = append(setParts, k+" = ?")
 			args = append(args, data[k])
 		}
-		updateQ := fmt.Sprintf("UPDATE %s SET %s", table, strings.Join(setParts, ", "))
+		var updateSB strings.Builder
+		updateSB.WriteString("UPDATE ")
+		updateSB.WriteString(table)
+		updateSB.WriteString(" SET ")
+		updateSB.WriteString(strings.Join(setParts, ", "))
+		updateQ := updateSB.String()
 		processedWhere := convertILIKEtoLower(where)
 		whereClause, whereArgs, err := easyrest.BuildWhereClauseSorted(processedWhere)
 		if err != nil {
@@ -835,7 +840,7 @@ func (m *mysqlPlugin) TableDelete(userID, table string, where map[string]any, ct
 			// Error in building WHERE clause, transaction will be rolled back
 			return 0, fmt.Errorf("failed to build WHERE: %w", err)
 		}
-		delQ := fmt.Sprintf("DELETE FROM %s%s", table, whereClause)
+		delQ := "DELETE FROM " + table + whereClause
 		sqlRes, err := tx.ExecContext(context.Background(), delQ, whereArgs...)
 		if err != nil {
 			// Error during execution, transaction will be rolled back

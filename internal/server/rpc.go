@@ -1,7 +1,6 @@
 package server
 
 import (
-	"fmt"
 	"net/http"
 	"slices"
 	"strings"
@@ -120,7 +119,7 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 			if cachePlugin != nil {
 				stdlog.Printf("Invalidating ETags for tables %v due to RPC call %s/%s", tablesToInvalidate, dbKey, funcName)
 				for _, tableName := range tablesToInvalidate {
-					etagKey := fmt.Sprintf("etag:%s:%s", dbKey, tableName)
+					etagKey := "etag:" + dbKey + ":" + tableName
 					_ = updateETag(cachePlugin, etagKey) // Assumes this helper is available; ignore returned ETag
 				}
 			} else {

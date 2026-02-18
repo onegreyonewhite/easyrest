@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,6 +32,8 @@ type sqlitePlugin struct {
 
 type sqliteCachePlugin struct {
 	dbPluginPointer *sqlitePlugin
+	getStmt         *sql.Stmt
+	setStmt         *sql.Stmt
 }
 
 // InitConnection opens the SQLite database based on the provided URI.
@@ -82,6 +85,20 @@ func (s *sqliteCachePlugin) InitConnection(uri string) error {
 		return fmt.Errorf("failed to create cache table: %w", err)
 	}
 
+	// Prepare the "get" statement for future use
+	getStmt, err := s.dbPluginPointer.db.Prepare("SELECT value FROM easyrest_cache WHERE key = ? AND expires_at > ? ORDER BY expires_at LIMIT 1")
+	if err != nil {
+		return fmt.Errorf("failed to prepare get cache statement: %w", err)
+	}
+	s.getStmt = getStmt
+
+	// Prepare the "set" statement for future use
+	setStmt, err := s.dbPluginPointer.db.Prepare("INSERT OR REPLACE INTO easyrest_cache (key, value, expires_at) VALUES (?, ?, ?)")
+	if err != nil {
+		return fmt.Errorf("failed to prepare set cache statement: %w", err)
+	}
+	s.setStmt = setStmt
+
 	// Launch background goroutine for cleanup
 	go s.cleanupExpiredCacheEntries()
 
@@ -104,7 +121,7 @@ func (s *sqliteCachePlugin) cleanupExpiredCacheEntries() {
 }
 
 func (s *sqliteCachePlugin) Set(key string, value string, ttl time.Duration) error {
-	_, err := s.dbPluginPointer.db.Exec("INSERT OR REPLACE INTO easyrest_cache (key, value, expires_at) VALUES (?, ?, ?)", key, value, time.Now().Add(ttl))
+	_, err := s.setStmt.Exec(key, value, time.Now().Add(ttl))
 	if err != nil {
 		return err
 	}
@@ -113,7 +130,8 @@ func (s *sqliteCachePlugin) Set(key string, value string, ttl time.Duration) err
 
 func (s *sqliteCachePlugin) Get(key string) (string, error) {
 	var value string
-	err := s.dbPluginPointer.db.QueryRow("SELECT value FROM easyrest_cache WHERE key = ? AND expires_at > ? ORDER BY expires_at LIMIT 1", key, time.Now()).Scan(&value)
+	// use the prepared statement
+	err := s.getStmt.QueryRow(key, time.Now()).Scan(&value)
 	if err != nil {
 		return "", err
 	}
@@ -255,12 +273,15 @@ func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, whe
 		sb.WriteString(strings.Join(ordering, ", "))
 	}
 	if limit > 0 {
-		sb.WriteString(fmt.Sprintf(" LIMIT %d", limit))
+		sb.WriteString(" LIMIT ")
+		sb.WriteString(strconv.Itoa(limit))
 		if offset > 0 {
-			sb.WriteString(fmt.Sprintf(" OFFSET %d", offset))
+			sb.WriteString(" OFFSET ")
+			sb.WriteString(strconv.Itoa(offset))
 		}
 	} else if offset > 0 {
-		sb.WriteString(fmt.Sprintf(" LIMIT -1 OFFSET %d", offset))
+		sb.WriteString(" LIMIT -1 OFFSET ")
+		sb.WriteString(strconv.Itoa(offset))
 	}
 	query := sb.String()
 
@@ -284,16 +305,18 @@ func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, whe
 	}
 	numCols := len(cols)
 
-	// Pre-allocate memory for results
-	var results []map[string]any
-	for rows.Next() {
-		// Use pointer scanning for better performance
-		columns := make([]any, numCols)
-		columnPointers := make([]any, numCols)
-		for i := range columns {
-			columnPointers[i] = &columns[i]
-		}
+	columns := make([]any, numCols)
+	columnPointers := make([]any, numCols)
+	for i := range columns {
+		columnPointers[i] = &columns[i]
+	}
 
+	initCap := limit
+	if initCap <= 0 {
+		initCap = 32
+	}
+	results := make([]map[string]any, 0, initCap)
+	for rows.Next() {
 		if err := rows.Scan(columnPointers...); err != nil {
 			return nil, err
 		}
@@ -311,6 +334,9 @@ func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, whe
 			}
 		}
 		results = append(results, rowMap)
+		for i := range columns {
+			columns[i] = nil
+		}
 	}
 
 	return results, nil
@@ -330,7 +356,15 @@ func (s *sqlitePlugin) TableCreate(userID, table string, data []map[string]any, 
 				placeholders = append(placeholders, "?")
 				args = append(args, v)
 			}
-			baseQuery := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", table, strings.Join(cols, ", "), strings.Join(placeholders, ", "))
+			var insertSB strings.Builder
+			insertSB.WriteString("INSERT INTO ")
+			insertSB.WriteString(table)
+			insertSB.WriteString(" (")
+			insertSB.WriteString(strings.Join(cols, ", "))
+			insertSB.WriteString(") VALUES (")
+			insertSB.WriteString(strings.Join(placeholders, ", "))
+			insertSB.WriteByte(')')
+			baseQuery := insertSB.String()
 			_, err := tx.ExecContext(ctxQuery, baseQuery, args...)
 			if err != nil {
 				// Error occurs within the loop, transaction will be rolled back by handleTransaction
@@ -367,7 +401,7 @@ func (s *sqlitePlugin) TableUpdate(userID, table string, data map[string]any, wh
 			args = []any{}
 		}
 		for k, v := range data {
-			setParts = append(setParts, fmt.Sprintf("%s = ?", k))
+			setParts = append(setParts, k+" = ?")
 			args = append(args, v)
 		}
 		var sb strings.Builder

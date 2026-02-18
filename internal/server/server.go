@@ -82,16 +82,15 @@ func BuildPluginContext(r *http.Request) map[string]any {
 
 	prefer["tx"] = tx
 
-	pluginCtx := map[string]any{
-		"timezone":   timezone,
-		"headers":    headers,
-		"claims":     plainClaims,
-		"jwt.claims": plainClaims,
-		"method":     r.Method,
-		"path":       r.URL.Path,
-		"query":      r.URL.RawQuery,
-		"prefer":     prefer,
-	}
+	pluginCtx := make(map[string]any, 12)
+	pluginCtx["timezone"] = timezone
+	pluginCtx["headers"] = headers
+	pluginCtx["claims"] = plainClaims
+	pluginCtx["jwt.claims"] = plainClaims
+	pluginCtx["method"] = r.Method
+	pluginCtx["path"] = r.URL.Path
+	pluginCtx["query"] = r.URL.RawQuery
+	pluginCtx["prefer"] = prefer
 	if cfg.Otel.Enabled {
 		carrier := propagation.HeaderCarrier(r.Header)
 		traceparent := carrier.Get("traceparent")
@@ -199,6 +198,11 @@ func proxyHeadersHandler(next http.Handler) http.Handler {
 
 // corsMiddleware handles CORS headers based on configuration
 func corsMiddleware(next http.Handler) http.Handler {
+	cfg := GetConfig()
+	joinedMethods := strings.Join(cfg.CORS.Methods, ", ")
+	joinedHeaders := strings.Join(cfg.CORS.Headers, ", ")
+	maxAgeStr := strconv.Itoa(cfg.CORS.MaxAge)
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 		if origin == "" {
@@ -209,7 +213,6 @@ func corsMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		cfg := GetConfig()
 		// Check if origin is allowed
 		allowed := false
 		for _, allowedOrigin := range cfg.CORS.Origins {
@@ -221,9 +224,9 @@ func corsMiddleware(next http.Handler) http.Handler {
 
 		if allowed {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Methods", strings.Join(cfg.CORS.Methods, ", "))
-			w.Header().Set("Access-Control-Allow-Headers", strings.Join(cfg.CORS.Headers, ", "))
-			w.Header().Set("Access-Control-Max-Age", strconv.Itoa(cfg.CORS.MaxAge))
+			w.Header().Set("Access-Control-Allow-Methods", joinedMethods)
+			w.Header().Set("Access-Control-Allow-Headers", joinedHeaders)
+			w.Header().Set("Access-Control-Max-Age", maxAgeStr)
 		}
 
 		// Handle preflight requests

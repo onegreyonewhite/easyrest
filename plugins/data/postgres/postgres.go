@@ -189,14 +189,17 @@ func ApplyPluginContext(ctx context.Context, tx pgx.Tx, pluginCtx map[string]any
 		case string:
 			requestVal = v
 			erctxVal = v
-		case int, int8, int16, int32, int64:
-			requestVal = fmt.Sprintf("%d", v)
+		case int:
+			requestVal = strconv.Itoa(v)
 			erctxVal = requestVal
-		case float32, float64:
-			requestVal = fmt.Sprintf("%f", v)
+		case int64:
+			requestVal = strconv.FormatInt(v, 10)
+			erctxVal = requestVal
+		case float64:
+			requestVal = strconv.FormatFloat(v, 'f', -1, 64)
 			erctxVal = requestVal
 		case bool:
-			requestVal = fmt.Sprintf("%t", v)
+			requestVal = strconv.FormatBool(v)
 			erctxVal = requestVal
 		case map[string]any, []any:
 			b, err := json.Marshal(v)
@@ -533,7 +536,7 @@ func (p *pgPlugin) TableUpdate(userID, table string, data map[string]any, where 
 	sort.Strings(dataKeys)
 
 	for _, k := range dataKeys {
-		setParts = append(setParts, fmt.Sprintf("%s = ?", k)) // Keep fmt.Sprintf here as it's simple and clear
+		setParts = append(setParts, k+" = ?")
 		args = append(args, data[k])
 	}
 

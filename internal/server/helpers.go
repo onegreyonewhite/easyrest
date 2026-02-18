@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"encoding/base64"
 	"encoding/csv"
 	"encoding/xml"
@@ -14,9 +13,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
-	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -48,7 +46,6 @@ var (
 	PreservedCachePlugins   map[string]PreservedPluginFactory[easyrest.CachePlugin]
 	PreservedDbPlugins      map[string]PreservedPluginFactory[easyrest.DBPlugin]
 	PreservedAuthPlugins    map[string]PreservedPluginFactory[easyrest.AuthPlugin]
-	identifierRegex         = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	AllowedOps              = map[string]string{
 		"eq":    "=",
 		"neq":   "!=",
@@ -197,8 +194,25 @@ func escapeSQLLiteral(s string) string {
 	return strings.ReplaceAll(s, "'", "''")
 }
 
+func isValidIdentifier(id string) bool {
+	if len(id) == 0 {
+		return false
+	}
+	c := id[0]
+	if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_') {
+		return false
+	}
+	for i := 1; i < len(id); i++ {
+		c = id[i]
+		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 func sanitizeIdentifier(id string) error {
-	if identifierRegex.MatchString(id) {
+	if isValidIdentifier(id) {
 		return nil
 	}
 	return fmt.Errorf("invalid identifier: %s", id)
@@ -245,18 +259,21 @@ func substitutePluginContext(input string, flatCtx map[string]string, pluginCtx 
 	} else if strings.HasPrefix(input, "request.") {
 		key := input[len("request."):]
 		if v, ok := getNestedValue(pluginCtx, key); ok {
-			rv := reflect.ValueOf(v)
-			switch rv.Kind() {
-			case reflect.Map, reflect.Slice, reflect.Array:
-				if bytes, err := json.Marshal(v); err == nil {
-					return string(bytes)
-				}
-			}
 			switch vv := v.(type) {
 			case string:
 				return vv
-			case int, int64, int32, float64, float32, bool:
-				return fmt.Sprint(vv)
+			case int:
+				return strconv.Itoa(vv)
+			case int64:
+				return strconv.FormatInt(vv, 10)
+			case float64:
+				return strconv.FormatFloat(vv, 'f', -1, 64)
+			case bool:
+				return strconv.FormatBool(vv)
+			case map[string]any, []any:
+				if b, err := json.Marshal(v); err == nil {
+					return string(b)
+				}
 			default:
 				return fmt.Sprintf("%v", vv)
 			}
@@ -633,14 +650,20 @@ func makeResponse(w http.ResponseWriter, r *http.Request, status int, v any) {
 }
 
 // DecodeTokenWithoutValidation decodes a JWT token without validating its signature.
+var base64NoPadDecoder = base64.URLEncoding.WithPadding(base64.NoPadding)
+
 func DecodeTokenWithoutValidation(tokenStr string) (jwt.MapClaims, error) {
-	parts := bytes.Split([]byte(tokenStr), []byte("."))
-	if len(parts) != 3 {
+	first := strings.IndexByte(tokenStr, '.')
+	if first < 0 {
 		return nil, errors.New("invalid token format")
 	}
+	second := strings.IndexByte(tokenStr[first+1:], '.')
+	if second < 0 {
+		return nil, errors.New("invalid token format")
+	}
+	payload := tokenStr[first+1 : first+1+second]
 
-	decoder := base64.URLEncoding.WithPadding(base64.NoPadding)
-	decoded, err := decoder.DecodeString(string(parts[1]))
+	decoded, err := base64NoPadDecoder.DecodeString(payload)
 	if err != nil {
 		return nil, err
 	}
@@ -681,8 +704,8 @@ func extractUserIDFromClaims(claims jwt.MapClaims) string {
 		switch v := val.(type) {
 		case string:
 			return v
-		case int, int64, int32, float64, float32, bool:
-			return fmt.Sprint(v)
+		case float64:
+			return strconv.FormatFloat(v, 'f', -1, 64)
 		default:
 			return fmt.Sprintf("%v", v)
 		}

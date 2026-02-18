@@ -2,6 +2,8 @@ package tests
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +15,8 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/onegreyonewhite/easyrest/internal/config"
 	"github.com/onegreyonewhite/easyrest/internal/server"
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
+	_ "modernc.org/sqlite"
 )
 
 // TestConfigLoad checks coverage for config.Load().
@@ -506,4 +510,177 @@ func TestRunWithOtelEnabled(t *testing.T) {
 		_ = p.Signal(os.Interrupt)
 	}
 	time.Sleep(200 * time.Millisecond)
+}
+
+func TestFormatToContextTypeBranches(t *testing.T) {
+	input := map[string]any{
+		"str_val":   "hello",
+		"float_val": 3.14,
+		"bool_val":  true,
+		"int_val":   42,
+		"nested": map[string]any{
+			"inner": "value",
+		},
+		"list": []any{"a", "b"},
+		"dangerous": "val;ue",
+		"dash-key":  "dashed",
+		"dot.key":   "dotted",
+	}
+	result, err := easyrest.FormatToContext(input)
+	if err != nil {
+		t.Fatalf("FormatToContext error: %v", err)
+	}
+	if result["str_val"] != "hello" {
+		t.Errorf("Expected str_val=hello, got %v", result["str_val"])
+	}
+	if result["float_val"] != "3.14" {
+		t.Errorf("Expected float_val=3.14, got %v", result["float_val"])
+	}
+	if result["bool_val"] != "true" {
+		t.Errorf("Expected bool_val=true, got %v", result["bool_val"])
+	}
+	if result["int_val"] != "42" {
+		t.Errorf("Expected int_val=42, got %v", result["int_val"])
+	}
+	if result["nested_inner"] != "value" {
+		t.Errorf("Expected nested_inner=value, got %v", result["nested_inner"])
+	}
+	if result["list_0"] != "a" {
+		t.Errorf("Expected list_0=a, got %v", result["list_0"])
+	}
+	if _, ok := result["dangerous"]; ok {
+		t.Error("Expected dangerous key to be filtered out (contains semicolon)")
+	}
+	if result["dash_key"] != "dashed" {
+		t.Errorf("Expected dash_key=dashed, got %v", result["dash_key"])
+	}
+	if result["dot_key"] != "dotted" {
+		t.Errorf("Expected dot_key=dotted, got %v", result["dot_key"])
+	}
+}
+
+func TestContextSubstitutionNumericTypes(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "context_numeric_*.db")
+	if err != nil {
+		t.Fatalf("Failed to create temporary DB: %v", err)
+	}
+	dbPath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(dbPath)
+	defer server.StopPlugins()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("Failed to open sqlite DB: %v", err)
+	}
+	defer db.Close()
+	_, err = db.Exec(`CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT);`)
+	if err != nil {
+		t.Fatalf("Failed to create table: %v", err)
+	}
+	_, _ = db.Exec(`INSERT INTO items (name) VALUES ('test');`)
+
+	router := setupServerWithDB(t, dbPath)
+	tokenStr := generateToken(t)
+
+	// Exercise request.method (string), request.claims.exp (float64), request.prefer (map)
+	req, _ := http.NewRequest("GET", "/api/test/items/?select=name,str_val:request.method,num_val:request.claims.exp,map_val:request.prefer", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenStr)
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	var result []map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
+		t.Fatalf("Failed to parse JSON: %v", err)
+	}
+	if len(result) == 0 {
+		t.Fatal("Expected at least one row")
+	}
+	if result[0]["str_val"] != "GET" {
+		t.Errorf("Expected str_val=GET, got %v", result[0]["str_val"])
+	}
+}
+
+func TestCorsMiddleware(t *testing.T) {
+	os.Setenv("ER_CORS_ENABLED", "1")
+	defer os.Unsetenv("ER_CORS_ENABLED")
+	server.ReloadConfig()
+	defer server.StopPlugins()
+	router := server.SetupRouter()
+
+	// Test preflight
+	req, _ := http.NewRequest("OPTIONS", "/health", nil)
+	req.Header.Set("Origin", "http://example.com")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Errorf("Expected 200 for OPTIONS, got %d", rr.Code)
+	}
+	if rr.Header().Get("Access-Control-Allow-Origin") != "http://example.com" {
+		t.Errorf("Expected CORS Allow-Origin header, got %q", rr.Header().Get("Access-Control-Allow-Origin"))
+	}
+
+	// Test regular request with origin
+	req2, _ := http.NewRequest("GET", "/health", nil)
+	req2.Header.Set("Origin", "http://example.com")
+	rr2 := httptest.NewRecorder()
+	router.ServeHTTP(rr2, req2)
+	if rr2.Header().Get("Access-Control-Allow-Origin") != "http://example.com" {
+		t.Errorf("Expected CORS Allow-Origin on GET, got %q", rr2.Header().Get("Access-Control-Allow-Origin"))
+	}
+
+	// Test request without origin - should not set CORS headers
+	req3, _ := http.NewRequest("GET", "/health", nil)
+	rr3 := httptest.NewRecorder()
+	router.ServeHTTP(rr3, req3)
+	if rr3.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Error("Expected no CORS header without Origin")
+	}
+
+	// Test oversized origin
+	req4, _ := http.NewRequest("GET", "/health", nil)
+	req4.Header.Set("Origin", strings.Repeat("x", 1025))
+	rr4 := httptest.NewRecorder()
+	router.ServeHTTP(rr4, req4)
+	if rr4.Code != http.StatusForbidden {
+		t.Errorf("Expected 403 for oversized origin, got %d", rr4.Code)
+	}
+}
+
+func TestDecodeTokenWithoutValidation(t *testing.T) {
+	claims := jwt.MapClaims{
+		"sub":  "testuser",
+		"role": "admin",
+		"exp":  time.Now().Add(time.Hour).Unix(),
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenStr, err := token.SignedString([]byte("secret"))
+	if err != nil {
+		t.Fatalf("Failed to sign token: %v", err)
+	}
+
+	decoded, err := server.DecodeTokenWithoutValidation(tokenStr)
+	if err != nil {
+		t.Fatalf("DecodeTokenWithoutValidation failed: %v", err)
+	}
+	if decoded["sub"] != "testuser" {
+		t.Errorf("Expected sub=testuser, got %v", decoded["sub"])
+	}
+	if decoded["role"] != "admin" {
+		t.Errorf("Expected role=admin, got %v", decoded["role"])
+	}
+
+	_, err = server.DecodeTokenWithoutValidation("invalid")
+	if err == nil {
+		t.Error("Expected error for token without dots")
+	}
+	_, err = server.DecodeTokenWithoutValidation("one.two")
+	if err == nil {
+		t.Error("Expected error for token with only one dot")
+	}
+	_, err = server.DecodeTokenWithoutValidation("a.!!!.c")
+	if err == nil {
+		t.Error("Expected error for invalid base64 payload")
+	}
 }
