@@ -43,13 +43,13 @@ func BuildPluginContext(r *http.Request) map[string]any {
 	cfg := GetConfig()
 	dbKey := chi.URLParam(r, "db")
 	dbConfig := cfg.PluginMap[dbKey]
-	headers := make(map[string]any)
+	headers := make(map[string]any, len(r.Header))
 	for k, vals := range r.Header {
 		lk := strings.ToLower(k)
 		headers[lk] = strings.Join(vals, " ")
 	}
 	claims := getTokenClaims(r)
-	plainClaims := make(map[string]any)
+	plainClaims := make(map[string]any, len(claims))
 	for k, v := range claims {
 		plainClaims[strings.ToLower(k)] = v
 	}
@@ -139,7 +139,7 @@ func Authenticate(r *http.Request) (string, *http.Request, error) {
 	var authErr error
 
 	// Prepare headers map for plugins
-	headersForPlugin := make(map[string]string)
+	headersForPlugin := make(map[string]string, len(r.Header))
 	for k, v := range r.Header {
 		headersForPlugin[strings.ToLower(k)] = strings.Join(v, ", ")
 	}
