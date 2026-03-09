@@ -24,7 +24,7 @@ test: plugin-sqlite auth-jwt
 	go tool cover -func=$(COVERAGE)
 
 bench:
-	go test -bench=. -benchmem ./tests/benchmark_test.go
+	go test -cpuprofile cpu.prof -bench=. -benchmem ./tests/benchmark_test.go
 
 run: plugin-sqlite auth-jwt
 	go run cmd/gateway/main.go --config test_config.yaml
@@ -36,3 +36,6 @@ run-perf: server
 	perf record -g ./bin/easyrest-server --config test_config.yaml
 
 .PHONY: all clean test
+
+update-packages:
+	go get -u ./... && go mod tidy
