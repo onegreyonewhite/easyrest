@@ -13,6 +13,16 @@ import (
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
 
+func validateSelectAlias(alias, part string) error {
+	if alias == "" {
+		return nil
+	}
+	if err := sanitizeIdentifier(alias); err != nil {
+		return fmt.Errorf("invalid alias in select field: %s", part)
+	}
+	return nil
+}
+
 // processSelectParam parses the "select" query parameter, performs context substitution,
 // and assigns an alias (defaulting to the field name with dots replaced by underscores) if not provided.
 func processSelectParam(param string, flatCtx map[string]string, pluginCtx map[string]any) ([]string, []string, error) {
@@ -68,6 +78,9 @@ func processSelectParam(param string, flatCtx map[string]string, pluginCtx map[s
 			if alias == "" {
 				alias = funcName
 			}
+			if err := validateSelectAlias(alias, part); err != nil {
+				return nil, nil, err
+			}
 			// Append alias so that the SQL query becomes, for example, "SUM(amount) AS sum"
 			exprBuilder.WriteString(" AS ")
 			exprBuilder.WriteString(alias)
@@ -75,6 +88,9 @@ func processSelectParam(param string, flatCtx map[string]string, pluginCtx map[s
 			exprBuilder.WriteString("COUNT(*)")
 			if alias == "" {
 				alias = "count"
+			}
+			if err := validateSelectAlias(alias, part); err != nil {
+				return nil, nil, err
 			}
 			exprBuilder.WriteString(" AS ")
 			exprBuilder.WriteString(alias)
@@ -84,6 +100,9 @@ func processSelectParam(param string, flatCtx map[string]string, pluginCtx map[s
 				substituted := substitutePluginContext(raw, flatCtx, pluginCtx)
 				if alias == "" {
 					alias = strings.ReplaceAll(raw, ".", "_")
+				}
+				if err := validateSelectAlias(alias, part); err != nil {
+					return nil, nil, err
 				}
 				// Use builder instead of fmt.Sprintf
 				exprBuilder.WriteString("'")
@@ -96,8 +115,8 @@ func processSelectParam(param string, flatCtx map[string]string, pluginCtx map[s
 				}
 				exprBuilder.WriteString(raw)
 				if alias != "" {
-					if err := sanitizeIdentifier(alias); err != nil {
-						return nil, nil, fmt.Errorf("invalid alias in select field: %s", part)
+					if err := validateSelectAlias(alias, part); err != nil {
+						return nil, nil, err
 					}
 					exprBuilder.WriteString(" AS ")
 					exprBuilder.WriteString(alias)
@@ -412,6 +431,10 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 		for i, row := range data {
 			data[i] = substituteValue(row, flatCtx, pluginCtx).(map[string]any)
 		}
+		if err := validateBodyColumns(data); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		startTime := time.Now()
 		rows, err := dbPlug.TableCreate(userID, table, data, pluginCtx)
 		queryTime := time.Since(startTime)
@@ -442,6 +465,10 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		data = substituteValue(data, flatCtx, pluginCtx).(map[string]any)
+		if err := validateBodyColumns(data); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		where, err := ParseWhereClause(queryValues, flatCtx, pluginCtx)
 		if err != nil {
 			http.Error(w, "Error processing where clause: "+err.Error(), http.StatusBadRequest)

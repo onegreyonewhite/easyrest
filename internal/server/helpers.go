@@ -194,25 +194,8 @@ func escapeSQLLiteral(s string) string {
 	return strings.ReplaceAll(s, "'", "''")
 }
 
-func isValidIdentifier(id string) bool {
-	if len(id) == 0 {
-		return false
-	}
-	c := id[0]
-	if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_') {
-		return false
-	}
-	for i := 1; i < len(id); i++ {
-		c = id[i]
-		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
-			return false
-		}
-	}
-	return true
-}
-
 func sanitizeIdentifier(id string) error {
-	if isValidIdentifier(id) {
+	if easyrest.IsValidIdentifier(id) {
 		return nil
 	}
 	return fmt.Errorf("invalid identifier: %s", id)
@@ -223,6 +206,27 @@ func sanitizeIdentifierList(list []string) error {
 		err := sanitizeIdentifier(raw)
 		if err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// validateBodyColumns rejects JSON object keys that are not safe SQL identifiers.
+func validateBodyColumns(data any) error {
+	switch d := data.(type) {
+	case map[string]any:
+		for k := range d {
+			if err := sanitizeIdentifier(k); err != nil {
+				return err
+			}
+		}
+	case []map[string]any:
+		for _, row := range d {
+			for k := range row {
+				if err := sanitizeIdentifier(k); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return nil

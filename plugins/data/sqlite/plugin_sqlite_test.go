@@ -162,6 +162,39 @@ func TestTableCreate_WithContext(t *testing.T) {
 	}
 }
 
+func TestTableCreate_RejectsMaliciousColumn(t *testing.T) {
+	uri := "sqlite://:memory:"
+	plugin := &sqlitePlugin{}
+	if err := plugin.InitConnection(uri); err != nil {
+		t.Fatalf("InitConnection failed: %v", err)
+	}
+	db, err := openInMemoryDB(uri)
+	if err != nil {
+		t.Fatalf("openInMemoryDB failed: %v", err)
+	}
+	plugin.db = db
+	if err := initTestDB(plugin.db); err != nil {
+		t.Fatalf("initTestDB failed: %v", err)
+	}
+	data := []map[string]any{
+		{"name) VALUES ('boom'); --": "x"},
+	}
+	_, err = plugin.TableCreate("testuser", "users", data, nil)
+	if err == nil {
+		t.Fatal("expected error for malicious column name")
+	}
+	if !strings.Contains(err.Error(), "invalid column name") {
+		t.Fatalf("expected invalid column name error, got: %v", err)
+	}
+	var count int
+	if err := plugin.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
+		t.Fatalf("count query failed: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected no rows inserted, got %d", count)
+	}
+}
+
 // --- Test TableUpdate with context ---
 func TestTableUpdate_WithContext(t *testing.T) {
 	uri := "sqlite://:memory:"
@@ -206,6 +239,42 @@ func TestTableUpdate_WithContext(t *testing.T) {
 	}
 	if results[0]["update_field"] != "TestAgent" {
 		t.Errorf("Expected update_field 'TestAgent', got '%v'", results[0]["update_field"])
+	}
+}
+
+func TestTableUpdate_RejectsMaliciousColumn(t *testing.T) {
+	uri := "sqlite://:memory:"
+	plugin := &sqlitePlugin{}
+	if err := plugin.InitConnection(uri); err != nil {
+		t.Fatalf("InitConnection failed: %v", err)
+	}
+	db, err := openInMemoryDB(uri)
+	if err != nil {
+		t.Fatalf("openInMemoryDB failed: %v", err)
+	}
+	plugin.db = db
+	if err := initTestDB(plugin.db); err != nil {
+		t.Fatalf("initTestDB failed: %v", err)
+	}
+	_, err = plugin.db.Exec(`INSERT INTO users (name, update_field) VALUES ('Charlie', 'old')`)
+	if err != nil {
+		t.Fatalf("Insert failed: %v", err)
+	}
+	data := map[string]any{"name = 'pwned', update_field": "x"}
+	where := map[string]any{"name": map[string]any{"=": "Charlie"}}
+	_, err = plugin.TableUpdate("testuser", "users", data, where, nil)
+	if err == nil {
+		t.Fatal("expected error for malicious column name")
+	}
+	if !strings.Contains(err.Error(), "invalid column name") {
+		t.Fatalf("expected invalid column name error, got: %v", err)
+	}
+	var name string
+	if err := plugin.db.QueryRow(`SELECT name FROM users WHERE name = 'Charlie'`).Scan(&name); err != nil {
+		t.Fatalf("select failed: %v", err)
+	}
+	if name != "Charlie" {
+		t.Fatalf("name was modified by injection, got %q", name)
 	}
 }
 
@@ -762,5 +831,43 @@ func TestTableGet_AllWhereOps(t *testing.T) {
 		if len(results) != tc.expect {
 			t.Errorf("%s: expected %d rows, got %d", tc.desc, tc.expect, len(results))
 		}
+	}
+}
+
+func TestGetSchema_SkipsUnsafeTableNames(t *testing.T) {
+	uri := "sqlite://:memory:"
+	plugin := &sqlitePlugin{}
+	if err := plugin.InitConnection(uri); err != nil {
+		t.Fatalf("InitConnection failed: %v", err)
+	}
+	db, err := openInMemoryDB(uri)
+	if err != nil {
+		t.Fatalf("openInMemoryDB failed: %v", err)
+	}
+	plugin.db = db
+	if err := initTestDB(plugin.db); err != nil {
+		t.Fatalf("initTestDB failed: %v", err)
+	}
+	if _, err := plugin.db.Exec(`CREATE TABLE "weird;name" (id INTEGER)`); err != nil {
+		t.Fatalf("create unsafe table failed: %v", err)
+	}
+
+	schemaRaw, err := plugin.GetSchema(nil)
+	if err != nil {
+		t.Fatalf("GetSchema failed: %v", err)
+	}
+	schemaMap, ok := schemaRaw.(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected schema type: %T", schemaRaw)
+	}
+	tables, ok := schemaMap["tables"].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected tables type: %T", schemaMap["tables"])
+	}
+	if _, found := tables["weird;name"]; found {
+		t.Fatal("unsafe table name should be omitted from schema")
+	}
+	if _, found := tables["users"]; !found {
+		t.Fatal("expected users table in schema")
 	}
 }

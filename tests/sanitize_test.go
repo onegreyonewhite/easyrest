@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/onegreyonewhite/easyrest/internal/config"
@@ -102,6 +103,30 @@ func TestSanitizeIdentifier(t *testing.T) {
 			url:        "/api/test/users/?where.eq.name=id%3Bdrop",
 			expectCode: http.StatusRequestedRangeNotSatisfiable,
 		},
+		{
+			name:       "invalid_alias_function_syntax",
+			method:     http.MethodGet,
+			url:        "/api/test/users/?select=evil--alias:id.sum()",
+			expectCode: http.StatusBadRequest,
+		},
+		{
+			name:       "invalid_alias_count_literal",
+			method:     http.MethodGet,
+			url:        "/api/test/users/?select=evil--alias:count()",
+			expectCode: http.StatusBadRequest,
+		},
+		{
+			name:       "invalid_alias_with_context_substitution",
+			method:     http.MethodGet,
+			url:        "/api/test/users/?select=evil--alias:erctx.claims_sub",
+			expectCode: http.StatusBadRequest,
+		},
+		{
+			name:       "invalid_alias_auto_from_dotted_path",
+			method:     http.MethodGet,
+			url:        "/api/test/users/?select=erctx.foo--bar",
+			expectCode: http.StatusBadRequest,
+		},
 	}
 
 	for _, tt := range tests {
@@ -111,6 +136,69 @@ func TestSanitizeIdentifier(t *testing.T) {
 				t.Fatalf("failed to build request: %v", err)
 			}
 			req.Header.Set("Authorization", "Bearer "+tokenStr)
+			rr := httptest.NewRecorder()
+			router.ServeHTTP(rr, req)
+			if rr.Code != tt.expectCode {
+				t.Fatalf("%s: expected status %d, got %d. Response: %s", tt.name, tt.expectCode, rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestSanitizeBodyColumns(t *testing.T) {
+	dbPath := setupTestDB(t)
+	defer os.Remove(dbPath)
+	defer server.StopPlugins()
+
+	insertUser(t, dbPath, "Alice", "")
+	router := setupServerWithDB(t, dbPath)
+
+	cfg := server.GetConfig()
+	cfg.PluginMap["test"] = config.PluginConfig{
+		Name: "test", Uri: "sqlite://" + dbPath,
+	}
+	server.SetConfig(cfg)
+	server.PreservedDbPlugins["sqlite"] = func() easyrest.DBPlugin {
+		return sqlitePlugin.NewSqlitePlugin()
+	}
+	server.PreservedCachePlugins["sqlite"] = func() easyrest.CachePlugin {
+		return sqlitePlugin.NewSqliteCachePlugin()
+	}
+	server.LoadPlugins()
+
+	tokenStr := generateToken(t)
+
+	postTests := []struct {
+		name       string
+		body       string
+		expectCode int
+	}{
+		{
+			name:       "invalid_post_column",
+			body:       `[{"name=evil,update_field":"x"}]`,
+			expectCode: http.StatusBadRequest,
+		},
+		{
+			name:       "invalid_patch_column",
+			body:       `{"name=evil,update_field":"x"}`,
+			expectCode: http.StatusBadRequest,
+		},
+	}
+
+	for _, tt := range postTests {
+		t.Run(tt.name, func(t *testing.T) {
+			method := http.MethodPost
+			url := "/api/test/users/"
+			if tt.name == "invalid_patch_column" {
+				method = http.MethodPatch
+				url = "/api/test/users/?where.eq.id=1"
+			}
+			req, err := http.NewRequest(method, url, strings.NewReader(tt.body))
+			if err != nil {
+				t.Fatalf("failed to build request: %v", err)
+			}
+			req.Header.Set("Authorization", "Bearer "+tokenStr)
+			req.Header.Set("Content-Type", "application/json")
 			rr := httptest.NewRecorder()
 			router.ServeHTTP(rr, req)
 			if rr.Code != tt.expectCode {

@@ -413,3 +413,52 @@ func TestBuildWhereCondEntries(t *testing.T) {
 		}
 	})
 }
+
+func TestBuildWhereClauseRejectsMaliciousField(t *testing.T) {
+	malicious := map[string]any{"name'; DROP TABLE users;--": "x"}
+	_, _, err := easyrest.BuildWhereClause(malicious)
+	if err == nil {
+		t.Fatal("expected error for malicious field name")
+	}
+	if !strings.Contains(err.Error(), "invalid field") {
+		t.Fatalf("expected invalid field error, got: %v", err)
+	}
+
+	_, _, err = easyrest.BuildWhereClauseSorted(malicious)
+	if err == nil {
+		t.Fatal("expected error for malicious field name (sorted)")
+	}
+
+	notMalicious := map[string]any{"NOT name; DROP --": map[string]any{"=": "x"}}
+	_, _, err = easyrest.BuildWhereClause(notMalicious)
+	if err == nil {
+		t.Fatal("expected error for malicious NOT field name")
+	}
+}
+
+func TestIsValidIdentifier(t *testing.T) {
+	tests := []struct {
+		name  string
+		id    string
+		valid bool
+	}{
+		{"empty", "", false},
+		{"leading_digit", "1abc", false},
+		{"dash", "foo-bar", false},
+		{"semicolon", "id;drop", false},
+		{"backtick", "`col`", false},
+		{"double_quote", `"col"`, false},
+		{"space", "col name", false},
+		{"snake_case", "snake_case", true},
+		{"PascalCase", "PascalCase", true},
+		{"underscore_only", "_", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := easyrest.IsValidIdentifier(tc.id)
+			if got != tc.valid {
+				t.Fatalf("IsValidIdentifier(%q) = %v, want %v", tc.id, got, tc.valid)
+			}
+		})
+	}
+}

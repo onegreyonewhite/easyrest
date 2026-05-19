@@ -301,6 +301,25 @@ func TestTableCreateWithContext(t *testing.T) {
 	}
 }
 
+func TestTableCreate_RejectsMaliciousColumn(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	defer plugin.db.Close()
+
+	data := []map[string]any{
+		{"name) VALUES ('boom'); --": "x"},
+	}
+	_, err := plugin.TableCreate("u", "users", data, nil)
+	if err == nil {
+		t.Fatal("expected error for malicious column name")
+	}
+	if !strings.Contains(err.Error(), "invalid column name") {
+		t.Fatalf("expected invalid column name error, got: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
 func TestCallFunctionRollbackOnError(t *testing.T) {
 	plugin, mock := newTestPlugin(t)
 	defer plugin.db.Close()
@@ -520,6 +539,24 @@ func TestTableUpdateWithContext2(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet expectations in TableUpdateWithContext2: %v", err)
+	}
+}
+
+func TestTableUpdate_RejectsMaliciousColumn(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	defer plugin.db.Close()
+
+	data := map[string]any{"name = 'pwned', update_field": "x"}
+	where := map[string]any{"id": map[string]any{"=": 1}}
+	_, err := plugin.TableUpdate("user999", "items", data, where, nil)
+	if err == nil {
+		t.Fatal("expected error for malicious column name")
+	}
+	if !strings.Contains(err.Error(), "invalid column name") {
+		t.Fatalf("expected invalid column name error, got: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
 	}
 }
 

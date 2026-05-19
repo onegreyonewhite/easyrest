@@ -7,6 +7,49 @@ import (
 	"strings"
 )
 
+// isValidWhereField reports whether field may appear as a WHERE column expression.
+// It accepts plain identifiers and ILIKE rewrite forms produced by data plugins.
+func isValidWhereField(field string) bool {
+	if IsValidIdentifier(field) {
+		return true
+	}
+	const lowerPrefix = "LOWER("
+	if strings.HasPrefix(field, lowerPrefix) && strings.HasSuffix(field, ")") {
+		return IsValidIdentifier(field[len(lowerPrefix) : len(field)-1])
+	}
+	const collateSuffix = " COLLATE NOCASE"
+	if strings.HasSuffix(field, collateSuffix) {
+		return IsValidIdentifier(field[:len(field)-len(collateSuffix)])
+	}
+	return false
+}
+
+// ValidateColumnName returns an error when name is not a safe SQL column identifier.
+func ValidateColumnName(name string) error {
+	if !IsValidIdentifier(name) {
+		return fmt.Errorf("invalid column name: %q", name)
+	}
+	return nil
+}
+
+// IsValidIdentifier reports whether id is a safe SQL identifier: [A-Za-z_][A-Za-z0-9_]*.
+func IsValidIdentifier(id string) bool {
+	if len(id) == 0 {
+		return false
+	}
+	c := id[0]
+	if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_') {
+		return false
+	}
+	for i := 1; i < len(id); i++ {
+		c = id[i]
+		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 // internal helper for building condition entries from the where map.
 type whereCondEntry struct {
 	cond    string
@@ -15,7 +58,7 @@ type whereCondEntry struct {
 }
 
 // buildWhereCondEntries processes the where map and returns a slice of whereCondEntry.
-func buildWhereCondEntries(where map[string]any) []whereCondEntry {
+func buildWhereCondEntries(where map[string]any) ([]whereCondEntry, error) {
 	entries := make([]whereCondEntry, 0, len(where))
 	var sb strings.Builder
 
@@ -33,6 +76,9 @@ func buildWhereCondEntries(where map[string]any) []whereCondEntry {
 		if strings.HasPrefix(field, "NOT ") {
 			isNot = true
 			baseField = field[4:]
+		}
+		if !isValidWhereField(baseField) {
+			return nil, fmt.Errorf("invalid field name: %q", field)
 		}
 		switch v := val.(type) {
 		case map[string]any:
@@ -107,7 +153,7 @@ func buildWhereCondEntries(where map[string]any) []whereCondEntry {
 			}
 		}
 	}
-	return entries
+	return entries, nil
 }
 
 // BuildWhereClause constructs a SQL WHERE clause from a given where map.
@@ -117,7 +163,10 @@ func buildWhereCondEntries(where map[string]any) []whereCondEntry {
 //
 // It returns the SQL string (starting with " WHERE ") and the list of arguments.
 func BuildWhereClause(where map[string]any) (string, []any, error) {
-	entries := buildWhereCondEntries(where)
+	entries, err := buildWhereCondEntries(where)
+	if err != nil {
+		return "", nil, err
+	}
 	if len(entries) == 0 {
 		return "", nil, nil
 	}
@@ -136,7 +185,10 @@ func BuildWhereClause(where map[string]any) (string, []any, error) {
 // BuildWhereClauseSorted constructs a SQL WHERE clause from a given where map,
 // but sorts the conditions (and their arguments) by field name and operator for deterministic output.
 func BuildWhereClauseSorted(where map[string]any) (string, []any, error) {
-	entries := buildWhereCondEntries(where)
+	entries, err := buildWhereCondEntries(where)
+	if err != nil {
+		return "", nil, err
+	}
 	// Sort entries by sortKey (insertion sort for no extra imports)
 	for i := 1; i < len(entries); i++ {
 		j := i

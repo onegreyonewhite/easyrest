@@ -104,6 +104,10 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data = substituteValue(data, flatCtx, pluginCtx).(map[string]any)
+	if err := validateBodyColumns(data); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	result, err := dbPlug.CallFunction(userID, funcName, data, pluginCtx)
 	if err != nil {
 		http.Error(w, "Error in CallFunction: "+err.Error(), http.StatusInternalServerError)

@@ -736,6 +736,13 @@ func (m *mysqlPlugin) TableGet(userID, table string, selectFields []string, wher
 
 // TableCreate builds and executes an INSERT statement from data.
 func (m *mysqlPlugin) TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, error) {
+	for _, row := range data {
+		for k := range row {
+			if err := easyrest.ValidateColumnName(k); err != nil {
+				return nil, err
+			}
+		}
+	}
 	res, err := m.handleTransaction(ctx, func(tx *sql.Tx) (any, error) {
 		var results []map[string]any
 		queryCtx := context.Background()
@@ -779,6 +786,11 @@ func (m *mysqlPlugin) TableCreate(userID, table string, data []map[string]any, c
 
 // TableUpdate builds and executes an UPDATE statement.
 func (m *mysqlPlugin) TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, error) {
+	for k := range data {
+		if err := easyrest.ValidateColumnName(k); err != nil {
+			return 0, err
+		}
+	}
 	res, err := m.handleTransaction(ctx, func(tx *sql.Tx) (any, error) {
 		var keys []string
 		for k := range data {

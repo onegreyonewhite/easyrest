@@ -285,3 +285,46 @@ func TestRPCAllowList(t *testing.T) {
 		})
 	}
 }
+
+func TestRPCRejectsMaliciousArgKey(t *testing.T) {
+	mockPlugin := &mockDBPlugin{
+		callFunction: func(userID, funcName string, data map[string]any, ctx map[string]any) (any, error) {
+			return data, nil
+		},
+	}
+	defer server.StopPlugins()
+
+	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
+	server.ReloadConfig()
+	router := server.SetupRouter()
+
+	cfg := server.GetConfig()
+	cfg.CheckScope = false
+	server.SetConfig(cfg)
+	newPluginsMap := map[string]easyrest.DBPlugin{"mock": mockPlugin}
+	server.DbPlugins.Store(&newPluginsMap)
+
+	claims := jwt.MapClaims{
+		"sub":   "testuser",
+		"exp":   time.Now().Add(time.Hour).Unix(),
+		"scope": "test-write",
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenStr, err := token.SignedString([]byte("mytestsecret"))
+	if err != nil {
+		t.Fatalf("Failed to sign token: %v", err)
+	}
+
+	body := strings.NewReader(`{"name=evil": 1}`)
+	req, err := http.NewRequest("POST", "/api/mock/rpc/test/", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tokenStr)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d. Response: %s", rr.Code, rr.Body.String())
+	}
+}

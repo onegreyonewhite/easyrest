@@ -344,6 +344,13 @@ func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, whe
 
 // TableCreate builds and executes an INSERT query.
 func (s *sqlitePlugin) TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, error) {
+	for _, row := range data {
+		for k := range row {
+			if err := easyrest.ValidateColumnName(k); err != nil {
+				return nil, err
+			}
+		}
+	}
 	res, err := s.handleTransaction(userID, ctx, func(tx *sql.Tx) (any, error) {
 		ctxQuery := context.WithValue(backgroundCtx, userIDKey, userID)
 		var results []map[string]any
@@ -389,6 +396,11 @@ func (s *sqlitePlugin) TableCreate(userID, table string, data []map[string]any, 
 
 // TableUpdate builds and executes an UPDATE query.
 func (s *sqlitePlugin) TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, error) {
+	for k := range data {
+		if err := easyrest.ValidateColumnName(k); err != nil {
+			return 0, err
+		}
+	}
 	res, err := s.handleTransaction(userID, ctx, func(tx *sql.Tx) (any, error) {
 		ctxQuery := context.WithValue(backgroundCtx, userIDKey, userID)
 		var setParts []string
@@ -513,7 +525,8 @@ func (s *sqlitePlugin) GetSchema(ctx map[string]any) (any, error) {
 	for name, typ := range items {
 		schema, err := s.getJSONSchemaForTable(name)
 		if err != nil {
-			return nil, err
+			// Skip tables or views with unsafe names rather than failing the whole schema.
+			continue
 		}
 		switch typ {
 		case "table":
@@ -532,7 +545,11 @@ func (s *sqlitePlugin) GetSchema(ctx map[string]any) (any, error) {
 
 // getJSONSchemaForTable builds a JSON schema for a given table by querying PRAGMA table_info.
 func (s *sqlitePlugin) getJSONSchemaForTable(tableName string) (map[string]any, error) {
-	query := fmt.Sprintf("PRAGMA table_info(%s)", tableName)
+	if !easyrest.IsValidIdentifier(tableName) {
+		return nil, fmt.Errorf("unsafe table name in schema: %q", tableName)
+	}
+	escaped := strings.ReplaceAll(tableName, `"`, `""`)
+	query := fmt.Sprintf(`PRAGMA table_info("%s")`, escaped)
 	rows, err := s.db.Query(query)
 	if err != nil {
 		return nil, err

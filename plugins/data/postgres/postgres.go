@@ -361,6 +361,13 @@ func (p *pgPlugin) TableCreate(userID, table string, data []map[string]any, ctx 
 	if len(data) == 0 {
 		return []map[string]any{}, nil
 	}
+	for _, row := range data {
+		for k := range row {
+			if err := easyrest.ValidateColumnName(k); err != nil {
+				return nil, err
+			}
+		}
+	}
 
 	// Get transaction preference
 	txPreference, err := easyrest.GetTxPreference(ctx)
@@ -504,6 +511,12 @@ func (p *pgPlugin) bulkCreate(table string, data []map[string]any, ctx map[strin
 
 // TableUpdate executes an UPDATE query on the specified table.
 func (p *pgPlugin) TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, error) {
+	for k := range data {
+		if err := easyrest.ValidateColumnName(k); err != nil {
+			return 0, err
+		}
+	}
+
 	// Get transaction preference
 	txPreference, err := easyrest.GetTxPreference(ctx)
 	if err != nil {
