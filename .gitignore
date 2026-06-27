@@ -1,6 +1,10 @@
 bin
 test.db
 test.db-*
+local.db
+local.db-*
+local_config.yaml
+local_token.txt
 release
 cover.out
 structure.txt
