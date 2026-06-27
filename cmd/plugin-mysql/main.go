@@ -21,7 +21,8 @@ func main() {
 		HandshakeConfig: easyrest.Handshake,
 		Plugins: map[string]hplugin.Plugin{
 			"db":    &easyrest.DBPluginPlugin{Impl: mysqlPlugin.NewMysqlPlugin()},
-			"cache": &easyrest.CachePluginPlugin{Impl: mysqlPlugin.NewMysqlCachePlugin()}, // Register cache plugin
+			"cache": &easyrest.CachePluginPlugin{Impl: mysqlPlugin.NewMysqlCachePlugin()},
+			"query": &easyrest.DBQueryPluginPlugin{Impl: mysqlPlugin.NewMysqlQueryPlugin()},
 		},
 	})
 }

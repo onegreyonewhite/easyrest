@@ -313,6 +313,77 @@ func (p *CachePluginPlugin) Client(broker *plugin.MuxBroker, c *rpc.Client) (any
 	return &CachePluginRPC{client: c}, nil
 }
 
+// --- DBQueryPlugin ---
+
+// DBQueryPluginRPC is the client wrapper for DBQueryPlugin.
+type DBQueryPluginRPC struct{ client *rpc.Client }
+
+func (q *DBQueryPluginRPC) InitConnection(uri string) error {
+	req := InitConnectionRequest{URI: uri}
+	var resp InitConnectionResponse
+	err := q.client.Call("Plugin.InitConnection", req, &resp)
+	if err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		return errors.New(resp.Error)
+	}
+	return nil
+}
+
+func (q *DBQueryPluginRPC) QueryCall(query string, ctx map[string]any) ([]map[string]any, error) {
+	req := QueryCallRequest{Query: query, Ctx: ctx}
+	var resp QueryCallResponse
+	err := q.client.Call("Plugin.QueryCall", req, &resp)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Error != "" {
+		return nil, errors.New(resp.Error)
+	}
+	result := resp.Rows
+	resp.Rows = nil
+	return result, nil
+}
+
+// DBQueryPluginRPCServer is the server-side RPC implementation for DBQueryPlugin.
+type DBQueryPluginRPCServer struct {
+	Impl DBQueryPlugin
+}
+
+func (s *DBQueryPluginRPCServer) InitConnection(req InitConnectionRequest, resp *InitConnectionResponse) error {
+	err := s.Impl.InitConnection(req.URI)
+	if err != nil {
+		resp.Error = err.Error()
+	}
+	return nil
+}
+
+func (s *DBQueryPluginRPCServer) QueryCall(req QueryCallRequest, resp *QueryCallResponse) error {
+	rows, err := s.Impl.QueryCall(req.Query, req.Ctx)
+	if err != nil {
+		resp.Error = err.Error()
+		return nil
+	}
+	resp.Rows = rows
+	return nil
+}
+
+// DBQueryPluginPlugin wraps the DBQueryPlugin implementation for go-plugin.
+type DBQueryPluginPlugin struct {
+	Impl DBQueryPlugin
+}
+
+func (p *DBQueryPluginPlugin) Server(broker *plugin.MuxBroker) (any, error) {
+	return &DBQueryPluginRPCServer{Impl: p.Impl}, nil
+}
+
+func (p *DBQueryPluginPlugin) Client(broker *plugin.MuxBroker, c *rpc.Client) (any, error) {
+	return &DBQueryPluginRPC{client: c}, nil
+}
+
+// --- End DBQueryPlugin ---
+
 // AuthPluginRPC is the client wrapper for AuthPlugin.
 type AuthPluginRPC struct{ client *rpc.Client }
 

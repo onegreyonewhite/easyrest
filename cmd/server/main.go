@@ -24,17 +24,26 @@ func main() {
 		server.PreservedCachePlugins["sqlite"] = func() easyrest.CachePlugin {
 			return sqlitePlugin.NewSqliteCachePlugin()
 		}
+		server.PreservedQueryPlugins["sqlite"] = func() easyrest.DBQueryPlugin {
+			return sqlitePlugin.NewSqliteQueryPlugin()
+		}
 		server.PreservedDbPlugins["postgres"] = func() easyrest.DBPlugin {
 			return postgresPlugin.NewPgPlugin()
 		}
 		server.PreservedCachePlugins["postgres"] = func() easyrest.CachePlugin {
 			return postgresPlugin.NewPgCachePlugin()
 		}
+		server.PreservedQueryPlugins["postgres"] = func() easyrest.DBQueryPlugin {
+			return postgresPlugin.NewPgQueryPlugin()
+		}
 		server.PreservedDbPlugins["mysql"] = func() easyrest.DBPlugin {
 			return mysqlPlugin.NewMysqlPlugin()
 		}
 		server.PreservedCachePlugins["mysql"] = func() easyrest.CachePlugin {
 			return mysqlPlugin.NewMysqlCachePlugin()
+		}
+		server.PreservedQueryPlugins["mysql"] = func() easyrest.DBQueryPlugin {
+			return mysqlPlugin.NewMysqlQueryPlugin()
 		}
 		server.PreservedCachePlugins["redis"] = func() easyrest.CachePlugin {
 			return redisPlugin.NewRedisCachePlugin()

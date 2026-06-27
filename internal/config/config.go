@@ -26,6 +26,7 @@ type PluginConfig struct {
 	Path                string              `yaml:"path,omitempty"`
 	FuncInvalidationMap map[string][]string `yaml:"cache_invalidation_map,omitempty"`
 	EnableCache         bool                `yaml:"enable_cache,omitempty"`
+	UseQuery            bool                `yaml:"use_query,omitempty"`
 	CacheName           string              `yaml:"cache_name,omitempty"`
 	DbTxEnd             string              `yaml:"db_tx_end,omitempty"`
 	Public              AccessConfig        `yaml:"public,omitempty"`
@@ -124,6 +125,7 @@ func LoadPluginConfigs(configs []string) map[string]PluginConfig {
 				Name:        connName,
 				Uri:         parts[1],
 				EnableCache: os.Getenv(fmt.Sprintf("ER_CACHE_ENABLE_%s", strings.ToUpper(connName))) == "1",
+				UseQuery:    os.Getenv(fmt.Sprintf("ER_USE_QUERY_%s", strings.ToUpper(connName))) == "1",
 				CacheName:   cacheName,
 				DbTxEnd:     "commit-allow-override",
 			}

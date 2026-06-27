@@ -298,6 +298,8 @@ func SetupRouter() chi.Router {
 	LoadPlugins()
 	r := chi.NewRouter()
 
+	chi.RegisterMethod("QUERY")
+
 	// Add CORS middleware first
 	if cfg.CORS.Enabled {
 		r.Use(corsMiddleware)
@@ -314,6 +316,8 @@ func SetupRouter() chi.Router {
 
 	// Schema endpoint.
 	r.Get("/api/{db}/", schemaHandler)
+	// Read-only SQL query endpoint.
+	r.Method("QUERY", "/api/{db}/", http.HandlerFunc(queryHandler))
 	// Call RPC function endpoint.
 	r.Post("/api/{db}/rpc/{func}/", rpcHandler)
 	// Call table endpoint (supports multiple methods inside handler).

@@ -1002,3 +1002,60 @@ func NewMysqlPlugin() *mysqlPlugin {
 func NewMysqlCachePlugin() *mysqlCachePlugin {
 	return &mysqlCachePlugin{dbPluginPointer: NewMysqlPlugin()}
 }
+
+// mysqlQueryPlugin implements the DBQueryPlugin interface for read-only SQL queries.
+type mysqlQueryPlugin struct {
+	dbPluginPointer *mysqlPlugin
+}
+
+func (m *mysqlQueryPlugin) InitConnection(uri string) error {
+	return m.dbPluginPointer.InitConnection(uri)
+}
+
+func (m *mysqlQueryPlugin) QueryCall(query string, ctx map[string]any) ([]map[string]any, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, errors.New("query is empty")
+	}
+
+	queryCtx := context.Background()
+
+	conn, err := m.dbPluginPointer.db.Conn(queryCtx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get connection: %w", err)
+	}
+	defer conn.Close()
+
+	if ctx != nil {
+		if err := m.dbPluginPointer.injectContext(conn, ctx); err != nil {
+			return nil, err
+		}
+	}
+
+	if _, err := conn.ExecContext(queryCtx, "START TRANSACTION READ ONLY"); err != nil {
+		return nil, fmt.Errorf("failed to start read-only transaction: %w", err)
+	}
+
+	rows, err := conn.QueryContext(queryCtx, query)
+	if err != nil {
+		_, _ = conn.ExecContext(queryCtx, "ROLLBACK")
+		return nil, fmt.Errorf("failed to execute query: %w", err)
+	}
+	defer rows.Close()
+
+	results, err := scanRows(rows)
+	if err != nil {
+		_, _ = conn.ExecContext(queryCtx, "ROLLBACK")
+		return nil, err
+	}
+
+	if _, err := conn.ExecContext(queryCtx, "COMMIT"); err != nil {
+		return nil, fmt.Errorf("failed to commit read-only transaction: %w", err)
+	}
+
+	return results, nil
+}
+
+func NewMysqlQueryPlugin() *mysqlQueryPlugin {
+	return &mysqlQueryPlugin{dbPluginPointer: NewMysqlPlugin()}
+}

@@ -911,3 +911,69 @@ func TestGetSchemaWithCustomSearchPath(t *testing.T) {
 		t.Errorf("unfulfilled expectations in TestGetSchemaWithCustomSearchPath: %v", err)
 	}
 }
+
+func TestNewPgQueryPlugin(t *testing.T) {
+	p := NewPgQueryPlugin()
+	require.NotNil(t, p)
+	require.NotNil(t, p.dbPluginPointer)
+}
+
+func TestPgQueryCall(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	qp := &pgQueryPlugin{dbPluginPointer: plugin}
+
+	t.Run("select rows", func(t *testing.T) {
+		mock.ExpectBegin()
+		mock.ExpectExec("SET TRANSACTION READ ONLY").
+			WillReturnResult(pgxmock.NewResult("SET", 0))
+		mock.ExpectQuery("SELECT id, name FROM users").
+			WillReturnRows(pgxmock.NewRows([]string{"id", "name"}).AddRow(1, "Alice"))
+		mock.ExpectCommit()
+
+		rows, err := qp.QueryCall("SELECT id, name FROM users", nil)
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		assert.Equal(t, "Alice", rows[0]["name"])
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("with context", func(t *testing.T) {
+		ctx := map[string]any{"claims_sub": "sub_value"}
+		mock.ExpectBegin()
+		mock.ExpectExec("SET TRANSACTION READ ONLY").
+			WillReturnResult(pgxmock.NewResult("SET", 0))
+		mock.ExpectExec(`SELECT set_config($1, $2, true)`).
+			WithArgs("request.claims_sub", "sub_value").
+			WillReturnResult(pgxmock.NewResult("SELECT", 1))
+		mock.ExpectExec(`SELECT set_config($1, $2, true)`).
+			WithArgs("erctx.claims_sub", "sub_value").
+			WillReturnResult(pgxmock.NewResult("SELECT", 1))
+		mock.ExpectQuery("SELECT id FROM users").
+			WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(1))
+		mock.ExpectCommit()
+
+		rows, err := qp.QueryCall("SELECT id FROM users", ctx)
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("empty query", func(t *testing.T) {
+		_, err := qp.QueryCall("  ", nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "empty")
+	})
+
+	t.Run("query error rolls back", func(t *testing.T) {
+		mock.ExpectBegin()
+		mock.ExpectExec("SET TRANSACTION READ ONLY").
+			WillReturnResult(pgxmock.NewResult("SET", 0))
+		mock.ExpectQuery("SELECT bad").
+			WillReturnError(errors.New("syntax error"))
+		mock.ExpectRollback()
+
+		_, err := qp.QueryCall("SELECT bad", nil)
+		require.Error(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}

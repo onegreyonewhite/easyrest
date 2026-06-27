@@ -23,6 +23,7 @@ func main() {
 		Plugins: map[string]hplugin.Plugin{
 			"db":    &easyrest.DBPluginPlugin{Impl: sqlite.NewSqlitePlugin()},
 			"cache": &easyrest.CachePluginPlugin{Impl: sqlite.NewSqliteCachePlugin()},
+			"query": &easyrest.DBQueryPluginPlugin{Impl: sqlite.NewSqliteQueryPlugin()},
 		},
 		Test: nil,
 	})

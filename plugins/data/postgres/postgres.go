@@ -265,6 +265,29 @@ func (p *pgPlugin) processRows(rows pgx.Rows, loc *time.Location) ([]map[string]
 	return results, nil
 }
 
+// resolveLocation returns the timezone from plugin context, defaulting to UTC.
+func (p *pgPlugin) resolveLocation(ctx map[string]any) *time.Location {
+	loc := time.UTC
+	if ctx == nil {
+		return loc
+	}
+	if p.timezoneCache == nil {
+		p.timezoneCache = make(map[string]*time.Location)
+	}
+	if tz, ok := ctx["timezone"].(string); ok && tz != "" {
+		if cachedLoc, found := p.timezoneCache[tz]; found {
+			return cachedLoc
+		}
+		if l, loadErr := time.LoadLocation(tz); loadErr == nil {
+			p.timezoneCache[tz] = l
+			return l
+		} else {
+			log.Printf("Warning: Could not load timezone '%s', using UTC: %v", tz, loadErr)
+		}
+	}
+	return loc
+}
+
 // TableGet executes a SELECT query with optional WHERE, GROUP BY, ORDER BY, LIMIT and OFFSET.
 func (p *pgPlugin) TableGet(userID, table string, selectFields []string, where map[string]any,
 	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, error) {
@@ -316,30 +339,12 @@ func (p *pgPlugin) TableGet(userID, table string, selectFields []string, where m
 	defer tx.Rollback(queryCtx)
 
 	loc := time.UTC
-	if ctx != nil {
-		if p.timezoneCache == nil {
-			p.timezoneCache = make(map[string]*time.Location)
+	if ctx != nil && len(ctx) > 0 {
+		if err := ApplyPluginContext(queryCtx, tx, ctx); err != nil {
+			tx.Rollback(queryCtx)
+			return nil, err
 		}
-		if len(ctx) > 0 {
-			if err := ApplyPluginContext(queryCtx, tx, ctx); err != nil {
-				tx.Rollback(queryCtx)
-				return nil, err
-			}
-		}
-		if tz, ok := ctx["timezone"].(string); ok && tz != "" {
-			var cachedLoc *time.Location
-			var found bool
-			if cachedLoc, found = p.timezoneCache[tz]; !found {
-				if l, err := time.LoadLocation(tz); err == nil {
-					p.timezoneCache[tz] = l
-					loc = l
-				} else {
-					log.Printf("Warning: Could not load timezone '%s', using UTC: %v", tz, err)
-				}
-			} else {
-				loc = cachedLoc
-			}
-		}
+		loc = p.resolveLocation(ctx)
 	}
 
 	rows, err := tx.Query(queryCtx, finalQuery, args...)
@@ -1237,4 +1242,62 @@ func NewPgPlugin() *pgPlugin {
 
 func NewPgCachePlugin() *pgCachePlugin {
 	return &pgCachePlugin{dbPluginPointer: NewPgPlugin()}
+}
+
+// pgQueryPlugin implements the DBQueryPlugin interface for read-only SQL queries.
+type pgQueryPlugin struct {
+	dbPluginPointer *pgPlugin
+}
+
+func (p *pgQueryPlugin) InitConnection(uri string) error {
+	return p.dbPluginPointer.InitConnection(uri)
+}
+
+func (p *pgQueryPlugin) QueryCall(query string, ctx map[string]any) ([]map[string]any, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, errors.New("query is empty")
+	}
+
+	queryCtx, cancel := p.dbPluginPointer.newContextWithTimeout()
+	defer cancel()
+
+	tx, err := p.dbPluginPointer.db.Begin(queryCtx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(queryCtx)
+
+	if _, err := tx.Exec(queryCtx, "SET TRANSACTION READ ONLY"); err != nil {
+		return nil, fmt.Errorf("failed to set read-only transaction: %w", err)
+	}
+
+	loc := time.UTC
+	if ctx != nil && len(ctx) > 0 {
+		if err := ApplyPluginContext(queryCtx, tx, ctx); err != nil {
+			return nil, err
+		}
+		loc = p.dbPluginPointer.resolveLocation(ctx)
+	}
+
+	rows, err := tx.Query(queryCtx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	results, err := p.dbPluginPointer.processRows(rows, loc)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(queryCtx); err != nil {
+		return nil, err
+	}
+
+	return results, nil
+}
+
+func NewPgQueryPlugin() *pgQueryPlugin {
+	return &pgQueryPlugin{dbPluginPointer: NewPgPlugin()}
 }

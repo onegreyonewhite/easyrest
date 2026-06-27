@@ -935,3 +935,96 @@ func TestConvertILIKEtoLower(t *testing.T) {
 		})
 	}
 }
+
+func TestNewMysqlQueryPlugin(t *testing.T) {
+	p := NewMysqlQueryPlugin()
+	if p == nil {
+		t.Fatal("NewMysqlQueryPlugin returned nil")
+	}
+	if p.dbPluginPointer == nil {
+		t.Fatal("expected non-nil dbPluginPointer")
+	}
+}
+
+func TestMysqlQueryCall(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	defer plugin.db.Close()
+	qp := &mysqlQueryPlugin{dbPluginPointer: plugin}
+
+	t.Run("select rows", func(t *testing.T) {
+		mock.ExpectExec(regexp.QuoteMeta("START TRANSACTION READ ONLY")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectQuery("SELECT id, name FROM users").
+			WillReturnRows(sqlmock.NewRows([]string{"id", "name"}).AddRow(1, "Alice"))
+		mock.ExpectExec(regexp.QuoteMeta("COMMIT")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		rows, err := qp.QueryCall("SELECT id, name FROM users", nil)
+		if err != nil {
+			t.Fatalf("QueryCall failed: %v", err)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("expected 1 row, got %d", len(rows))
+		}
+		if rows[0]["name"] != "Alice" {
+			t.Errorf("expected Alice, got %v", rows[0]["name"])
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("with context", func(t *testing.T) {
+		ctxData := map[string]interface{}{
+			"claims_sub": "sub_value",
+		}
+		setQuery := regexp.QuoteMeta("SET @erctx_claims_sub = ?, @request_claims_sub = ?")
+		mock.ExpectExec(setQuery).
+			WithArgs("sub_value", "sub_value").
+			WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectExec(regexp.QuoteMeta("START TRANSACTION READ ONLY")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectQuery("SELECT id FROM users").
+			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
+		mock.ExpectExec(regexp.QuoteMeta("COMMIT")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		rows, err := qp.QueryCall("SELECT id FROM users", ctxData)
+		if err != nil {
+			t.Fatalf("QueryCall failed: %v", err)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("expected 1 row, got %d", len(rows))
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("empty query", func(t *testing.T) {
+		_, err := qp.QueryCall("  ", nil)
+		if err == nil {
+			t.Fatal("expected error for empty query")
+		}
+		if !strings.Contains(err.Error(), "empty") {
+			t.Errorf("expected empty query error, got %v", err)
+		}
+	})
+
+	t.Run("query error rolls back", func(t *testing.T) {
+		mock.ExpectExec(regexp.QuoteMeta("START TRANSACTION READ ONLY")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectQuery("SELECT bad").
+			WillReturnError(errors.New("syntax error"))
+		mock.ExpectExec(regexp.QuoteMeta("ROLLBACK")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		_, err := qp.QueryCall("SELECT bad", nil)
+		if err == nil {
+			t.Fatal("expected error for failed query")
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet expectations: %v", err)
+		}
+	})
+}

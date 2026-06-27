@@ -36,15 +36,49 @@ type sqliteCachePlugin struct {
 	setStmt         *sql.Stmt
 }
 
+type sqliteQueryPlugin struct {
+	dbPluginPointer *sqlitePlugin
+}
+
+// buildSQLiteDSN converts an easyrest sqlite URI into a modernc driver DSN.
+func buildSQLiteDSN(uri string, readOnly bool) (string, error) {
+	if !strings.HasPrefix(uri, "sqlite://") {
+		return "", errors.New("invalid sqlite URI")
+	}
+	rest := strings.TrimPrefix(uri, "sqlite://")
+	path := rest
+	query := ""
+	if idx := strings.Index(rest, "?"); idx >= 0 {
+		path = rest[:idx]
+		query = rest[idx+1:]
+	}
+
+	dsn := "file:" + path
+	params := make([]string, 0, 2)
+	if readOnly {
+		params = append(params, "mode=ro")
+	}
+	if query != "" {
+		params = append(params, query)
+	}
+	if len(params) > 0 {
+		dsn += "?" + strings.Join(params, "&")
+	}
+	return dsn, nil
+}
+
 // InitConnection opens the SQLite database based on the provided URI.
 func (s *sqlitePlugin) InitConnection(uri string) error {
-	// Expected format: sqlite://<path>
-	if !strings.HasPrefix(uri, "sqlite://") {
-		return errors.New("invalid sqlite URI")
+	return s.initConnection(uri, false)
+}
+
+func (s *sqlitePlugin) initConnection(uri string, readOnly bool) error {
+	dsn, err := buildSQLiteDSN(uri, readOnly)
+	if err != nil {
+		return err
 	}
-	dbPath := strings.TrimPrefix(uri, "sqlite://")
-	var err error
-	s.db, err = sql.Open("sqlite", dbPath)
+
+	s.db, err = sql.Open("sqlite", dsn)
 	if err != nil {
 		return err
 	}
@@ -60,10 +94,12 @@ func (s *sqlitePlugin) InitConnection(uri string) error {
 	s.db.SetMaxIdleConns(5)
 	s.db.SetConnMaxLifetime(30 * time.Minute)
 
-	// Enable WAL mode for better performance
-	_, err = s.db.Exec("PRAGMA journal_mode=WAL")
-	if err != nil {
-		return err
+	if !readOnly {
+		// Enable WAL mode for better performance (not compatible with read-only mode)
+		_, err = s.db.Exec("PRAGMA journal_mode=WAL")
+		if err != nil {
+			return err
+		}
 	}
 
 	// Increase cache size for better performance
@@ -166,6 +202,52 @@ func (s *sqlitePlugin) getPreparedStmt(query string, ctx context.Context) (*sql.
 	}
 
 	return v.(*sql.Stmt), nil
+}
+
+// scanResultRows reads all rows from a sql.Rows into a slice of maps.
+func scanResultRows(rows *sql.Rows, initCap int) ([]map[string]any, error) {
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	numCols := len(cols)
+
+	columns := make([]any, numCols)
+	columnPointers := make([]any, numCols)
+	for i := range columns {
+		columnPointers[i] = &columns[i]
+	}
+
+	if initCap <= 0 {
+		initCap = 32
+	}
+	results := make([]map[string]any, 0, initCap)
+	for rows.Next() {
+		if err := rows.Scan(columnPointers...); err != nil {
+			return nil, err
+		}
+
+		rowMap := make(map[string]any, numCols)
+		for i, colName := range cols {
+			if t, ok := columns[i].(time.Time); ok {
+				if t.Hour() == 0 && t.Minute() == 0 && t.Second() == 0 && t.Nanosecond() == 0 {
+					rowMap[colName] = t.Format("2006-01-02")
+				} else {
+					rowMap[colName] = t.Format("2006-01-02 15:04:05")
+				}
+			} else {
+				rowMap[colName] = columns[i]
+			}
+		}
+		results = append(results, rowMap)
+		for i := range columns {
+			columns[i] = nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return results, nil
 }
 
 // convertILIKEtoLike converts ILIKE operator to LIKE with COLLATE NOCASE
@@ -299,47 +381,7 @@ func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, whe
 	}
 	defer rows.Close()
 
-	cols, err := rows.Columns()
-	if err != nil {
-		return nil, err
-	}
-	numCols := len(cols)
-
-	columns := make([]any, numCols)
-	columnPointers := make([]any, numCols)
-	for i := range columns {
-		columnPointers[i] = &columns[i]
-	}
-
-	initCap := limit
-	if initCap <= 0 {
-		initCap = 32
-	}
-	results := make([]map[string]any, 0, initCap)
-	for rows.Next() {
-		if err := rows.Scan(columnPointers...); err != nil {
-			return nil, err
-		}
-
-		rowMap := make(map[string]any, numCols)
-		for i, colName := range cols {
-			if t, ok := columns[i].(time.Time); ok {
-				if t.Hour() == 0 && t.Minute() == 0 && t.Second() == 0 && t.Nanosecond() == 0 {
-					rowMap[colName] = t.Format("2006-01-02")
-				} else {
-					rowMap[colName] = t.Format("2006-01-02 15:04:05")
-				}
-			} else {
-				rowMap[colName] = columns[i]
-			}
-		}
-		results = append(results, rowMap)
-		for i := range columns {
-			columns[i] = nil
-		}
-	}
-
-	return results, nil
+	return scanResultRows(rows, limit)
 }
 
 // TableCreate builds and executes an INSERT query.
@@ -622,4 +664,58 @@ func NewSqlitePlugin() *sqlitePlugin {
 func NewSqliteCachePlugin() *sqliteCachePlugin {
 	cacheImpl := &sqlitePlugin{}
 	return &sqliteCachePlugin{dbPluginPointer: cacheImpl}
+}
+
+func (s *sqliteQueryPlugin) InitConnection(uri string) error {
+	err := s.dbPluginPointer.initConnection(uri, true)
+	if err != nil {
+		return err
+	}
+	return verifyReadOnlyConnection(s.dbPluginPointer.db)
+}
+
+func verifyReadOnlyConnection(db *sql.DB) error {
+	_, err := db.Exec("PRAGMA query_only = ON")
+	if err != nil {
+		return fmt.Errorf("failed to set query_only: %w", err)
+	}
+	var queryOnly int
+	err = db.QueryRow("PRAGMA query_only").Scan(&queryOnly)
+	if err != nil {
+		return fmt.Errorf("failed to read query_only: %w", err)
+	}
+	if queryOnly != 1 {
+		return errors.New("connection is not read-only")
+	}
+	// Verify that write operations are rejected.
+	_, err = db.Exec("CREATE TABLE IF NOT EXISTS _easyrest_ro_check (id INTEGER)")
+	if err == nil {
+		return errors.New("connection allows writes; read-only access required")
+	}
+	return nil
+}
+
+func (s *sqliteQueryPlugin) QueryCall(query string, ctx map[string]any) ([]map[string]any, error) {
+	_ = ctx
+	if strings.TrimSpace(query) == "" {
+		return nil, errors.New("query is empty")
+	}
+
+	stmt, err := s.dbPluginPointer.getPreparedStmt(query, backgroundCtx)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := stmt.QueryContext(backgroundCtx)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return scanResultRows(rows, 0)
+}
+
+func NewSqliteQueryPlugin() *sqliteQueryPlugin {
+	queryImpl := &sqlitePlugin{}
+	return &sqliteQueryPlugin{dbPluginPointer: queryImpl}
 }

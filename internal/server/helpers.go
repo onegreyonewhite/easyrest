@@ -38,6 +38,7 @@ var (
 	cfg                     config.Config
 	cfgOnce                 sync.Once
 	DbPlugins               atomic.Pointer[map[string]easyrest.DBPlugin]
+	QueryPlugins            atomic.Pointer[map[string]easyrest.DBQueryPlugin]
 	CachePlugins            atomic.Pointer[map[string]easyrest.CachePlugin]
 	AuthPlugins             atomic.Pointer[map[string]easyrest.AuthPlugin]
 	AuthSecurityDefinitions atomic.Pointer[map[string]map[string]any]
@@ -45,6 +46,7 @@ var (
 	authPluginClients       atomic.Pointer[map[string]*hplugin.Client]
 	PreservedCachePlugins   map[string]PreservedPluginFactory[easyrest.CachePlugin]
 	PreservedDbPlugins      map[string]PreservedPluginFactory[easyrest.DBPlugin]
+	PreservedQueryPlugins   map[string]PreservedPluginFactory[easyrest.DBQueryPlugin]
 	PreservedAuthPlugins    map[string]PreservedPluginFactory[easyrest.AuthPlugin]
 	AllowedOps              = map[string]string{
 		"eq":    "=",
@@ -97,6 +99,8 @@ func init() {
 	// Initialize atomic pointers with empty maps
 	emptyDbPlugins := make(map[string]easyrest.DBPlugin)
 	DbPlugins.Store(&emptyDbPlugins)
+	emptyQueryPlugins := make(map[string]easyrest.DBQueryPlugin)
+	QueryPlugins.Store(&emptyQueryPlugins)
 	emptyCachePlugins := make(map[string]easyrest.CachePlugin)
 	CachePlugins.Store(&emptyCachePlugins)
 	emptyPluginClients := make(map[string]*hplugin.Client)
@@ -112,6 +116,7 @@ func init() {
 
 	PreservedCachePlugins = make(map[string]PreservedPluginFactory[easyrest.CachePlugin])
 	PreservedDbPlugins = make(map[string]PreservedPluginFactory[easyrest.DBPlugin])
+	PreservedQueryPlugins = make(map[string]PreservedPluginFactory[easyrest.DBQueryPlugin])
 	PreservedAuthPlugins = make(map[string]PreservedPluginFactory[easyrest.AuthPlugin])
 }
 
@@ -142,6 +147,8 @@ func StopPlugins() {
 	// Atomically set empty maps
 	emptyDbPlugins := make(map[string]easyrest.DBPlugin)
 	DbPlugins.Store(&emptyDbPlugins)
+	emptyQueryPlugins := make(map[string]easyrest.DBQueryPlugin)
+	QueryPlugins.Store(&emptyQueryPlugins)
 	emptyCachePlugins := make(map[string]easyrest.CachePlugin)
 	CachePlugins.Store(&emptyCachePlugins)
 	emptyPluginClients := make(map[string]*hplugin.Client)
@@ -866,6 +873,7 @@ func LoadPlugins() {
 	cfg := GetConfig()
 	// Create new maps for the plugins and clients
 	newDbPlugins := make(map[string]easyrest.DBPlugin)
+	newQueryPlugins := make(map[string]easyrest.DBQueryPlugin)
 	newCachePlugins := make(map[string]easyrest.CachePlugin)
 	newPluginClients := make(map[string]*hplugin.Client)
 	// New maps for auth plugins
@@ -895,15 +903,17 @@ func LoadPlugins() {
 			}
 		} else {
 			isPreserved := false
-			if NewDbPlugin, ok := PreservedDbPlugins[pluginTypeHint]; ok {
-				dbPlugin := NewDbPlugin()
-				err := dbPlugin.InitConnection(pluginCfg.Uri)
-				if err != nil {
-					stdlog.Printf("Error initializing DB connection for plugin %s: %v", connName, err)
-				} else {
-					newDbPlugins[connName] = dbPlugin
-					isPreserved = true
-					logMsgParts = append(logMsgParts, "DB")
+			if !pluginCfg.UseQuery {
+				if NewDbPlugin, ok := PreservedDbPlugins[pluginTypeHint]; ok {
+					dbPlugin := NewDbPlugin()
+					err := dbPlugin.InitConnection(pluginCfg.Uri)
+					if err != nil {
+						stdlog.Printf("Error initializing DB connection for plugin %s: %v", connName, err)
+					} else {
+						newDbPlugins[connName] = dbPlugin
+						isPreserved = true
+						logMsgParts = append(logMsgParts, "DB")
+					}
 				}
 			}
 			if NewCachePlugin, ok := PreservedCachePlugins[pluginTypeHint]; ok {
@@ -915,6 +925,19 @@ func LoadPlugins() {
 					newCachePlugins[connName] = cachePlugin
 					isPreserved = true
 					logMsgParts = append(logMsgParts, "Cache")
+				}
+			}
+			if pluginCfg.UseQuery {
+				if NewQueryPlugin, ok := PreservedQueryPlugins[pluginTypeHint]; ok {
+					queryPlugin := NewQueryPlugin()
+					err := queryPlugin.InitConnection(pluginCfg.Uri)
+					if err != nil {
+						stdlog.Printf("Error initializing query connection for plugin %s: %v", connName, err)
+					} else {
+						newQueryPlugins[connName] = queryPlugin
+						isPreserved = true
+						logMsgParts = append(logMsgParts, "Query")
+					}
 				}
 			}
 			if isPreserved {
@@ -935,10 +958,11 @@ func LoadPlugins() {
 			continue
 		}
 
-		// Define that this plugin *might* serve db and cache interfaces
+		// Define that this plugin *might* serve db, cache, and query interfaces
 		pluginInterfaceMap := map[string]hplugin.Plugin{
 			"db":    &easyrest.DBPluginPlugin{},
 			"cache": &easyrest.CachePluginPlugin{},
+			"query": &easyrest.DBQueryPluginPlugin{},
 		}
 
 		// Configure the client
@@ -966,26 +990,28 @@ func LoadPlugins() {
 		pluginAddedSuccessfully := false
 
 		// --- Attempt to load DB Plugin ---
-		rawDB, errDBDispense := rpcClient.Dispense("db")
-		if errDBDispense == nil {
-			dbPlug, ok := rawDB.(easyrest.DBPlugin)
-			if ok {
-				errDBInit := dbPlug.InitConnection(pluginCfg.Uri)
-				if errDBInit == nil {
-					newDbPlugins[connName] = dbPlug
-					pluginAddedSuccessfully = true
-					logMsgParts = append(logMsgParts, "DB")
+		if !pluginCfg.UseQuery {
+			rawDB, errDBDispense := rpcClient.Dispense("db")
+			if errDBDispense == nil {
+				dbPlug, ok := rawDB.(easyrest.DBPlugin)
+				if ok {
+					errDBInit := dbPlug.InitConnection(pluginCfg.Uri)
+					if errDBInit == nil {
+						newDbPlugins[connName] = dbPlug
+						pluginAddedSuccessfully = true
+						logMsgParts = append(logMsgParts, "DB")
+					} else {
+						stdlog.Printf("Error initializing DB connection for plugin %s: %v", connName, errDBInit)
+					}
 				} else {
-					stdlog.Printf("Error initializing DB connection for plugin %s: %v", connName, errDBInit)
+					// This usually indicates a programming error (plugin mismatch)
+					stdlog.Printf("Error: Plugin %s (%s) dispensed 'db' but type assertion to DBPlugin failed", connName, pluginPath)
 				}
 			} else {
-				// This usually indicates a programming error (plugin mismatch)
-				stdlog.Printf("Error: Plugin %s (%s) dispensed 'db' but type assertion to DBPlugin failed", connName, pluginPath)
-			}
-		} else {
-			// Only log dispense error if it's not the typical "unknown service" which means the interface isn't implemented
-			if !strings.Contains(errDBDispense.Error(), "unknown service") {
-				stdlog.Printf("Error dispensing 'db' interface for plugin %s: %v", connName, errDBDispense)
+				// Only log dispense error if it's not the typical "unknown service" which means the interface isn't implemented
+				if !strings.Contains(errDBDispense.Error(), "unknown service") {
+					stdlog.Printf("Error dispensing 'db' interface for plugin %s: %v", connName, errDBDispense)
+				}
 			}
 		}
 
@@ -1008,6 +1034,30 @@ func LoadPlugins() {
 		} else {
 			if !strings.Contains(errCacheDispense.Error(), "unknown service") {
 				stdlog.Printf("Error dispensing 'cache' interface for plugin %s: %v", connName, errCacheDispense)
+			}
+		}
+
+		// --- Attempt to load Query Plugin ---
+		if pluginCfg.UseQuery {
+			rawQuery, errQueryDispense := rpcClient.Dispense("query")
+			if errQueryDispense == nil {
+				queryPlug, ok := rawQuery.(easyrest.DBQueryPlugin)
+				if ok {
+					errQueryInit := queryPlug.InitConnection(pluginCfg.Uri)
+					if errQueryInit == nil {
+						newQueryPlugins[connName] = queryPlug
+						pluginAddedSuccessfully = true
+						logMsgParts = append(logMsgParts, "Query")
+					} else {
+						stdlog.Printf("Error initializing Query connection for plugin %s: %v", connName, errQueryInit)
+					}
+				} else {
+					stdlog.Printf("Error: Plugin %s (%s) dispensed 'query' but type assertion to DBQueryPlugin failed", connName, pluginPath)
+				}
+			} else {
+				if !strings.Contains(errQueryDispense.Error(), "unknown service") {
+					stdlog.Printf("Error dispensing 'query' interface for plugin %s: %v", connName, errQueryDispense)
+				}
 			}
 		}
 
@@ -1176,8 +1226,9 @@ func LoadPlugins() {
 	// Get the pointer to the old clients map *before* swapping for DB/Cache/Auth
 	oldClientsPtr := pluginClients.Load()
 
-	// Atomically swap to the new maps for DB/Cache
+	// Atomically swap to the new maps for DB/Cache/Query
 	DbPlugins.Store(&newDbPlugins)
+	QueryPlugins.Store(&newQueryPlugins)
 	CachePlugins.Store(&newCachePlugins)
 
 	// Atomically swap for Auth

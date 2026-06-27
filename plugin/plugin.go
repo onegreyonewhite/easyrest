@@ -7,7 +7,7 @@ import (
 )
 
 // Version is the plugin version.
-var Version = "v0.17.1"
+var Version = "v0.18.0"
 
 // DBPlugin – interface for DB access plugins.
 type DBPlugin interface {
@@ -104,6 +104,26 @@ type GetSchemaRequest struct {
 type GetSchemaResponse struct {
 	Schema any
 	Error  string
+}
+
+// --- DBQueryPlugin ---
+
+// DBQueryPlugin defines the interface for read-only SQL query plugins.
+type DBQueryPlugin interface {
+	InitConnection(uri string) error
+	QueryCall(query string, ctx map[string]any) ([]map[string]any, error)
+}
+
+// QueryCallRequest holds the SQL query and context for QueryCall.
+type QueryCallRequest struct {
+	Query string
+	Ctx   map[string]any
+}
+
+// QueryCallResponse holds the query result rows or an error.
+type QueryCallResponse struct {
+	Rows  []map[string]any
+	Error string
 }
 
 // --- CachePlugin ---

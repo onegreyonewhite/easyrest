@@ -22,6 +22,7 @@ EasyREST handles authentication via JWT, validates and sanitizes request paramet
   - [WHERE Conditions](#where-conditions)
   - [Context Variables](#context-variables)
   - [Data Insertion, Updates, and Deletion](#data-insertion-updates-and-deletion)
+  - [Raw SQL Queries (QUERY method)](#raw-sql-queries-query-method)
 - [Supported Databases and Caches](#supported-databases-and-caches)
   - [SQLite](#sqlite)
   - [MySQL](#mysql)
@@ -106,6 +107,10 @@ flowchart TD
   - **`easyrest-server`**: This binary comes with built-in support for SQLite, MySQL, PostgreSQL (DB plugins), and Redis, LRU (Cache plugins). If a configured DB/Cache plugin matches one of these built-in types, it's used directly. For other plugin types or if an explicit `path` is provided, it behaves like `easyrest-gateway` and attempts to load an external plugin executable. Auth plugins are typically loaded externally by `easyrest-server` as well.
   - **`easyrest-plugin-*`**: These are standalone executables, each providing a specific DB or Cache implementation (e.g., `easyrest-plugin-mysql`).
   - **`easyrest-auth-*`**: These are standalone executables, each providing a specific Authentication implementation (e.g., `easyrest-auth-jwt`).
+- **Plugin interfaces:** A single plugin binary may expose one or more of:
+  - `"db"` — `DBPlugin` (CRUD and schema)
+  - `"cache"` — `CachePlugin` (ETag cache storage)
+  - `"query"` — `DBQueryPlugin` (read-only raw SQL via the HTTP `QUERY` method)
 - **Data Exchange:** The server sends validated and sanitized SQL expressions (for DB plugins), commands (for Cache plugins), or authentication-related data (for Auth plugins) and additional context data to the plugin. Context variables are directly substituted into the query or made available to the plugin.
 - **Type Registration:** For secure and reliable encoding/decoding over RPC, custom types (e.g., `time.Time` and flattened JWT claims) are registered with the gob package on both the server and plugin sides.
 
@@ -247,6 +252,29 @@ Database plugins handle these context variables differently:
 - **Update (PATCH):** JSON body and optional `where` conditions. Context variables can be used in data and conditions.
 - **Deletion (DELETE):** Based on `where` parameters. Context variables can be used in conditions.
 
+### Raw SQL Queries (QUERY method)
+
+EasyREST supports the HTTP **`QUERY`** method for sending a raw SQL query in the request body and receiving tabular results. This is useful when a query is too large for URL query parameters.
+
+- **Endpoint:** `QUERY /api/{connection}/`
+- **Body:** The SQL query text (plain text).
+- **Response:** JSON array of row objects (`[]map[string]any`), formatted via the same `Accept` / `format` handling as table GET responses.
+- **Authentication:** Required (unless anonymous claims are configured).
+- **Scope:** Requires the `read` scope (or a scope ending in `-read`).
+- **Plugin type:** Requires a configured **`DBQueryPlugin`** for the connection. Query plugins open read-only database connections and reject write operations.
+
+Example:
+
+```http
+QUERY /api/reports/
+Authorization: Bearer <token>
+Content-Type: text/plain
+
+SELECT id, name FROM users WHERE status = 'active' ORDER BY name LIMIT 100
+```
+
+The server adds a `Server-Timing: db;dur=...` header with query execution time.
+
 ---
 
 ## Supported Databases and Caches
@@ -259,6 +287,9 @@ EasyREST can connect to various data stores through its plugin system.
 - Built-in with `easyrest-server`. Can be used as `easyrest-plugin-sqlite` with `easyrest-gateway`.
 - A simple, file-based relational database. Good for development, testing, or small applications.
 - Schema is introspected from the database file.
+- **Query plugin:** The SQLite query plugin (`DBQueryPlugin`) opens connections in read-only mode (`mode=ro` in the driver DSN) and enables `PRAGMA query_only`. Write queries are rejected. For best results, use a database file that is not exclusively locked by a WAL-mode writer connection.
+
+Set `use_query: true` on the connection to use the Query plugin instead of the DB plugin (see [Plugin Attributes](#plugin-attributes)).
 
 ### MySQL
 
@@ -271,6 +302,7 @@ EasyREST can connect to various data stores through its plugin system.
 - **Stored Procedure Calls:** Executes stored procedures within a transaction.
 - **Connection Pooling:** Uses a MySQL connection pool for performance.
 - **UTF8MB4 Support:** Operates with `utf8mb4` and `utf8mb4_general_ci`.
+- **Query plugin:** With `use_query: true`, the MySQL query plugin (`DBQueryPlugin`) runs each `QUERY` request inside `START TRANSACTION READ ONLY`; write statements fail with a database error.
 
 #### MySQL Performance and Connection Parameters
 
@@ -339,6 +371,7 @@ docker exec -i mysql-easyrest mysql -uroot -proot easyrestdb < schemas/mysql.sql
 - **Function Calls:** Executes PostgreSQL functions within a transaction.
 - **Connection Pooling:** Efficient connection management.
 - **COPY Support:** Uses `COPY FROM` for bulk inserts (threshold configurable).
+- **Query plugin:** With `use_query: true`, the PostgreSQL query plugin (`DBQueryPlugin`) runs each `QUERY` request in a read-only transaction (`SET TRANSACTION READ ONLY`); write statements fail with a database error.
 
 #### PostgreSQL Performance and Connection Parameters
 
@@ -589,6 +622,7 @@ auth_plugins:
     - `path`: (Optional) Explicit path to the plugin executable. If omitted, EasyREST searches standard locations.
     - `title`: (Optional) A custom title for this specific plugin's API documentation (Swagger schema). If omitted, the default title "EasyRest API" is used.
     - `enable_cache`: (Optional, defaults to `false`) If `true`, enables ETag generation and checking (`If-Match`, `If-None-Match`) for **requests to this DB plugin's tables**. Requires at least one Cache plugin to be configured and loaded. This setting itself **does not affect** Cache plugins directly but enables the caching mechanism for operations related to this specific DB plugin.
+    - `use_query`: (Optional, defaults to `false`) If `true`, the connection is served by a read-only **Query plugin** (`DBQueryPlugin`) via the HTTP `QUERY` method instead of the regular CRUD **DB plugin**. When enabled, table CRUD endpoints (`GET`/`POST`/`PATCH`/`DELETE` on `/api/<name>/{table}/`) and schema introspection are unavailable for this connection; only `QUERY /api/<name>/` is supported. DB and Query plugins are mutually exclusive per connection.
     - `cache_name`: (Optional) Specifies the name (key from `plugins` map or `name` from an external file) of the **Cache plugin** that should be used for ETag caching for **this DB plugin**. If omitted, EasyREST first looks for a Cache plugin with the same name as this DB plugin (e.g., if the DB plugin name is `test`, it looks for Cache plugin `test`). If not found, it falls back to the first available Cache plugin. This setting allows flexible linking between DB and Cache plugins.
     - `cache_invalidation_map`: (Optional) A map where keys are RPC function names (used via `/api/<name>/rpc/<function_name>`) and values are lists of table names. When a listed RPC function is successfully executed for **this DB plugin** (`<name>`), the ETags for the specified tables associated with **this same DB plugin** are invalidated in the **corresponding Cache plugin**. This is useful if an RPC call modifies data in related tables.
     - `db_tx_end`: (Optional, defaults to `commit-allow-override`) Defines the default transaction handling behavior for write operations (POST, PATCH, DELETE) and RPC calls handled by this DB plugin, and whether the `Prefer: tx=` header can override it.
@@ -733,6 +767,10 @@ To create an external plugin:
     func (p *MyCustomPlugin) CallFunction(userID string, funcName string, data map[string]any, ctx map[string]any) (any, error) { /* ... */ return nil, nil }
     func (p *MyCustomPlugin) GetSchema(ctx map[string]any) (any, error) { /* ... */ return nil, nil }
 
+    // --- DBQueryPlugin Implementation (Example) ---
+    // InitConnection can be shared with DBPlugin when the URI supports both modes.
+    func (p *MyCustomPlugin) QueryCall(query string, ctx map[string]any) ([]map[string]any, error) { /* ... */ return nil, nil }
+
     // --- CachePlugin Implementation (Example) ---
     // InitConnection can be shared if URI contains info for both DB and Cache, or distinct if plugin handles them separately.
     // For simplicity, assuming it's called if "cache" is in pluginMap.
@@ -807,6 +845,9 @@ To create an external plugin:
         // If MyCustomPlugin implements easyrest.CachePlugin
         // pluginMap["cache"] = &easyrest.CachePluginPlugin{Impl: impl}
 
+        // If MyCustomPlugin implements easyrest.DBQueryPlugin
+        // pluginMap["query"] = &easyrest.DBQueryPluginPlugin{Impl: impl}
+
         // If MyCustomPlugin implements easyrest.AuthPlugin
         pluginMap["auth"] = &easyrest.AuthPluginPlugin{Impl: impl}
 
@@ -818,7 +859,7 @@ To create an external plugin:
         })
     }
     ```
-    *Important:* Ensure your struct `impl` actually implements the methods for the interfaces you are registering. The keys `"db"`, `"cache"`, and `"auth"` are fixed and tell the EasyREST server which interface to expect.
+    *Important:* Ensure your struct `impl` actually implements the methods for the interfaces you are registering. The keys `"db"`, `"cache"`, `"query"`, and `"auth"` are fixed and tell the EasyREST server which interface to expect.
 
 5.  **Build and Deploy:**
     Build the plugin binary. The naming convention is important for auto-discovery if a `path` is not specified in the server configuration:

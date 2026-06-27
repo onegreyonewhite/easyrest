@@ -490,3 +490,77 @@ func BenchmarkAuthenticate(b *testing.B) {
 		}
 	}
 }
+
+func BenchmarkQueryCall(b *testing.B) {
+	log.SetOutput(io.Discard)
+	os.Setenv("ER_NO_PLUGIN_LOG", "1")
+
+	tmpFile, err := os.CreateTemp("", "benchdb-query-*.db")
+	if err != nil {
+		b.Fatalf("Failed to create temporary DB: %v", err)
+	}
+	dbPath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(dbPath)
+	defer server.StopPlugins()
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		b.Fatalf("Failed to open sqlite DB: %v", err)
+	}
+
+	_, err = db.Exec(`CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT);`)
+	if err != nil {
+		b.Fatalf("Failed to create table: %v", err)
+	}
+	for i := 0; i < 1000; i++ {
+		_, err = db.Exec(`INSERT INTO users (name) VALUES (?)`, fmt.Sprintf("User%d", i))
+		if err != nil {
+			b.Fatalf("Failed to insert data: %v", err)
+		}
+	}
+	db.Close()
+
+	os.Setenv("ER_DB_TEST", "sqlite://"+dbPath)
+	os.Setenv("ER_USE_QUERY_TEST", "1")
+	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
+	secret := "mytestsecret"
+	os.Setenv("ER_TOKEN_SECRET", secret)
+
+	claims := jwt.MapClaims{
+		"sub":   "testuser",
+		"exp":   time.Now().Add(time.Hour).Unix(),
+		"scope": "read",
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenStr, err := token.SignedString([]byte(secret))
+	if err != nil {
+		b.Fatalf("Failed to sign token: %v", err)
+	}
+
+	server.PreservedQueryPlugins["sqlite"] = func() easyrest.DBQueryPlugin {
+		return sqlitePlugin.NewSqliteQueryPlugin()
+	}
+	server.PreservedAuthPlugins["jwt"] = func() easyrest.AuthPlugin {
+		return &jwtplugin.JWTAuthPlugin{}
+	}
+	server.ReloadConfig()
+	router := server.SetupRouter()
+
+	queryBody := "SELECT id FROM users ORDER BY id ASC LIMIT 10"
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		req, err := http.NewRequest("QUERY", "/api/test/", strings.NewReader(queryBody))
+		if err != nil {
+			b.Fatalf("Error creating request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+tokenStr)
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			b.Errorf("Expected status 200, got %d", rr.Code)
+			break
+		}
+	}
+}
