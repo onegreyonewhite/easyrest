@@ -708,7 +708,7 @@ func TestPgCachePluginExpiration(t *testing.T) {
 
 func TestParseConnectionParams_Defaults(t *testing.T) {
 	uri := "postgres://user:pass@host:5432/db"
-	dsn, maxConns, minConns, maxLifetime, maxIdleTime, timeout, bulkThreshold, autoCleanup, searchPath, err := parseConnectionParams(uri)
+	dsn, maxConns, minConns, maxLifetime, maxIdleTime, timeout, bulkThreshold, autoCleanup, searchPath, _, err := parseConnectionParams(uri)
 
 	require.NoError(t, err)
 	assert.Equal(t, uri, dsn) // DSN should be unchanged as no params were removed
@@ -725,7 +725,7 @@ func TestParseConnectionParams_Defaults(t *testing.T) {
 func TestParseConnectionParams_CustomValues(t *testing.T) {
 	uri := "postgres://user:pass@host:5432/db?maxOpenConns=50&maxIdleConns=10&connMaxLifetime=15&connMaxIdleTime=20&timeout=60&bulkThreshold=500&autoCleanup=true"
 	expectedDSN := "postgres://user:pass@host:5432/db" // Params should be removed
-	dsn, maxConns, minConns, maxLifetime, maxIdleTime, timeout, bulkThreshold, autoCleanup, searchPath, err := parseConnectionParams(uri)
+	dsn, maxConns, minConns, maxLifetime, maxIdleTime, timeout, bulkThreshold, autoCleanup, searchPath, _, err := parseConnectionParams(uri)
 
 	require.NoError(t, err)
 	assert.Equal(t, expectedDSN, dsn)
@@ -742,7 +742,7 @@ func TestParseConnectionParams_CustomValues(t *testing.T) {
 func TestParseConnectionParams_OnlySomeValues(t *testing.T) {
 	uri := "postgres://user:pass@host:5432/db?maxOpenConns=75&timeout=45"
 	expectedDSN := "postgres://user:pass@host:5432/db"
-	dsn, maxConns, minConns, maxLifetime, maxIdleTime, timeout, bulkThreshold, autoCleanup, searchPath, err := parseConnectionParams(uri)
+	dsn, maxConns, minConns, maxLifetime, maxIdleTime, timeout, bulkThreshold, autoCleanup, searchPath, _, err := parseConnectionParams(uri)
 
 	require.NoError(t, err)
 	assert.Equal(t, expectedDSN, dsn)
@@ -774,7 +774,7 @@ func TestParseConnectionParams_InvalidValues(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, _, _, _, _, _, _, _, err := parseConnectionParams(tc.uri)
+			_, _, _, _, _, _, _, _, _, _, err := parseConnectionParams(tc.uri)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantErr)
 		})
@@ -785,7 +785,7 @@ func TestParseConnectionParams_DSNEncoding(t *testing.T) {
 	uri := "postgres://user%20name:p@ssw%2Frd@host:5432/db%20name?maxOpenConns=50&other=param"
 	// Correct expected DSN with @ encoded as %40
 	expectedDSN := "postgres://user%20name:p%40ssw%2Frd@host:5432/db%20name?other=param"
-	dsn, _, _, _, _, _, _, _, _, err := parseConnectionParams(uri)
+	dsn, _, _, _, _, _, _, _, _, _, err := parseConnectionParams(uri)
 	require.NoError(t, err)
 	assert.Equal(t, expectedDSN, dsn)
 }
@@ -810,7 +810,7 @@ func TestDeleteExpiredCacheEntries(t *testing.T) {
 func TestParseConnectionParams_CustomSearchPath(t *testing.T) {
 	uri := "postgres://user:pass@host:5432/db?search_path=custom_schema&maxOpenConns=50"
 	expectedDSN := "postgres://user:pass@host:5432/db?search_path=custom_schema" // Both search_path and maxOpenConns should be removed
-	dsn, maxConns, minConns, maxLifetime, maxIdleTime, timeout, bulkThreshold, autoCleanup, searchPath, err := parseConnectionParams(uri)
+	dsn, maxConns, minConns, maxLifetime, maxIdleTime, timeout, bulkThreshold, autoCleanup, searchPath, _, err := parseConnectionParams(uri)
 
 	require.NoError(t, err)
 	assert.Equal(t, expectedDSN, dsn)

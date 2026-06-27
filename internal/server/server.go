@@ -31,7 +31,8 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type contextKey string
@@ -112,7 +113,11 @@ func AccessLogMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		next.ServeHTTP(w, r)
-		stdlog.Printf("ACCESS: %s %s from %s in %v", r.Method, r.RequestURI, r.RemoteAddr, time.Since(start))
+		clientIP := middleware.GetClientIP(r.Context())
+		if clientIP == "" {
+			clientIP = r.RemoteAddr
+		}
+		stdlog.Printf("ACCESS: %s %s from %s in %v", r.Method, r.RequestURI, clientIP, time.Since(start))
 	})
 }
 
@@ -187,11 +192,6 @@ func proxyHeadersHandler(next http.Handler) http.Handler {
 		if host := r.Header.Get("X-Forwarded-Host"); host != "" {
 			r.Host = host
 		}
-		if ip := r.Header.Get("X-Forwarded-For"); ip != "" {
-			// Take the first IP if multiple are present
-			ips := strings.Split(ip, ",")
-			r.RemoteAddr = strings.TrimSpace(ips[0])
-		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -245,6 +245,47 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("OK"))
 }
 
+// spanNameMiddleware renames the active OTel span using the matched chi route pattern.
+func spanNameMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r)
+		rc := chi.RouteContext(r.Context())
+		if rc == nil {
+			return
+		}
+		pattern := rc.RoutePattern()
+		if pattern == "" {
+			return
+		}
+		span := trace.SpanFromContext(r.Context())
+		if span.IsRecording() {
+			span.SetName(r.Method + " " + pattern)
+		}
+	})
+}
+
+// clientIPMiddleware selects chi ClientIP middleware based on server config.
+func clientIPMiddleware(cfg config.ServerConfig) func(http.Handler) http.Handler {
+	switch strings.ToLower(strings.TrimSpace(cfg.TrustedProxyMode)) {
+	case "header":
+		header := cfg.TrustedProxyHeader
+		if header == "" {
+			header = "X-Real-IP"
+		}
+		return middleware.ClientIPFromHeader(header)
+	case "xff_count":
+		count := cfg.TrustedProxyCount
+		if count <= 0 {
+			count = 1
+		}
+		return middleware.ClientIPFromXFFTrustedProxies(count)
+	default:
+		return func(next http.Handler) http.Handler {
+			return middleware.ClientIPFromRemoteAddr(next)
+		}
+	}
+}
+
 // SetupRouter initializes the router and endpoints.
 func SetupRouter() chi.Router {
 	cfg := GetConfig()
@@ -262,11 +303,14 @@ func SetupRouter() chi.Router {
 		r.Use(corsMiddleware)
 	}
 
+	r.Use(clientIPMiddleware(cfg.Server))
+
 	// Add proxy headers handler
 	r.Use(proxyHeadersHandler)
 
 	r.Use(middleware.GetHead)
 	r.Use(middleware.Recoverer)
+	r.Use(spanNameMiddleware)
 
 	// Schema endpoint.
 	r.Get("/api/{db}/", schemaHandler)

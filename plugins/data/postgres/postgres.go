@@ -52,7 +52,7 @@ func (p *pgPlugin) newContextWithTimeout() (context.Context, context.CancelFunc)
 
 // parseConnectionParams extracts plugin-specific parameters from the URI query,
 // returning the base DSN and parsed values.
-func parseConnectionParams(uri string) (dsn string, maxConns int32, minConns int32, maxLifetime, maxIdleTime time.Duration, timeout time.Duration, bulkThreshold int, autoCleanup string, searchPath string, err error) {
+func parseConnectionParams(uri string) (dsn string, maxConns int32, minConns int32, maxLifetime, maxIdleTime time.Duration, timeout time.Duration, bulkThreshold int, autoCleanup string, searchPath string, requireAuth string, err error) {
 	if !strings.HasPrefix(uri, "postgres://") {
 		err = errors.New("invalid postgres URI")
 		return
@@ -115,6 +115,9 @@ func parseConnectionParams(uri string) (dsn string, maxConns int32, minConns int
 		searchPath = "public" // Default to public schema
 	}
 
+	requireAuth = queryParams.Get("require_auth")
+	queryParams.Del("require_auth")
+
 	// Re-encode URI to form the base DSN
 	parsedURI.RawQuery = queryParams.Encode()
 	dsn = parsedURI.String()
@@ -132,7 +135,7 @@ func parseConnectionParams(uri string) (dsn string, maxConns int32, minConns int
 
 // InitConnection opens a PostgreSQL connection using a URI with the prefix "postgres://".
 func (p *pgPlugin) InitConnection(uri string) error {
-	dsn, maxConns, minConns, maxLifetime, maxIdleTime, timeout, bulkThreshold, _, searchPath, err := parseConnectionParams(uri)
+	dsn, maxConns, minConns, maxLifetime, maxIdleTime, timeout, bulkThreshold, _, searchPath, requireAuth, err := parseConnectionParams(uri)
 	if err != nil {
 		// Propagate parsing errors
 		return err
@@ -148,6 +151,9 @@ func (p *pgPlugin) InitConnection(uri string) error {
 	cfg.MinConns = minConns
 	cfg.MaxConnLifetime = maxLifetime
 	cfg.MaxConnIdleTime = maxIdleTime
+	if requireAuth != "" {
+		cfg.ConnConfig.RequireAuth = requireAuth
+	}
 
 	// Create the pool using the configured settings
 	db, err := pgxpool.NewWithConfig(bgCtx, cfg)
@@ -1112,7 +1118,7 @@ type pgCachePlugin struct {
 // by the plugin framework to establish the database connection.
 func (p *pgCachePlugin) InitConnection(uri string) error {
 	// Parse params to get autoCleanup and the base DSN for the main plugin
-	dsn, _, _, _, _, _, _, autoCleanup, _, err := parseConnectionParams(uri)
+	dsn, _, _, _, _, _, _, autoCleanup, _, _, err := parseConnectionParams(uri)
 	if err != nil {
 		return fmt.Errorf("failed to parse URI for cache: %w", err)
 	}

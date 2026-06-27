@@ -67,6 +67,11 @@ type ServerConfig struct {
 	HTTP2ReadIdleTimeout              time.Duration `yaml:"http2_read_idle_timeout"`
 	HTTP2PingTimeout                  time.Duration `yaml:"http2_ping_timeout"`
 	HTTP2PermitProhibitedCipherSuites bool          `yaml:"http2_permit_prohibited_cipher_suites"`
+
+	// Trusted proxy settings for client IP resolution (chi middleware.ClientIP*)
+	TrustedProxyMode   string `yaml:"trusted_proxy_mode"`   // "none", "xff_count", or "header"
+	TrustedProxyCount  int    `yaml:"trusted_proxy_count"`  // for xff_count: number of trusted proxies
+	TrustedProxyHeader string `yaml:"trusted_proxy_header"` // for header: e.g. CF-Connecting-IP, X-Real-IP
 }
 
 type OtelConfig struct {
@@ -372,6 +377,18 @@ func Load() Config {
 		}
 	}
 
+	trustedProxyMode := "none"
+	if v := os.Getenv("ER_SERVER_TRUSTED_PROXY_MODE"); v != "" {
+		trustedProxyMode = strings.ToLower(strings.TrimSpace(v))
+	}
+	trustedProxyCount := 1
+	if v := os.Getenv("ER_SERVER_TRUSTED_PROXY_COUNT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			trustedProxyCount = n
+		}
+	}
+	trustedProxyHeader := os.Getenv("ER_SERVER_TRUSTED_PROXY_HEADER")
+
 	tokenCacheTTL := -1
 	if v := os.Getenv("ER_TOKEN_CACHE_TTL"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -420,6 +437,9 @@ func Load() Config {
 			HTTP2ReadIdleTimeout:              http2ReadIdleTimeout,
 			HTTP2PingTimeout:                  http2PingTimeout,
 			HTTP2PermitProhibitedCipherSuites: http2PermitProhibitedCipherSuites,
+			TrustedProxyMode:                  trustedProxyMode,
+			TrustedProxyCount:                 trustedProxyCount,
+			TrustedProxyHeader:                trustedProxyHeader,
 		},
 	}
 
