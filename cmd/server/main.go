@@ -1,6 +1,11 @@
 package main
 
 import (
+	stdlog "log"
+	"net/http"
+	_ "net/http/pprof"
+	"os"
+
 	"github.com/onegreyonewhite/easyrest/internal/cli"
 	"github.com/onegreyonewhite/easyrest/internal/server"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
@@ -16,6 +21,13 @@ import (
 )
 
 func main() {
+	if addr := os.Getenv("ER_PPROF_ADDR"); addr != "" {
+		go func() {
+			stdlog.Printf("pprof listening on %s", addr)
+			stdlog.Println(http.ListenAndServe(addr, nil))
+		}()
+	}
+
 	cfg, err := cli.ParseFlags()
 	if err == nil {
 		server.PreservedDbPlugins["sqlite"] = func() easyrest.DBPlugin {

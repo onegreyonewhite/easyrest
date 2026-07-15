@@ -41,13 +41,17 @@ const TokenClaimsKey contextKey = "tokenClaims"
 
 // BuildPluginContext extracts context variables from the HTTP request.
 func BuildPluginContext(r *http.Request) map[string]any {
-	cfg := GetConfig()
+	cfg := currentConfig()
 	dbKey := chi.URLParam(r, "db")
 	dbConfig := cfg.PluginMap[dbKey]
 	headers := make(map[string]any, len(r.Header))
 	for k, vals := range r.Header {
 		lk := strings.ToLower(k)
-		headers[lk] = strings.Join(vals, " ")
+		if len(vals) == 1 {
+			headers[lk] = vals[0]
+		} else {
+			headers[lk] = strings.Join(vals, " ")
+		}
 	}
 	claims := getTokenClaims(r)
 	plainClaims := make(map[string]any, len(claims))
@@ -123,14 +127,17 @@ func AccessLogMiddleware(next http.Handler) http.Handler {
 
 // Authenticate extracts and validates the JWT token.
 func Authenticate(r *http.Request) (string, *http.Request, error) {
+	if existingClaims, ok := r.Context().Value(TokenClaimsKey).(jwt.MapClaims); ok && len(existingClaims) > 0 {
+		return extractUserIDFromClaims(existingClaims), r, nil
+	}
+
 	authHeaderValue := r.Header.Get("Authorization")
-	config := GetConfig()
+	cfg := currentConfig()
 
 	// Check cache for claims and user_id using the raw Authorization header value as key
 	if claimsCache != nil && authHeaderValue != "" {
 		if cached, found := claimsCache.Get(authHeaderValue); found {
 			if entry, ok := cached.(claimsCacheEntry); ok {
-				// Set claims in context and return cached user_id
 				r = r.WithContext(context.WithValue(r.Context(), TokenClaimsKey, entry.Claims))
 				return entry.UserID, r, nil
 			}
@@ -142,16 +149,21 @@ func Authenticate(r *http.Request) (string, *http.Request, error) {
 	authorized := false
 	var authErr error
 
-	// Prepare headers map for plugins
 	headersForPlugin := make(map[string]string, len(r.Header))
 	for k, v := range r.Header {
-		headersForPlugin[strings.ToLower(k)] = strings.Join(v, ", ")
+		lk := strings.ToLower(k)
+		if len(v) == 1 {
+			headersForPlugin[lk] = v[0]
+		} else {
+			headersForPlugin[lk] = strings.Join(v, ", ")
+		}
 	}
 	pluginMethod := r.Method
 	pluginPath := r.URL.Path
 	pluginQuery := r.URL.RawQuery
 
-	for pluginName, plugin := range *authPlugins {
+	for _, pluginName := range authPluginOrderSnapshot() {
+		plugin := (*authPlugins)[pluginName]
 		pluginClaims, err := plugin.Authenticate(headersForPlugin, pluginMethod, pluginPath, pluginQuery)
 		if err == nil {
 			maps.Copy(claims, pluginClaims)
@@ -162,9 +174,9 @@ func Authenticate(r *http.Request) (string, *http.Request, error) {
 	}
 
 	if !authorized {
-		if len(config.AnonClaims) > 0 {
+		if len(cfg.AnonClaims) > 0 {
 			claims := jwt.MapClaims{}
-			maps.Copy(claims, config.AnonClaims)
+			maps.Copy(claims, cfg.AnonClaims)
 			r = r.WithContext(context.WithValue(r.Context(), TokenClaimsKey, claims))
 			return "", r, nil
 		}
@@ -290,7 +302,7 @@ func clientIPMiddleware(cfg config.ServerConfig) func(http.Handler) http.Handler
 func SetupRouter() chi.Router {
 	cfg := GetConfig()
 	// Initialize claims cache with default expiration and cleanup interval
-	if claimsCache == nil && cfg.TokenCacheTTL >= 0 {
+	if claimsCache == nil && cfg.TokenCacheTTL > 0 {
 		defaultExpiration := time.Duration(cfg.TokenCacheTTL) * time.Second
 		cleanupInterval := time.Duration(cfg.TokenCacheTTL) * time.Second * 10
 		claimsCache = cachepkg.New(defaultExpiration, cleanupInterval)

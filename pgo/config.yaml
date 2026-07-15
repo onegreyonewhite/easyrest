@@ -1,0 +1,66 @@
+port: 8080
+access_log: false
+check_scope: true
+token_user_search: sub
+
+auth_plugins:
+  jwt:
+    settings:
+      jwt_secret: "pgo-dev-secret-change-me"
+  basic:
+    settings:
+      userlist:
+        pgo-user: "pgo-pass"
+  apikey:
+    settings:
+      keys:
+        - "pgo-api-key-secret"
+      header_name: "X-API-Key"
+  oidc:
+    settings:
+      open_id_connect_url: "http://mock-oidc:9000/.well-known/openid-configuration"
+
+plugins:
+  sqlite_crud:
+    title: "SQLite CRUD"
+    uri: "sqlite:///data/sqlite/pgo.db"
+    enable_cache: false
+
+  sqlite_query:
+    title: "SQLite Query (read-only)"
+    uri: "sqlite:///data/sqlite/pgo.db"
+    use_query: true
+
+  mysql_crud:
+    title: "MySQL CRUD"
+    uri: "mysql://root:root@mysql:3306/easyrestdb?parseTime=true&maxOpenConns=50&maxIdleConns=10"
+    enable_cache: false
+
+  postgres_crud:
+    title: "PostgreSQL CRUD"
+    uri: "postgres://postgres:root@postgres:5432/easyrestdb?sslmode=disable&maxOpenConns=50&maxIdleConns=5"
+    enable_cache: false
+
+  redis_cache_test:
+    title: "SQLite with Redis cache"
+    uri: "sqlite:///data/sqlite/pgo.db"
+    enable_cache: true
+    cache_name: redis_cache
+
+  memcached_cache_test:
+    title: "SQLite with Memcached cache"
+    uri: "sqlite:///data/sqlite/pgo.db"
+    enable_cache: true
+    cache_name: memcached_cache
+
+  lru_cache_test:
+    title: "SQLite with LRU cache"
+    uri: "sqlite:///data/sqlite/pgo.db"
+    enable_cache: true
+    cache_name: lru
+
+  redis_cache:
+    uri: "redis://redis:6379/0"
+
+  memcached_cache:
+    uri: "memcached://memcached:11211"

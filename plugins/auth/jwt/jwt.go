@@ -179,6 +179,7 @@ type OIDCAuthPlugin struct {
 	authorization_endpoint string // Populated from discovery
 	token_type             string // Typically "Bearer"
 	request_timeout        int16
+	httpClient             *http.Client
 }
 
 // OpenIDConfiguration represents a subset of the OpenID Connect discovery document.
@@ -203,13 +204,21 @@ func (p *OIDCAuthPlugin) Init(settings map[string]any) (map[string]any, error) {
 		p.token_type = "Bearer" // Default for OIDC
 	}
 
+	if rt, ok := settings["request_timeout"].(float64); ok && rt > 0 {
+		p.request_timeout = int16(rt)
+	}
+	timeout := 10 * time.Second
+	if p.request_timeout > 0 {
+		timeout = time.Duration(p.request_timeout) * time.Second
+	}
+	p.httpClient = &http.Client{Timeout: timeout}
+
 	// Perform OIDC Discovery
-	client := &http.Client{Timeout: time.Duration(p.request_timeout) * time.Second} // Add a timeout
 	req, err := http.NewRequest("GET", p.open_id_connect_url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("error creating request to open_id_connect_url %s: %w", p.open_id_connect_url, err)
 	}
-	resp, err := client.Do(req)
+	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("error fetching OpenID configuration from %s: %w", p.open_id_connect_url, err)
 	}
@@ -301,8 +310,7 @@ func (p *OIDCAuthPlugin) authenticateViaUserinfoEndpoint(originalAuthHeader stri
 	}
 	req.Header.Set("Authorization", originalAuthHeader) // Send the original "Bearer <token>"
 
-	client := &http.Client{Timeout: 10 * time.Second} // Add a timeout
-	resp, err := client.Do(req)
+	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("error calling userinfo_endpoint %s: %w", p.userinfo_endpoint, err)
 	}

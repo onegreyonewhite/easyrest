@@ -14,3 +14,9 @@ perf_report.txt
 perf.data
 perf.data.old
 memtree.sh
+pgo/data/
+pgo/profiles/*.pprof
+pgo/profiles/oha-logs
+cpu.prof
+mem.prof
+tests.test

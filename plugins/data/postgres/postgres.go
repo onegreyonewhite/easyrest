@@ -13,9 +13,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/goccy/go-json"
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -23,6 +25,8 @@ import (
 )
 
 var bgCtx = context.Background()
+
+const maxTimezoneCacheSize = 64
 
 // DBPool abstracts pgxpool.Pool and pgxmock.PgxPoolIface for production and testing
 // Only the methods used in pgPlugin are included
@@ -36,10 +40,10 @@ type DBPool interface {
 // pgPlugin implements the DBPlugin interface for PostgreSQL.
 type pgPlugin struct {
 	db             DBPool
-	defaultTimeout time.Duration             // Default timeout for operations
-	bulkThreshold  int                       // Threshold for bulk operations
-	timezoneCache  map[string]*time.Location // Cache for loaded timezones
-	searchPath     string                    // Schema search path
+	defaultTimeout time.Duration              // Default timeout for operations
+	bulkThreshold  int                        // Threshold for bulk operations
+	timezoneCache  *lru.Cache[string, *time.Location] // Cache for loaded timezones
+	searchPath     string                     // Schema search path
 }
 
 // newContextWithTimeout creates a new context with timeout
@@ -175,10 +179,35 @@ func (p *pgPlugin) InitConnection(uri string) error {
 	}
 
 	// Assign the pool to the plugin
+	if p.db != nil {
+		p.Close()
+	}
 	p.db = db
-	p.timezoneCache = make(map[string]*time.Location) // Initialize cache
+	if p.timezoneCache != nil {
+		p.timezoneCache.Purge()
+	}
+	var tzErr error
+	p.timezoneCache, tzErr = lru.New[string, *time.Location](maxTimezoneCacheSize)
+	if tzErr != nil {
+		db.Close()
+		return fmt.Errorf("failed to create timezone cache: %w", tzErr)
+	}
 
 	return nil
+}
+
+// Close shuts down the database pool and clears cached timezones.
+func (p *pgPlugin) Close() {
+	if p.db != nil {
+		if pool, ok := p.db.(*pgxpool.Pool); ok {
+			pool.Close()
+		}
+		p.db = nil
+	}
+	if p.timezoneCache != nil {
+		p.timezoneCache.Purge()
+		p.timezoneCache = nil
+	}
 }
 
 // ApplyPluginContext sets session variables using set_config for all keys in ctx.
@@ -271,15 +300,16 @@ func (p *pgPlugin) resolveLocation(ctx map[string]any) *time.Location {
 	if ctx == nil {
 		return loc
 	}
-	if p.timezoneCache == nil {
-		p.timezoneCache = make(map[string]*time.Location)
-	}
 	if tz, ok := ctx["timezone"].(string); ok && tz != "" {
-		if cachedLoc, found := p.timezoneCache[tz]; found {
-			return cachedLoc
+		if p.timezoneCache != nil {
+			if cachedLoc, found := p.timezoneCache.Get(tz); found {
+				return cachedLoc
+			}
 		}
 		if l, loadErr := time.LoadLocation(tz); loadErr == nil {
-			p.timezoneCache[tz] = l
+			if p.timezoneCache != nil {
+				p.timezoneCache.Add(tz, l)
+			}
 			return l
 		} else {
 			log.Printf("Warning: Could not load timezone '%s', using UTC: %v", tz, loadErr)
@@ -482,6 +512,7 @@ func (p *pgPlugin) bulkCreate(table string, data []map[string]any, ctx map[strin
 	if err != nil {
 		return nil, err
 	}
+	defer tx.Rollback(bgCtx)
 
 	keys := make([]string, 0, len(data[0]))
 	for k := range data[0] {
@@ -1082,6 +1113,8 @@ func (p *pgPlugin) GetSchema(ctx map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer tx.Rollback(bgCtx)
+
 	if ctx != nil {
 		if err := ApplyPluginContext(bgCtx, tx, ctx); err != nil {
 			tx.Rollback(bgCtx)
@@ -1116,6 +1149,8 @@ func (p *pgPlugin) GetSchema(ctx map[string]any) (any, error) {
 // pgCachePlugin implements the CachePlugin interface using PostgreSQL.
 type pgCachePlugin struct {
 	dbPluginPointer *pgPlugin
+	stopCh          chan struct{}
+	stopOnce        sync.Once
 }
 
 // InitConnection ensures the cache table exists and starts the cleanup goroutine.
@@ -1157,6 +1192,9 @@ func (p *pgCachePlugin) InitConnection(uri string) error {
 
 	// Launch background goroutine for cleanup if requested
 	if autoCleanup == "true" || autoCleanup == "1" {
+		if p.stopCh == nil {
+			p.stopCh = make(chan struct{})
+		}
 		go p.cleanupExpiredCacheEntries()
 	}
 
@@ -1186,11 +1224,25 @@ func (p *pgCachePlugin) cleanupExpiredCacheEntries() {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		// Call the synchronous cleanup function.
-		// Use background context for the periodic task itself.
-		_ = p.deleteExpiredEntries(bgCtx)
-		// We ignore the error here because the loop should continue regardless.
+	for {
+		select {
+		case <-ticker.C:
+			_ = p.deleteExpiredEntries(bgCtx)
+		case <-p.stopCh:
+			return
+		}
+	}
+}
+
+// Close stops the cleanup goroutine and releases the underlying database pool.
+func (p *pgCachePlugin) Close() {
+	p.stopOnce.Do(func() {
+		if p.stopCh != nil {
+			close(p.stopCh)
+		}
+	})
+	if p.dbPluginPointer != nil {
+		p.dbPluginPointer.Close()
 	}
 }
 
@@ -1251,6 +1303,13 @@ type pgQueryPlugin struct {
 
 func (p *pgQueryPlugin) InitConnection(uri string) error {
 	return p.dbPluginPointer.InitConnection(uri)
+}
+
+// Close releases the underlying database pool.
+func (p *pgQueryPlugin) Close() {
+	if p.dbPluginPointer != nil {
+		p.dbPluginPointer.Close()
+	}
 }
 
 func (p *pgQueryPlugin) QueryCall(query string, ctx map[string]any) ([]map[string]any, error) {

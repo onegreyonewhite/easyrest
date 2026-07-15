@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -93,6 +94,29 @@ ORDER BY SPECIFIC_NAME, ORDINAL_POSITION;`)).
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
+func TestInitConnectionPingFailureClosesDB(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+	if err != nil {
+		t.Fatalf("failed to open sqlmock: %v", err)
+	}
+	openDB = func(driverName, dsn string) (*sql.DB, error) {
+		return db, nil
+	}
+	mock.ExpectPing().WillReturnError(errors.New("ping failed"))
+
+	plugin := &mysqlPlugin{}
+	err = plugin.InitConnection("mysql://mock")
+	if err == nil {
+		t.Fatal("expected ping failure error")
+	}
+	if plugin.db != nil {
+		t.Fatal("expected plugin.db to remain nil after ping failure")
+	}
+	if err := db.PingContext(context.Background()); err == nil {
+		t.Fatal("expected ping to fail on closed database pool")
 	}
 }
 
@@ -626,6 +650,25 @@ func TestCacheInitConnection(t *testing.T) {
 
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
+func TestCachePluginCloseStopsCleanupGoroutine(t *testing.T) {
+	cachePlugin, _, mock := newTestCachePlugin(t)
+
+	createSQL := "CREATE TABLE IF NOT EXISTS easyrest_cache (`key` VARCHAR(255) PRIMARY KEY, value TEXT, expires_at DATETIME)"
+	mock.ExpectExec(regexp.QuoteMeta(createSQL)).WillReturnResult(sqlmock.NewResult(0, 0))
+
+	if err := cachePlugin.InitConnection("mysql://mock?autoCleanup=true"); err != nil {
+		t.Fatalf("CacheInitConnection failed: %v", err)
+	}
+
+	before := runtime.NumGoroutine()
+	cachePlugin.Close()
+	time.Sleep(50 * time.Millisecond)
+	after := runtime.NumGoroutine()
+	if after > before+2 {
+		t.Fatalf("goroutine count increased after Close: before=%d after=%d", before, after)
 	}
 }
 

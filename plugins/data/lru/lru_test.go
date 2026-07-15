@@ -77,3 +77,17 @@ func TestSimpleCachePlugin_MissingKey(t *testing.T) {
 		t.Errorf("Expected error for missing key, got nil")
 	}
 }
+
+func TestSimpleCachePluginClose(t *testing.T) {
+	plugin := NewSimpleCachePlugin()
+	if err := plugin.InitConnection(""); err != nil {
+		t.Fatalf("InitConnection failed: %v", err)
+	}
+	if err := plugin.Set("key", "value", time.Minute); err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+	plugin.Close()
+	if plugin.cache != nil {
+		t.Fatal("expected cache to be nil after Close")
+	}
+}

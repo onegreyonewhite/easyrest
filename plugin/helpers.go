@@ -222,6 +222,37 @@ func normalizeKey(k string) string {
 	return strings.ToLower(keyNormalizer.Replace(k))
 }
 
+func joinContextPrefix(prefix, part string) string {
+	if prefix == "" {
+		return part
+	}
+	var b strings.Builder
+	b.Grow(len(prefix) + 1 + len(part))
+	b.WriteString(prefix)
+	b.WriteByte('_')
+	b.WriteString(part)
+	return b.String()
+}
+
+func scalarToContextString(v any) string {
+	switch vv := v.(type) {
+	case string:
+		return vv
+	case float64:
+		return strconv.FormatFloat(vv, 'f', -1, 64)
+	case bool:
+		return strconv.FormatBool(vv)
+	case int:
+		return strconv.Itoa(vv)
+	case int64:
+		return strconv.FormatInt(vv, 10)
+	case int32:
+		return strconv.FormatInt(int64(vv), 10)
+	default:
+		return fmt.Sprintf("%v", vv)
+	}
+}
+
 func FormatToContext(input map[string]any) (map[string]string, error) {
 	output := make(map[string]string, len(input))
 	var flatten func(prefix string, val any) error
@@ -230,35 +261,18 @@ func FormatToContext(input map[string]any) (map[string]string, error) {
 		case map[string]any:
 			for k, v2 := range v {
 				nk := normalizeKey(k)
-				var newPrefix string
-				if prefix == "" {
-					newPrefix = nk
-				} else {
-					newPrefix = prefix + "_" + nk
-				}
-				if err := flatten(newPrefix, v2); err != nil {
+				if err := flatten(joinContextPrefix(prefix, nk), v2); err != nil {
 					return err
 				}
 			}
 		case []any:
 			for i, item := range v {
-				newPrefix := prefix + "_" + strconv.Itoa(i)
-				if err := flatten(newPrefix, item); err != nil {
+				if err := flatten(joinContextPrefix(prefix, strconv.Itoa(i)), item); err != nil {
 					return err
 				}
 			}
 		default:
-			var s string
-			switch vv := v.(type) {
-			case string:
-				s = vv
-			case float64:
-				s = strconv.FormatFloat(vv, 'f', -1, 64)
-			case bool:
-				s = strconv.FormatBool(vv)
-			default:
-				s = fmt.Sprintf("%v", vv)
-			}
+			s := scalarToContextString(v)
 			if !(strings.Contains(s, ";") || strings.Contains(s, "--")) {
 				output[prefix] = s
 			}

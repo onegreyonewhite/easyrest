@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/onegreyonewhite/easyrest/internal/config"
@@ -444,5 +445,52 @@ func TestSwaggerSchemaWithAllowList(t *testing.T) {
 	}
 	if _, ok := paths["/rpc/excluded_func/"]; ok {
 		t.Errorf("Expected paths to NOT contain '/rpc/excluded_func/'")
+	}
+}
+
+type countingSchemaPlugin struct {
+	fakeDBPluginWithRPC
+	mu    sync.Mutex
+	calls int
+}
+
+func (p *countingSchemaPlugin) GetSchema(ctx map[string]any) (any, error) {
+	p.mu.Lock()
+	p.calls++
+	p.mu.Unlock()
+	return p.fakeDBPluginWithRPC.GetSchema(ctx)
+}
+
+func (p *countingSchemaPlugin) schemaCalls() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+func TestSchemaCacheHit(t *testing.T) {
+	os.Unsetenv("ER_DB_TEST")
+	defer server.StopPlugins()
+
+	plugin := &countingSchemaPlugin{}
+	server.DbPlugins.Store(&map[string]easyrest.DBPlugin{"mock": plugin})
+
+	server.ReloadConfig()
+	router := server.SetupRouter()
+	server.DbPlugins.Store(&map[string]easyrest.DBPlugin{"mock": plugin})
+
+	for i := 0; i < 3; i++ {
+		req, err := http.NewRequest("GET", "/api/mock/", nil)
+		if err != nil {
+			t.Fatalf("Failed to create request: %v", err)
+		}
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("request %d: expected status 200, got %d body=%s", i, rr.Code, rr.Body.String())
+		}
+	}
+
+	if got := plugin.schemaCalls(); got != 1 {
+		t.Fatalf("expected GetSchema to run once, got %d", got)
 	}
 }

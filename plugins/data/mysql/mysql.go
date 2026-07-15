@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -272,20 +273,35 @@ func (m *mysqlPlugin) InitConnection(uri string) error {
 	defer cancel()
 
 	if err := db.PingContext(ctx); err != nil {
+		db.Close()
 		return fmt.Errorf("failed to ping MySQL: %w", err)
 	}
 
-	m.db = db
-	_, err = m.db.ExecContext(ctx, "SET NAMES utf8mb4 COLLATE utf8mb4_general_ci")
+	_, err = db.ExecContext(ctx, "SET NAMES utf8mb4 COLLATE utf8mb4_general_ci")
 	if err != nil {
+		db.Close()
 		return fmt.Errorf("failed to set charset: %w", err)
 	}
 
+	if m.db != nil && m.db != db {
+		m.db.Close()
+	}
+	m.db = db
 	if err := m.loadRoutines(); err != nil {
+		m.db.Close()
+		m.db = nil
 		return fmt.Errorf("failed to load routines: %w", err)
 	}
 
 	return nil
+}
+
+// Close shuts down the MySQL connection pool.
+func (m *mysqlPlugin) Close() {
+	if m.db != nil {
+		m.db.Close()
+		m.db = nil
+	}
 }
 
 // loadRoutines populates m.routines from information_schema.parameters.
@@ -569,6 +585,7 @@ func (m *mysqlPlugin) handleTransaction(ctxMap map[string]any, operation func(tx
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin tx: %w", err)
 	}
+	defer tx.Rollback()
 
 	// Default transaction preference is commit
 	txPreference := "commit"
@@ -882,6 +899,8 @@ func (m *mysqlPlugin) TableDelete(userID, table string, where map[string]any, ct
 // mysqlCachePlugin implements the CachePlugin interface using MySQL.
 type mysqlCachePlugin struct {
 	dbPluginPointer *mysqlPlugin
+	stopCh          chan struct{}
+	stopOnce        sync.Once
 }
 
 // InitConnection ensures the cache table exists and starts the cleanup goroutine.
@@ -929,6 +948,9 @@ func (p *mysqlCachePlugin) InitConnection(uri string) error {
 
 	// Launch background goroutine for cleanup if autoCleanup is set
 	if autoCleanup == "1" || autoCleanup == "true" {
+		if p.stopCh == nil {
+			p.stopCh = make(chan struct{})
+		}
 		go p.cleanupExpiredCacheEntries()
 	}
 
@@ -941,18 +963,32 @@ func (p *mysqlCachePlugin) cleanupExpiredCacheEntries() {
 	defer ticker.Stop()
 	queryCtx := context.Background()
 
-	for range ticker.C {
-		if p.dbPluginPointer.db == nil {
-			fmt.Printf("Error cleaning cache: DB connection is nil\n") // Use fmt.Printf for logging in plugins
-			continue                                                   // Skip this cycle
+	for {
+		select {
+		case <-ticker.C:
+			if p.dbPluginPointer.db == nil {
+				fmt.Printf("Error cleaning cache: DB connection is nil\n")
+				continue
+			}
+			_, err := p.dbPluginPointer.db.ExecContext(queryCtx, "DELETE FROM easyrest_cache WHERE expires_at <= NOW()")
+			if err != nil {
+				fmt.Printf("Error cleaning up expired cache entries: %v\n", err)
+			}
+		case <-p.stopCh:
+			return
 		}
-		// Use NOW() for current time in MySQL
-		// Use background context for cleanup task.
-		_, err := p.dbPluginPointer.db.ExecContext(queryCtx, "DELETE FROM easyrest_cache WHERE expires_at <= NOW()")
-		if err != nil {
-			// Log the error, but continue running the cleanup
-			fmt.Printf("Error cleaning up expired cache entries: %v\n", err) // Use fmt.Printf
+	}
+}
+
+// Close stops the cleanup goroutine and releases the underlying database pool.
+func (p *mysqlCachePlugin) Close() {
+	p.stopOnce.Do(func() {
+		if p.stopCh != nil {
+			close(p.stopCh)
 		}
+	})
+	if p.dbPluginPointer != nil {
+		p.dbPluginPointer.Close()
 	}
 }
 
@@ -1010,6 +1046,13 @@ type mysqlQueryPlugin struct {
 
 func (m *mysqlQueryPlugin) InitConnection(uri string) error {
 	return m.dbPluginPointer.InitConnection(uri)
+}
+
+// Close releases the underlying database pool.
+func (m *mysqlQueryPlugin) Close() {
+	if m.dbPluginPointer != nil {
+		m.dbPluginPointer.Close()
+	}
 }
 
 func (m *mysqlQueryPlugin) QueryCall(query string, ctx map[string]any) ([]map[string]any, error) {

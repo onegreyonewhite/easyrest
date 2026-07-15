@@ -35,7 +35,23 @@ multirun:
 run-perf: server
 	perf record -g ./bin/easyrest-server --config test_config.yaml
 
-.PHONY: all clean test
+pgo-up:
+	python3 pgo/seed_sqlite.py
+	docker compose -f pgo/docker-compose.yml up -d --build
+
+pgo-collect:
+	./pgo/scripts/run_load_test.sh
+
+pgo-down:
+	docker compose -f pgo/docker-compose.yml down -v
+
+pgo-verify: server
+	@go build -pgo=off -gcflags="-m=2" -o /tmp/easyrest-nopgo $(BUILD_DIR)/easyrest-server 2> /tmp/nopgo.txt || true
+	@go build -gcflags="-m=2" -o /tmp/easyrest-withpgo $(BUILD_DIR)/easyrest-server 2> /tmp/withpgo.txt || true
+	@diff /tmp/nopgo.txt /tmp/withpgo.txt | grep -E "inlining call to|devirtualizing" || true
+	@go version -m $(BUILD_DIR)/easyrest-server | grep -E "build.*-pgo" || echo "PGO not embedded in $(BUILD_DIR)/easyrest-server"
+
+.PHONY: all clean test bench run multirun run-perf pgo-up pgo-collect pgo-down pgo-verify
 
 update-packages:
 	go get -u ./... && go mod tidy

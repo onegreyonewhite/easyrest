@@ -22,7 +22,7 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get global config
-	config := GetConfig()
+	config := currentConfig()
 
 	// Get plugin config
 	pluginCfg, hasPluginCfg := config.PluginMap[dbKey]
@@ -75,7 +75,7 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Using parseRequest to handle different formats of incoming data
-	parsedData, err := parseRequest(r, false) // expecting a single object
+	parsedData, err := parseRequest(w, r, false) // expecting a single object
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -93,9 +93,13 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 	applied := strings.Builder{}
 	tx := pluginCtx["prefer"].(map[string]any)["tx"]
 	if tx != nil {
-		applied.WriteString("tx=" + tx.(string) + " ")
+		applied.WriteString("tx=")
+		applied.WriteString(tx.(string))
+		applied.WriteString(" ")
 	}
-	applied.WriteString("timezone=" + pluginCtx["timezone"].(string))
+	applied.WriteString("timezone=")
+	applied.WriteString(pluginCtx["timezone"].(string))
+	applied.WriteString(" ")
 	w.Header().Set("Preference-Applied", applied.String())
 
 	flatCtx, err := easyrest.FormatToContext(pluginCtx)
@@ -123,7 +127,7 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 			if cachePlugin != nil {
 				stdlog.Printf("Invalidating ETags for tables %v due to RPC call %s/%s", tablesToInvalidate, dbKey, funcName)
 				for _, tableName := range tablesToInvalidate {
-					etagKey := "etag:" + dbKey + ":" + tableName
+					etagKey := etagCacheKey(dbKey, tableName)
 					_ = updateETag(cachePlugin, etagKey) // Assumes this helper is available; ignore returned ETag
 				}
 			} else {

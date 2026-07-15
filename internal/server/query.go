@@ -14,7 +14,7 @@ import (
 func queryHandler(w http.ResponseWriter, r *http.Request) {
 	dbKey := strings.ToLower(chi.URLParam(r, "db"))
 
-	config := GetConfig()
+	config := currentConfig()
 
 	currentQueryPlugins := *QueryPlugins.Load()
 	queryPlug, ok := currentQueryPlugins[dbKey]
@@ -59,9 +59,13 @@ func queryHandler(w http.ResponseWriter, r *http.Request) {
 	applied := strings.Builder{}
 	tx := pluginCtx["prefer"].(map[string]any)["tx"]
 	if tx != nil {
-		applied.WriteString("tx=" + tx.(string) + " ")
+		applied.WriteString("tx=")
+		applied.WriteString(tx.(string))
+		applied.WriteString(" ")
 	}
-	applied.WriteString("timezone=" + pluginCtx["timezone"].(string))
+	applied.WriteString("timezone=")
+	applied.WriteString(pluginCtx["timezone"].(string))
+	applied.WriteString(" ")
 	w.Header().Set("Preference-Applied", applied.String())
 
 	startTime := time.Now()

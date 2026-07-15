@@ -208,7 +208,7 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get global config
-	config := GetConfig()
+	config := currentConfig()
 
 	// Get plugin config
 	pluginCfg, hasPluginCfg := config.PluginMap[dbKey]
@@ -253,9 +253,9 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 
 	var requiredScope string
 	if r.Method == http.MethodGet {
-		requiredScope = table + "-read"
+		requiredScope = tableScope(table, "-read")
 	} else {
-		requiredScope = table + "-write"
+		requiredScope = tableScope(table, "-write")
 	}
 	if config.CheckScope && !isPublicTable {
 		w.Header().Add("Vary", "Authorization")
@@ -272,7 +272,7 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 	var etagKey string
 
 	if cachePlugin != nil {
-		etagKey = "etag:" + dbKey + ":" + table
+		etagKey = etagCacheKey(dbKey, table)
 		ifMatch := r.Header.Get("If-Match")
 		ifNoneMatch := r.Header.Get("If-None-Match")
 
@@ -304,9 +304,13 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 	applied := strings.Builder{}
 	tx := pluginCtx["prefer"].(map[string]any)["tx"]
 	if tx != nil {
-		applied.WriteString("tx=" + tx.(string) + " ")
+		applied.WriteString("tx=")
+		applied.WriteString(tx.(string))
+		applied.WriteString(" ")
 	}
-	applied.WriteString("timezone=" + pluginCtx["timezone"].(string))
+	applied.WriteString("timezone=")
+	applied.WriteString(pluginCtx["timezone"].(string))
+	applied.WriteString(" ")
 	w.Header().Set("Preference-Applied", applied.String())
 	flatCtx, err := easyrest.FormatToContext(pluginCtx)
 	if err != nil {
@@ -413,10 +417,10 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Range-Unit", "items")
 		w.Header().Set("Accept-Ranges", "items")
 
-		makeResponse(w, r, status, rows)
+		makeResponseWithQuery(w, r, status, rows, queryValues)
 
 	case http.MethodPost:
-		parsedData, err := parseRequest(r, true)
+		parsedData, err := parseRequest(w, r, true)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -450,9 +454,9 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("ETag", newETag)
 		}
 
-		makeResponse(w, r, http.StatusCreated, rows)
+		makeResponseWithQuery(w, r, http.StatusCreated, rows, queryValues)
 	case http.MethodPatch:
-		parsedData, err := parseRequest(r, false)
+		parsedData, err := parseRequest(w, r, false)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -489,7 +493,7 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("ETag", newETag)
 		}
 
-		makeResponse(w, r, http.StatusOK, map[string]int{"updated": updated})
+		makeResponseWithQuery(w, r, http.StatusOK, map[string]int{"updated": updated}, queryValues)
 
 	case http.MethodDelete:
 		where, err := ParseWhereClause(queryValues, flatCtx, pluginCtx)

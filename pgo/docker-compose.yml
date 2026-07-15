@@ -1,0 +1,102 @@
+name: easyrest-pgo
+
+services:
+  mysql:
+    image: mysql:8
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: easyrestdb
+    volumes:
+      - ../schemas/mysql.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./seed_users.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+    networks:
+      - pgo
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_PASSWORD: root
+      POSTGRES_DB: easyrestdb
+    volumes:
+      - ../schemas/postgres.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./seed_users.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d easyrestdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 15s
+    networks:
+      - pgo
+
+  redis:
+    image: valkey/valkey:8
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - pgo
+
+  memcached:
+    image: memcached:1.6-alpine
+    networks:
+      - pgo
+
+  mock-oidc:
+    image: python:3.13-alpine
+    volumes:
+      - ./mock-oidc/server.py:/app/server.py:ro
+    command: ["python3", "/app/server.py"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:9000/.well-known/openid-configuration')",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - pgo
+
+  easyrest-server:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      ER_CONFIG_FILE: /config/config.yaml
+      ER_PPROF_ADDR: "0.0.0.0:6060"
+      ER_NO_PLUGIN_LOG: "1"
+    volumes:
+      - ./config.yaml:/config/config.yaml:ro
+      - ./data/sqlite:/data/sqlite
+    ports:
+      - "8080:8080"
+      - "6060:6060"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      memcached:
+        condition: service_started
+      mock-oidc:
+        condition: service_healthy
+    networks:
+      - pgo
+
+networks:
+  pgo:
+    name: easyrest-pgo-net

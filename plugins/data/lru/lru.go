@@ -46,6 +46,14 @@ func (p *SimpleCachePlugin) InitConnection(uri string) error {
 	return nil
 }
 
+// Close releases the in-memory cache and stops its background janitor when collected.
+func (p *SimpleCachePlugin) Close() {
+	if p.cache != nil {
+		p.cache.Flush()
+		p.cache = nil
+	}
+}
+
 // Set adds or updates a key-value pair with a specific TTL.
 func (p *SimpleCachePlugin) Set(key string, value string, ttl time.Duration) error {
 	if ttl <= 0 {

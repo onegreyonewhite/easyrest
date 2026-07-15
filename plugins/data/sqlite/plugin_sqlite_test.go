@@ -2,8 +2,11 @@ package sqlite
 
 import (
 	"database/sql"
+	"os"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -869,5 +872,28 @@ func TestGetSchema_SkipsUnsafeTableNames(t *testing.T) {
 	}
 	if _, found := tables["users"]; !found {
 		t.Fatal("expected users table in schema")
+	}
+}
+
+func TestSqliteCachePluginCloseStopsCleanupGoroutine(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "sqlite-cache-close-*.db")
+	if err != nil {
+		t.Fatalf("failed to create temp db: %v", err)
+	}
+	dbPath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(dbPath)
+
+	plugin := NewSqliteCachePlugin()
+	if err := plugin.InitConnection("sqlite://" + dbPath); err != nil {
+		t.Fatalf("InitConnection failed: %v", err)
+	}
+
+	before := runtime.NumGoroutine()
+	plugin.Close()
+	time.Sleep(50 * time.Millisecond)
+	after := runtime.NumGoroutine()
+	if after > before+2 {
+		t.Fatalf("goroutine count increased after Close: before=%d after=%d", before, after)
 	}
 }

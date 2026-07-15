@@ -420,6 +420,14 @@ func buildDELETEEndpoint(name string, properties map[string]any) *Operation {
 func schemaHandler(w http.ResponseWriter, r *http.Request) {
 	dbKey := strings.ToLower(chi.URLParam(r, "db"))
 
+	schemaCacheMutex.RLock()
+	swaggerSpec, ok := schemaCache[dbKey]
+	schemaCacheMutex.RUnlock()
+	if ok {
+		respondJSON(w, http.StatusOK, swaggerSpec)
+		return
+	}
+
 	// Get current plugins map
 	currentDbPlugins := *DbPlugins.Load()
 	// Get the specific plugin
@@ -429,41 +437,44 @@ func schemaHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	swaggerSpec, ok := schemaCache[dbKey]
-	if !ok {
-		pluginCtx := BuildPluginContext(r)
-		schemaRaw, err := dbPlug.GetSchema(pluginCtx)
-		if err != nil {
-			http.Error(w, "GetSchema not implemented", http.StatusNotImplemented)
-			return
-		}
-		schemaMap, ok := schemaRaw.(map[string]any)
-		if !ok {
-			http.Error(w, "Invalid schema format", http.StatusInternalServerError)
-			return
-		}
-		tableDefs, ok := schemaMap["tables"].(map[string]any)
-		if !ok {
-			http.Error(w, "Invalid tables schema", http.StatusInternalServerError)
-			return
-		}
-		delete(tableDefs, "easyrest_cache")
-		var viewDefs map[string]any
-		if raw, exists := schemaMap["views"]; exists && raw != nil {
-			if m, ok := raw.(map[string]any); ok {
-				viewDefs = m
-			}
-		}
-		var rpcDefs map[string]any
-		if raw, exists := schemaMap["rpc"]; exists && raw != nil {
-			if m, ok := raw.(map[string]any); ok {
-				rpcDefs = m
-			}
-		}
-		schemaCacheMutex.Lock()
-		swaggerSpec = buildSwaggerSpec(r, dbKey, tableDefs, viewDefs, rpcDefs)
-		schemaCacheMutex.Unlock()
+	pluginCtx := BuildPluginContext(r)
+	schemaRaw, err := dbPlug.GetSchema(pluginCtx)
+	if err != nil {
+		http.Error(w, "GetSchema not implemented", http.StatusNotImplemented)
+		return
 	}
+	schemaMap, ok := schemaRaw.(map[string]any)
+	if !ok {
+		http.Error(w, "Invalid schema format", http.StatusInternalServerError)
+		return
+	}
+	tableDefs, ok := schemaMap["tables"].(map[string]any)
+	if !ok {
+		http.Error(w, "Invalid tables schema", http.StatusInternalServerError)
+		return
+	}
+	delete(tableDefs, "easyrest_cache")
+	var viewDefs map[string]any
+	if raw, exists := schemaMap["views"]; exists && raw != nil {
+		if m, ok := raw.(map[string]any); ok {
+			viewDefs = m
+		}
+	}
+	var rpcDefs map[string]any
+	if raw, exists := schemaMap["rpc"]; exists && raw != nil {
+		if m, ok := raw.(map[string]any); ok {
+			rpcDefs = m
+		}
+	}
+
+	schemaCacheMutex.Lock()
+	if cached, found := schemaCache[dbKey]; found {
+		swaggerSpec = cached
+	} else {
+		swaggerSpec = buildSwaggerSpec(r, dbKey, tableDefs, viewDefs, rpcDefs)
+		schemaCache[dbKey] = swaggerSpec
+	}
+	schemaCacheMutex.Unlock()
 
 	respondJSON(w, http.StatusOK, swaggerSpec)
 }

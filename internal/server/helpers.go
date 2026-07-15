@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/csv"
 	"encoding/xml"
@@ -14,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,8 +37,9 @@ type PreservedPluginFactory[T any] func() T
 
 // Global configuration and dbPlugins loaded only once.
 var (
-	cfg                     config.Config
+	cfgPtr                  atomic.Pointer[config.Config]
 	cfgOnce                 sync.Once
+	authPluginOrder         atomic.Pointer[[]string]
 	DbPlugins               atomic.Pointer[map[string]easyrest.DBPlugin]
 	QueryPlugins            atomic.Pointer[map[string]easyrest.DBQueryPlugin]
 	CachePlugins            atomic.Pointer[map[string]easyrest.CachePlugin]
@@ -95,6 +98,8 @@ type claimsCacheEntry struct {
 // claimsCache is a package-level cache for token claims and user_id
 var claimsCache *cachepkg.Cache
 
+var jsonBufferPool sync.Pool
+
 func init() {
 	// Initialize atomic pointers with empty maps
 	emptyDbPlugins := make(map[string]easyrest.DBPlugin)
@@ -118,31 +123,101 @@ func init() {
 	PreservedDbPlugins = make(map[string]PreservedPluginFactory[easyrest.DBPlugin])
 	PreservedQueryPlugins = make(map[string]PreservedPluginFactory[easyrest.DBQueryPlugin])
 	PreservedAuthPlugins = make(map[string]PreservedPluginFactory[easyrest.AuthPlugin])
+
+	jsonBufferPool.New = func() any {
+		return &bytes.Buffer{}
+	}
 }
 
-// GetConfig loads configuration only once.
-func GetConfig() config.Config {
+func ensureConfig() *config.Config {
+	if ptr := cfgPtr.Load(); ptr != nil {
+		return ptr
+	}
 	cfgOnce.Do(func() {
-		cfg = config.Load()
+		if cfgPtr.Load() == nil {
+			loaded := config.Load()
+			cfgPtr.Store(&loaded)
+		}
 	})
-	return cfg
+	return cfgPtr.Load()
+}
+
+// currentConfig returns the active configuration without copying it.
+func currentConfig() *config.Config {
+	return ensureConfig()
+}
+
+// GetConfig returns a copy of the active configuration.
+func GetConfig() config.Config {
+	return *ensureConfig()
 }
 
 // SetConfig sets a new configuration.
 func SetConfig(newConfig config.Config) {
-	cfg = newConfig
+	stored := newConfig
+	cfgPtr.Store(&stored)
+}
+
+func clearSchemaCache() {
+	schemaCacheMutex.Lock()
+	schemaCache = make(map[string]any)
+	schemaCacheMutex.Unlock()
 }
 
 func ReloadConfig() {
-	cfgOnce = sync.Once{}
-	schemaCache = make(map[string]any)
+	loaded := config.Load()
+	cfgPtr.Store(&loaded)
+	clearSchemaCache()
 	ResetClaimsCache()
+}
+
+func setAuthPluginOrder(plugins map[string]easyrest.AuthPlugin) {
+	order := authPluginTrialOrder(plugins)
+	authPluginOrder.Store(&order)
+}
+
+func authPluginOrderSnapshot() []string {
+	if orderPtr := authPluginOrder.Load(); orderPtr != nil {
+		return *orderPtr
+	}
+	plugins := AuthPlugins.Load()
+	if plugins == nil {
+		return nil
+	}
+	return authPluginTrialOrder(*plugins)
+}
+
+type pluginCloser interface {
+	Close()
+}
+
+func closePluginMap[T any](kind string, plugins map[string]T) {
+	for pluginName, plugin := range plugins {
+		if closer, ok := any(plugin).(pluginCloser); ok {
+			closer.Close()
+			stdlog.Printf("Closed %s plugin: %s", kind, pluginName)
+		}
+	}
+}
+
+func closeLoadedPlugins() {
+	if ptr := DbPlugins.Load(); ptr != nil {
+		closePluginMap("DB", *ptr)
+	}
+	if ptr := QueryPlugins.Load(); ptr != nil {
+		closePluginMap("query", *ptr)
+	}
+	if ptr := CachePlugins.Load(); ptr != nil {
+		closePluginMap("cache", *ptr)
+	}
 }
 
 func StopPlugins() {
 	// Get the current clients map pointer
 	oldClientsPtr := pluginClients.Load()
 	oldAuthClientsPtr := authPluginClients.Load()
+
+	closeLoadedPlugins()
 
 	// Atomically set empty maps
 	emptyDbPlugins := make(map[string]easyrest.DBPlugin)
@@ -161,6 +236,11 @@ func StopPlugins() {
 	AuthSecurityDefinitions.Store(&emptyAuthSecDefs)
 	emptyAuthPluginClients := make(map[string]*hplugin.Client)
 	authPluginClients.Store(&emptyAuthPluginClients)
+
+	emptyOrder := []string{}
+	authPluginOrder.Store(&emptyOrder)
+
+	clearSchemaCache()
 
 	// Kill clients from the old map
 	if oldClientsPtr != nil {
@@ -330,30 +410,34 @@ func ParseCSV(s string) []string {
 
 // respondJSON serializes v to JSON and writes it to w with Content-Type header.
 func respondJSON(w http.ResponseWriter, status int, v interface{}) {
-	// Set headers before writing body
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 
-	// Encode directly to the ResponseWriter
-	enc := json.NewEncoder(w)
+	bufAny := jsonBufferPool.Get()
+	buf, ok := bufAny.(*bytes.Buffer)
+	if !ok {
+		buf = &bytes.Buffer{}
+	}
+	buf.Reset()
+	defer jsonBufferPool.Put(buf)
 
+	enc := json.NewEncoder(buf)
 	if err := enc.Encode(v); err != nil {
-		// Log the error, as we might not be able to write to w anymore
 		stdlog.Printf("Error encoding JSON response: %v", err)
-		// Attempt to send an error, though it might fail if headers are already sent
-		// http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
+	}
+	if _, err := w.Write(buf.Bytes()); err != nil {
+		stdlog.Printf("Error writing JSON response: %v", err)
 	}
 }
 
 // parseRequest parses the request body according to the Content-Type.
 // The parameter expectArray indicates whether an array of objects (true) or a single object (false) is expected.
-func parseRequest(r *http.Request, expectArray bool) (interface{}, error) {
-	cfg := GetConfig()
+func parseRequest(w http.ResponseWriter, r *http.Request, expectArray bool) (interface{}, error) {
+	cfg := currentConfig()
 	// Limit request body size
 	if cfg.Server.MaxBodySize > 0 {
-		r.Body = http.MaxBytesReader(nil, r.Body, cfg.Server.MaxBodySize)
-		defer r.Body.Close() // Ensure body is closed even if parsing fails midway
+		r.Body = http.MaxBytesReader(w, r.Body, cfg.Server.MaxBodySize)
 	}
 
 	contentType := r.Header.Get("Content-Type")
@@ -472,9 +556,19 @@ func parseRequest(r *http.Request, expectArray bool) (interface{}, error) {
 
 // makeResponse transforms the data according to the Accept header and sends the response.
 func makeResponse(w http.ResponseWriter, r *http.Request, status int, v any) {
+	makeResponseWithQuery(w, r, status, v, nil)
+}
+
+func makeResponseWithQuery(w http.ResponseWriter, r *http.Request, status int, v any, query url.Values) {
 	// Determine output format based on the Accept header
 	// First, check the "format" query parameter for explicit output format preference.
-	format := r.URL.Query().Get("format")
+	format := ""
+	if query != nil {
+		format = query.Get("format")
+	}
+	if format == "" {
+		format = r.URL.Query().Get("format")
+	}
 	acceptHeader := ""
 	switch strings.ToLower(format) {
 	case "json":
@@ -684,6 +778,28 @@ func DecodeTokenWithoutValidation(tokenStr string) (jwt.MapClaims, error) {
 	return jwt.MapClaims(claims), err
 }
 
+// authPluginTrialOrder returns plugin names in a deterministic order: local/cheap
+// auth first, then network-bound plugins, then any others alphabetically.
+func authPluginTrialOrder(plugins map[string]easyrest.AuthPlugin) []string {
+	priority := []string{"jwt", "basic", "apikey", "oidc", "awssigv4"}
+	seen := make(map[string]struct{}, len(plugins))
+	order := make([]string, 0, len(plugins))
+	for _, name := range priority {
+		if _, ok := plugins[name]; ok {
+			order = append(order, name)
+			seen[name] = struct{}{}
+		}
+	}
+	rest := make([]string, 0, len(plugins))
+	for name := range plugins {
+		if _, ok := seen[name]; !ok {
+			rest = append(rest, name)
+		}
+	}
+	sort.Strings(rest)
+	return append(order, rest...)
+}
+
 // CheckScope verifies if the claims contain the required scope.
 func CheckScope(claims jwt.MapClaims, required string) bool {
 	scopeVal, ok := claims["scope"]
@@ -709,7 +825,7 @@ func CheckScope(claims jwt.MapClaims, required string) bool {
 
 // extractUserIDFromClaims extracts the user ID from JWT claims.
 func extractUserIDFromClaims(claims jwt.MapClaims) string {
-	config := GetConfig()
+	config := currentConfig()
 	searchPath := config.TokenUserSearch
 	if val, ok := claims[searchPath]; ok {
 		switch v := val.(type) {
@@ -741,7 +857,7 @@ func getTokenClaims(r *http.Request) jwt.MapClaims {
 // 3. The first available cache plugin.
 // Returns nil if no cache plugins are configured or loaded.
 func getFirstCachePlugin(dbKey string) easyrest.CachePlugin {
-	cfg := GetConfig()
+	cfg := currentConfig()
 	currentCachePlugins := *CachePlugins.Load()
 	if len(currentCachePlugins) == 0 {
 		return nil // No cache plugins available
@@ -775,19 +891,36 @@ func getFirstCachePlugin(dbKey string) easyrest.CachePlugin {
 	return nil // Should not happen if len > 0, but safeguard
 }
 
+// --- ETag Helper Functions ---
+
+func etagCacheKey(dbKey, table string) string {
+	var b strings.Builder
+	b.Grow(len("etag:") + len(dbKey) + 1 + len(table))
+	b.WriteString("etag:")
+	b.WriteString(dbKey)
+	b.WriteByte(':')
+	b.WriteString(table)
+	return b.String()
+}
+
+func tableScope(table, suffix string) string {
+	var b strings.Builder
+	b.Grow(len(table) + len(suffix))
+	b.WriteString(table)
+	b.WriteString(suffix)
+	return b.String()
+}
+
 // getOrGenerateETag fetches ETag from cache or generates a new one.
 func getOrGenerateETag(cachePlugin easyrest.CachePlugin, key string) string {
 	currentETag, err := cachePlugin.Get(key)
 	if err == nil && currentETag != "" {
-		return currentETag // Found in cache
+		return currentETag
 	}
 
-	// Not found or error occurred, generate a new one
 	newETag := uuid.NewString()
-	// Store the new ETag in cache (use a long TTL, e.g., 24 hours or adjust as needed)
 	err = cachePlugin.Set(key, newETag, 24*time.Hour)
 	if err != nil {
-		// Log the error but proceed with the newly generated ETag
 		stdlog.Printf("Error setting ETag in cache for key '%s': %v", key, err)
 	}
 	return newETag
@@ -796,7 +929,7 @@ func getOrGenerateETag(cachePlugin easyrest.CachePlugin, key string) string {
 // updateETag generates a new ETag and stores it in the cache.
 func updateETag(cachePlugin easyrest.CachePlugin, key string) string {
 	newETag := uuid.NewString()
-	err := cachePlugin.Set(key, newETag, 24*time.Hour) // Use the same TTL as getOrGenerateETag
+	err := cachePlugin.Set(key, newETag, 24*time.Hour)
 	if err != nil {
 		stdlog.Printf("Error updating ETag in cache for key '%s': %v", key, err)
 	}
@@ -870,7 +1003,7 @@ func findPluginPath(pluginExec string) (string, error) {
 
 // LoadPlugins loads all configured database and cache plugins.
 func LoadPlugins() {
-	cfg := GetConfig()
+	cfg := currentConfig()
 	// Create new maps for the plugins and clients
 	newDbPlugins := make(map[string]easyrest.DBPlugin)
 	newQueryPlugins := make(map[string]easyrest.DBQueryPlugin)
@@ -1226,6 +1359,8 @@ func LoadPlugins() {
 	// Get the pointer to the old clients map *before* swapping for DB/Cache/Auth
 	oldClientsPtr := pluginClients.Load()
 
+	closeLoadedPlugins()
+
 	// Atomically swap to the new maps for DB/Cache/Query
 	DbPlugins.Store(&newDbPlugins)
 	QueryPlugins.Store(&newQueryPlugins)
@@ -1234,6 +1369,7 @@ func LoadPlugins() {
 	// Atomically swap for Auth
 	AuthPlugins.Store(&newAuthPlugins)
 	AuthSecurityDefinitions.Store(&newAuthSecurityDefinitions)
+	setAuthPluginOrder(newAuthPlugins)
 
 	// Swap the plugin clients
 	pluginClients.Store(&newPluginClients)

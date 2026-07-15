@@ -7,12 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
+	lru "github.com/hashicorp/golang-lru/v2"
 	pgxmock "github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -634,6 +636,46 @@ func TestPgCachePluginInitConnection(t *testing.T) {
 		t.Errorf("unfulfilled expectations in TestPgCachePluginInitConnection: %s", err)
 	}
 	_ = plugin // Use plugin to avoid unused variable error if cache init uses it
+}
+
+func TestResolveLocationCacheBounded(t *testing.T) {
+	plugin, _ := newTestPlugin(t)
+	cache, err := lru.New[string, *time.Location](maxTimezoneCacheSize)
+	if err != nil {
+		t.Fatalf("failed to create timezone cache: %v", err)
+	}
+	plugin.timezoneCache = cache
+
+	zones := []string{
+		"America/New_York", "Europe/London", "Asia/Tokyo", "Australia/Sydney",
+		"America/Los_Angeles", "Europe/Berlin", "Asia/Singapore", "Pacific/Auckland",
+	}
+	for i := 0; i < maxTimezoneCacheSize+10; i++ {
+		tz := zones[i%len(zones)]
+		plugin.resolveLocation(map[string]any{"timezone": tz})
+	}
+	if plugin.timezoneCache.Len() > maxTimezoneCacheSize {
+		t.Fatalf("timezone cache exceeded max size: got %d want <= %d", plugin.timezoneCache.Len(), maxTimezoneCacheSize)
+	}
+}
+
+func TestPgCachePluginCloseStopsCleanupGoroutine(t *testing.T) {
+	plugin, cachePlugin, mock := newTestPluginWithCache(t)
+	expectedSQL := `CREATE TABLE IF NOT EXISTS easyrest_cache ( key TEXT PRIMARY KEY, value TEXT, expires_at TIMESTAMPTZ );`
+	mock.ExpectExec(expectedSQL).WillReturnResult(pgxmock.NewResult("CREATE TABLE", 1))
+
+	if err := cachePlugin.InitConnection("postgres://user:pass@localhost:5432/db?autoCleanup=true"); err != nil {
+		t.Fatalf("InitConnection failed: %v", err)
+	}
+
+	before := runtime.NumGoroutine()
+	cachePlugin.Close()
+	time.Sleep(50 * time.Millisecond)
+	after := runtime.NumGoroutine()
+	if after > before+2 {
+		t.Fatalf("goroutine count increased after Close: before=%d after=%d", before, after)
+	}
+	_ = plugin
 }
 
 func TestPgCachePluginSetGet(t *testing.T) {

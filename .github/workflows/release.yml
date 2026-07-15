@@ -28,7 +28,7 @@ jobs:
         run: |
           for GOOS in linux darwin; do 
             for GOARCH in amd64 arm64; do 
-              for BIN in $(ls cmd); do 
+              for BIN in server gateway; do 
                 echo "Building $BIN for $GOOS/$GOARCH..."
                 BUILD_DIR=release GOOS=$GOOS GOARCH=$GOARCH make $BIN \
                   && mv release/easyrest-$BIN release/easyrest-$BIN-$GOOS-$GOARCH;

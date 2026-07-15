@@ -46,7 +46,7 @@ func TestBuildSQLiteDSN(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if dsn != "file:./test.db" {
+		if dsn != "file:./test.db?_busy_timeout=5000" {
 			t.Fatalf("got dsn %q", dsn)
 		}
 	})

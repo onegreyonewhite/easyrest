@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
@@ -34,6 +35,8 @@ type sqliteCachePlugin struct {
 	dbPluginPointer *sqlitePlugin
 	getStmt         *sql.Stmt
 	setStmt         *sql.Stmt
+	stopCh          chan struct{}
+	stopOnce        sync.Once
 }
 
 type sqliteQueryPlugin struct {
@@ -54,9 +57,11 @@ func buildSQLiteDSN(uri string, readOnly bool) (string, error) {
 	}
 
 	dsn := "file:" + path
-	params := make([]string, 0, 2)
+	params := make([]string, 0, 3)
 	if readOnly {
 		params = append(params, "mode=ro")
+	} else {
+		params = append(params, "_busy_timeout=5000")
 	}
 	if query != "" {
 		params = append(params, query)
@@ -78,14 +83,22 @@ func (s *sqlitePlugin) initConnection(uri string, readOnly bool) error {
 		return err
 	}
 
-	s.db, err = sql.Open("sqlite", dsn)
+	if s.db != nil {
+		s.closeResources()
+	}
+
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return err
 	}
+	s.db = db
 
 	// Initialize LRU cache for prepared statements
-	s.preparedStmts, err = lru.New[string, *sql.Stmt](1000)
+	s.preparedStmts, err = lru.NewWithEvict(1000, func(_ string, stmt *sql.Stmt) {
+		stmt.Close()
+	})
 	if err != nil {
+		s.closeResources()
 		return fmt.Errorf("failed to create LRU cache: %w", err)
 	}
 
@@ -98,6 +111,7 @@ func (s *sqlitePlugin) initConnection(uri string, readOnly bool) error {
 		// Enable WAL mode for better performance (not compatible with read-only mode)
 		_, err = s.db.Exec("PRAGMA journal_mode=WAL")
 		if err != nil {
+			s.closeResources()
 			return err
 		}
 	}
@@ -105,10 +119,41 @@ func (s *sqlitePlugin) initConnection(uri string, readOnly bool) error {
 	// Increase cache size for better performance
 	_, err = s.db.Exec("PRAGMA cache_size=10000")
 	if err != nil {
+		s.closeResources()
 		return err
 	}
 
-	return s.db.Ping()
+	if err := s.db.Ping(); err != nil {
+		s.closeResources()
+		return err
+	}
+	return nil
+}
+
+func (s *sqlitePlugin) closePreparedStmts() {
+	if s.preparedStmts == nil {
+		return
+	}
+	for _, query := range s.preparedStmts.Keys() {
+		if stmt, ok := s.preparedStmts.Get(query); ok {
+			stmt.Close()
+		}
+	}
+	s.preparedStmts.Purge()
+	s.preparedStmts = nil
+}
+
+func (s *sqlitePlugin) closeResources() {
+	s.closePreparedStmts()
+	if s.db != nil {
+		s.db.Close()
+		s.db = nil
+	}
+}
+
+// Close releases database connections and cached prepared statements.
+func (s *sqlitePlugin) Close() {
+	s.closeResources()
 }
 
 func (s *sqliteCachePlugin) InitConnection(uri string) error {
@@ -135,7 +180,9 @@ func (s *sqliteCachePlugin) InitConnection(uri string) error {
 	}
 	s.setStmt = setStmt
 
-	// Launch background goroutine for cleanup
+	if s.stopCh == nil {
+		s.stopCh = make(chan struct{})
+	}
 	go s.cleanupExpiredCacheEntries()
 
 	return nil
@@ -146,13 +193,39 @@ func (s *sqliteCachePlugin) cleanupExpiredCacheEntries() {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		// Use CURRENT_TIMESTAMP directly in SQL for simplicity and accuracy
-		_, err := s.dbPluginPointer.db.Exec("DELETE FROM easyrest_cache WHERE expires_at <= CURRENT_TIMESTAMP")
-		if err != nil {
-			// Log the error, but continue running the cleanup
-			fmt.Fprintf(os.Stderr, "Error cleaning up expired cache entries: %v\n", err)
+	for {
+		select {
+		case <-ticker.C:
+			if s.dbPluginPointer.db == nil {
+				continue
+			}
+			_, err := s.dbPluginPointer.db.Exec("DELETE FROM easyrest_cache WHERE expires_at <= CURRENT_TIMESTAMP")
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error cleaning up expired cache entries: %v\n", err)
+			}
+		case <-s.stopCh:
+			return
 		}
+	}
+}
+
+// Close stops the cleanup goroutine and releases cache resources.
+func (s *sqliteCachePlugin) Close() {
+	s.stopOnce.Do(func() {
+		if s.stopCh != nil {
+			close(s.stopCh)
+		}
+	})
+	if s.getStmt != nil {
+		s.getStmt.Close()
+		s.getStmt = nil
+	}
+	if s.setStmt != nil {
+		s.setStmt.Close()
+		s.setStmt = nil
+	}
+	if s.dbPluginPointer != nil {
+		s.dbPluginPointer.Close()
 	}
 }
 
@@ -713,6 +786,13 @@ func (s *sqliteQueryPlugin) QueryCall(query string, ctx map[string]any) ([]map[s
 	defer rows.Close()
 
 	return scanResultRows(rows, 0)
+}
+
+// Close releases the underlying database connection.
+func (s *sqliteQueryPlugin) Close() {
+	if s.dbPluginPointer != nil {
+		s.dbPluginPointer.Close()
+	}
 }
 
 func NewSqliteQueryPlugin() *sqliteQueryPlugin {

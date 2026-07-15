@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -683,4 +684,35 @@ func TestDecodeTokenWithoutValidation(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error for invalid base64 payload")
 	}
+}
+
+func TestReloadConfigConcurrentAccess(t *testing.T) {
+	os.Setenv("ER_CHECK_SCOPE", "0")
+	os.Setenv("ER_NO_PLUGIN_LOG", "1")
+	defer server.StopPlugins()
+
+	server.ReloadConfig()
+	router := server.SetupRouter()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			server.ReloadConfig()
+		}()
+	}
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req, err := http.NewRequest("GET", "/health", nil)
+			if err != nil {
+				return
+			}
+			rr := httptest.NewRecorder()
+			router.ServeHTTP(rr, req)
+		}()
+	}
+	wg.Wait()
 }
