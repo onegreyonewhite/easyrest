@@ -116,6 +116,11 @@ func TestQueryHandler(t *testing.T) {
 			t.Fatalf("Expected status 200, got %d, response: %s", rr.Code, rr.Body.String())
 		}
 
+		pref := rr.Header().Get("Preference-Applied")
+		if !strings.Contains(pref, "timezone=") || strings.HasSuffix(pref, " ") {
+			t.Errorf("Preference-Applied should contain timezone without trailing space: %q", pref)
+		}
+
 		serverTiming := rr.Header().Get("Server-Timing")
 		if serverTiming == "" || !strings.HasPrefix(serverTiming, "db;dur=") {
 			t.Errorf("Expected Server-Timing header with db;dur=..., got %q", serverTiming)

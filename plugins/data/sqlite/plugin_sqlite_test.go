@@ -897,3 +897,99 @@ func TestSqliteCachePluginCloseStopsCleanupGoroutine(t *testing.T) {
 		t.Fatalf("goroutine count increased after Close: before=%d after=%d", before, after)
 	}
 }
+
+func TestTableUpdate_PreferTxRollback(t *testing.T) {
+	uri := "sqlite://:memory:"
+	plugin := &sqlitePlugin{}
+	if err := plugin.InitConnection(uri); err != nil {
+		t.Fatalf("InitConnection failed: %v", err)
+	}
+	db, err := openInMemoryDB(uri)
+	if err != nil {
+		t.Fatalf("openInMemoryDB failed: %v", err)
+	}
+	plugin.db = db
+	if err := initTestDB(plugin.db); err != nil {
+		t.Fatalf("initTestDB failed: %v", err)
+	}
+	_, err = plugin.db.Exec(`INSERT INTO users (name, update_field) VALUES ('Alice', 'old')`)
+	if err != nil {
+		t.Fatalf("Insert failed: %v", err)
+	}
+
+	ctx := map[string]any{
+		"prefer": map[string]any{"tx": "rollback"},
+	}
+	updated, err := plugin.TableUpdate("u", "users", map[string]any{"update_field": "new"}, map[string]any{"name": map[string]any{"=": "Alice"}}, ctx)
+	if err != nil {
+		t.Fatalf("TableUpdate: %v", err)
+	}
+	if updated != 0 {
+		t.Fatalf("expected 0 updated after rollback preference, got %d", updated)
+	}
+	var field string
+	if err := plugin.db.QueryRow(`SELECT update_field FROM users WHERE name='Alice'`).Scan(&field); err != nil {
+		t.Fatal(err)
+	}
+	if field != "old" {
+		t.Fatalf("row should be unchanged after rollback, got %q", field)
+	}
+}
+
+func TestTableUpdate_InvalidPreferTx(t *testing.T) {
+	uri := "sqlite://:memory:"
+	plugin := &sqlitePlugin{}
+	if err := plugin.InitConnection(uri); err != nil {
+		t.Fatalf("InitConnection failed: %v", err)
+	}
+	db, err := openInMemoryDB(uri)
+	if err != nil {
+		t.Fatalf("openInMemoryDB failed: %v", err)
+	}
+	plugin.db = db
+	if err := initTestDB(plugin.db); err != nil {
+		t.Fatalf("initTestDB failed: %v", err)
+	}
+
+	ctx := map[string]any{
+		"prefer": map[string]any{"tx": "banana"},
+	}
+	_, err = plugin.TableUpdate("u", "users", map[string]any{"update_field": "x"}, map[string]any{"name": map[string]any{"=": "Alice"}}, ctx)
+	if err == nil {
+		t.Fatal("expected invalid prefer.tx error")
+	}
+}
+
+func TestTableCreate_PreferTxRollbackStillReturnsRows(t *testing.T) {
+	uri := "sqlite://:memory:"
+	plugin := &sqlitePlugin{}
+	if err := plugin.InitConnection(uri); err != nil {
+		t.Fatalf("InitConnection failed: %v", err)
+	}
+	db, err := openInMemoryDB(uri)
+	if err != nil {
+		t.Fatalf("openInMemoryDB failed: %v", err)
+	}
+	plugin.db = db
+	if err := initTestDB(plugin.db); err != nil {
+		t.Fatalf("initTestDB failed: %v", err)
+	}
+
+	ctx := map[string]any{
+		"prefer": map[string]any{"tx": "rollback"},
+	}
+	rows, err := plugin.TableCreate("u", "users", []map[string]any{{"name": "Bob", "update_field": "x"}}, ctx)
+	if err != nil {
+		t.Fatalf("TableCreate: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected created rows returned even on rollback, got %d", len(rows))
+	}
+	var count int
+	if err := plugin.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("expected rollback to leave table empty, got count=%d", count)
+	}
+}

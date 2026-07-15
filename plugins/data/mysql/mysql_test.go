@@ -1071,3 +1071,103 @@ func TestMysqlQueryCall(t *testing.T) {
 		}
 	})
 }
+
+func TestGetRPCSchemaWithRoutines(t *testing.T) {
+	plugin := &mysqlPlugin{
+		routines: map[string]RoutineInfo{
+			"add_nums": {
+				Name: "add_nums",
+				Params: []RoutineParam{
+					{Name: "a", DataType: "int", Mode: "IN", Ordinal: 1},
+					{Name: "b", DataType: "int", Mode: "IN", Ordinal: 2},
+				},
+				ReturnType: "int",
+			},
+			"do_proc": {
+				Name: "do_proc",
+				Params: []RoutineParam{
+					{Name: "msg", DataType: "varchar", Mode: "IN", Ordinal: 1},
+				},
+			},
+		},
+	}
+	rpc, err := plugin.getRPCSchema()
+	if err != nil {
+		t.Fatalf("getRPCSchema: %v", err)
+	}
+	fn, ok := rpc["add_nums"].([]any)
+	if !ok || len(fn) != 2 {
+		t.Fatalf("add_nums schema: %#v", rpc["add_nums"])
+	}
+	inSchema := fn[0].(map[string]any)
+	if _, ok := inSchema["required"]; !ok {
+		t.Fatal("expected required params for add_nums")
+	}
+	outSchema := fn[1].(map[string]any)
+	props := outSchema["properties"].(map[string]any)
+	if _, ok := props["result"]; !ok {
+		t.Fatal("expected result property for function return type")
+	}
+	proc, ok := rpc["do_proc"].([]any)
+	if !ok || len(proc) != 2 {
+		t.Fatalf("do_proc schema: %#v", rpc["do_proc"])
+	}
+}
+
+func TestNewMysqlCachePlugin(t *testing.T) {
+	p := NewMysqlCachePlugin()
+	if p == nil || p.dbPluginPointer == nil {
+		t.Fatal("NewMysqlCachePlugin returned incomplete plugin")
+	}
+	p.Close()
+}
+
+func TestMysqlQueryPluginCloseNilSafe(t *testing.T) {
+	p := NewMysqlQueryPlugin()
+	p.Close()
+}
+
+func TestTableUpdate_PreferTxRollback(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	defer plugin.db.Close()
+
+	data := map[string]any{"note": "rolled"}
+	where := map[string]any{"id": map[string]any{"=": 1}}
+	ctx := map[string]any{"prefer": map[string]any{"tx": "rollback"}}
+
+	mock.ExpectBegin()
+	// FormatToContext flattens prefer.tx → prefer_tx
+	setQuery := regexp.QuoteMeta("SET @erctx_prefer_tx = ?, @request_prefer_tx = ?")
+	mock.ExpectExec(setQuery).
+		WithArgs("rollback", "rollback").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	upQ := regexp.QuoteMeta("UPDATE items SET note = ? WHERE id = ?")
+	mock.ExpectExec(upQ).
+		WithArgs("rolled", 1).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectRollback()
+
+	affected, err := plugin.TableUpdate("user1", "items", data, where, ctx)
+	if err != nil {
+		t.Fatalf("TableUpdate: %v", err)
+	}
+	if affected != 0 {
+		t.Fatalf("expected 0 after rollback prefer, got %d", affected)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
+func TestTableUpdate_InvalidPreferTx(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	defer plugin.db.Close()
+	ctx := map[string]any{"prefer": map[string]any{"tx": "nope"}}
+	_, err := plugin.TableUpdate("u", "items", map[string]any{"note": "x"}, map[string]any{"id": map[string]any{"=": 1}}, ctx)
+	if err == nil {
+		t.Fatal("expected invalid prefer.tx error")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
+	}
+}

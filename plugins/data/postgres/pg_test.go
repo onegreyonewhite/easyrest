@@ -1019,3 +1019,65 @@ func TestPgQueryCall(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 }
+
+func TestApplyPluginContext_TypeBranches(t *testing.T) {
+	mock, err := pgxmock.NewPool(pgxmock.QueryMatcherOption(pgxmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	tx, err := mock.Begin(context.Background())
+	require.NoError(t, err)
+
+	ctx := map[string]any{
+		"s":     "hello",
+		"i":     42,
+		"i64":   int64(99),
+		"f":     3.14,
+		"b":     true,
+		"obj":   map[string]any{"k": "v"},
+		"arr":   []any{1, 2},
+		"other": time.Second,
+	}
+	for range ctx {
+		mock.ExpectExec("SELECT set_config($1, $2, true)").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("SELECT", 1))
+		mock.ExpectExec("SELECT set_config($1, $2, true)").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	}
+
+	require.NoError(t, ApplyPluginContext(context.Background(), tx, ctx))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestApplyPluginContext_EmptyAndExecError(t *testing.T) {
+	require.NoError(t, ApplyPluginContext(context.Background(), nil, nil))
+	require.NoError(t, ApplyPluginContext(context.Background(), nil, map[string]any{}))
+
+	mock, err := pgxmock.NewPool(pgxmock.QueryMatcherOption(pgxmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer mock.Close()
+	mock.ExpectBegin()
+	tx, err := mock.Begin(context.Background())
+	require.NoError(t, err)
+	mock.ExpectExec("SELECT set_config($1, $2, true)").
+		WithArgs("request.x", "y").
+		WillReturnError(fmt.Errorf("boom"))
+	err = ApplyPluginContext(context.Background(), tx, map[string]any{"x": "y"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "request.x")
+}
+
+func TestNewPgCachePlugin(t *testing.T) {
+	p := NewPgCachePlugin()
+	require.NotNil(t, p)
+	require.NotNil(t, p.dbPluginPointer)
+	p.Close()
+}
+
+func TestPgQueryPluginCloseNilSafe(t *testing.T) {
+	p := NewPgQueryPlugin()
+	p.Close()
+}

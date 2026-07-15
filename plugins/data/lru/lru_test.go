@@ -91,3 +91,15 @@ func TestSimpleCachePluginClose(t *testing.T) {
 		t.Fatal("expected cache to be nil after Close")
 	}
 }
+
+func TestSimpleCachePlugin_GetNonStringValue(t *testing.T) {
+	plugin := NewSimpleCachePlugin()
+	if err := plugin.InitConnection(""); err != nil {
+		t.Fatal(err)
+	}
+	plugin.cache.Set("bad", 123, time.Minute)
+	_, err := plugin.Get("bad")
+	if err == nil {
+		t.Fatal("expected type error for non-string cached value")
+	}
+}

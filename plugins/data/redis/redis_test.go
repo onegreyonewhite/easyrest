@@ -197,3 +197,19 @@ func TestClose_Success_NonNullClient(t *testing.T) {
 	assert.Nil(t, p.client) // Client should be nil after calling Close
 
 }
+
+func TestNewRedisCachePlugin(t *testing.T) {
+	p := NewRedisCachePlugin()
+	require.NotNil(t, p)
+	require.Nil(t, p.client)
+	require.NoError(t, p.Close())
+}
+
+func TestInitConnection_PingFailure(t *testing.T) {
+	p := NewRedisCachePlugin()
+	// Unreachable port should fail ping after ParseURL succeeds.
+	err := p.InitConnection("redis://127.0.0.1:1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to ping Redis server")
+	assert.Nil(t, p.client)
+}

@@ -65,7 +65,6 @@ func queryHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	applied.WriteString("timezone=")
 	applied.WriteString(pluginCtx["timezone"].(string))
-	applied.WriteString(" ")
 	w.Header().Set("Preference-Applied", applied.String())
 
 	startTime := time.Now()
