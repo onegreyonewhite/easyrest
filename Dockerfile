@@ -1,6 +1,6 @@
-FROM golang:1.26-alpine AS builder
+FROM golang:1.26 AS builder
 
-RUN apk add --no-cache make tzdata
+RUN apt update && apt install -y make
 
 ARG GOARCH="amd64"
 ENV CGO_ENABLED=0
@@ -25,10 +25,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     make clean server
 
 
-FROM scratch
-# Copy the timezone database from Alpine (builder) image
-COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
-
+FROM gcr.io/distroless/static-debian13:nonroot
 COPY --from=builder /app/bin/easyrest-server /easyrest-server
-
+EXPOSE 8080
 ENTRYPOINT ["/easyrest-server"]
