@@ -134,7 +134,7 @@ sequenceDiagram
         Server-->>Client: stop chain, write that status
     else continue
         MW-->>Server: updated ctx
-        Server->>Server: Parse select, where, body; substitute context
+        Server->>Server: Parse select, where, body, then substitute context
         Server->>DB: TableGet / TableCreate / TableUpdate / TableDelete / CallFunction
         DB->>SQL: Inject session context
         DB->>SQL: db.pre-request hook
