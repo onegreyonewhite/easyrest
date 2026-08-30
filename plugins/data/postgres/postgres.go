@@ -13,7 +13,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -22,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
+	"github.com/onegreyonewhite/easyrest/plugins/data/sqlcache"
 )
 
 var bgCtx = context.Background()
@@ -40,10 +40,10 @@ type DBPool interface {
 // pgPlugin implements the DBPlugin interface for PostgreSQL.
 type pgPlugin struct {
 	db             DBPool
-	defaultTimeout time.Duration              // Default timeout for operations
-	bulkThreshold  int                        // Threshold for bulk operations
+	defaultTimeout time.Duration                      // Default timeout for operations
+	bulkThreshold  int                                // Threshold for bulk operations
 	timezoneCache  *lru.Cache[string, *time.Location] // Cache for loaded timezones
-	searchPath     string                     // Schema search path
+	searchPath     string                             // Schema search path
 }
 
 // newContextWithTimeout creates a new context with timeout
@@ -219,6 +219,9 @@ func ApplyPluginContext(ctx context.Context, tx pgx.Tx, pluginCtx map[string]any
 		return nil
 	}
 	for key, val := range pluginCtx {
+		if easyrest.IsContextRoutineKey(key) {
+			continue
+		}
 		var requestVal, erctxVal string
 		switch v := val.(type) {
 		case string:
@@ -260,6 +263,67 @@ func ApplyPluginContext(ctx context.Context, tx pgx.Tx, pluginCtx map[string]any
 	return nil
 }
 
+// harvestResponseSettingsSQL lists transaction-local response.* GUCs (PostgREST
+// response.headers / response.status plus any other response.* name) and cache.invalidate.
+const harvestResponseSettingsSQL = `SELECT s.name, nullif(current_setting(s.name, true), '') FROM ( SELECT name FROM pg_catalog.pg_settings WHERE name LIKE 'response.%' UNION SELECT unnest(ARRAY['response.headers'::text, 'response.status'::text, 'cache.invalidate'::text]) ) AS s WHERE nullif(current_setting(s.name, true), '') IS NOT NULL ORDER BY 1`
+
+func harvestResponseSettings(ctx context.Context, tx pgx.Tx) (map[string]string, error) {
+	rows, err := tx.Query(ctx, harvestResponseSettingsSQL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to harvest response settings: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]string)
+	for rows.Next() {
+		var name, value string
+		if err := rows.Scan(&name, &value); err != nil {
+			return nil, fmt.Errorf("failed to scan response setting: %w", err)
+		}
+		if name == "" || value == "" {
+			continue
+		}
+		out[name] = value
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate response settings: %w", err)
+	}
+	return out, nil
+}
+
+func mergeHarvestedContext(ctx context.Context, tx pgx.Tx, pluginCtx map[string]any) (map[string]any, error) {
+	settings, err := harvestResponseSettings(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	return easyrest.MergeResponseSettings(pluginCtx, settings), nil
+}
+
+func runContextRoutine(ctx context.Context, tx pgx.Tx, pluginCtx map[string]any, key string) error {
+	name := easyrest.ContextRoutineName(pluginCtx, key)
+	if name == "" {
+		return nil
+	}
+	rows, err := tx.Query(ctx, "SELECT "+name+"()")
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "42883" {
+			return nil
+		}
+		return fmt.Errorf("failed to run %s %s: %w", key, name, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+	}
+	if err := rows.Err(); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "42883" {
+			return nil
+		}
+		return fmt.Errorf("failed to run %s %s: %w", key, name, err)
+	}
+	return nil
+}
+
 // processRows processes query results in batches
 func (p *pgPlugin) processRows(rows pgx.Rows, loc *time.Location) ([]map[string]any, error) {
 	cols := rows.FieldDescriptions()
@@ -275,12 +339,7 @@ func (p *pgPlugin) processRows(rows pgx.Rows, loc *time.Location) ([]map[string]
 			val := values[i]
 			switch v := val.(type) {
 			case time.Time:
-				adjusted := v.In(loc)
-				if adjusted.Hour() == 0 && adjusted.Minute() == 0 && adjusted.Second() == 0 && adjusted.Nanosecond() == 0 {
-					rowMap[string(col.Name)] = adjusted.Format("2006-01-02")
-				} else {
-					rowMap[string(col.Name)] = adjusted.Format("2006-01-02 15:04:05")
-				}
+				rowMap[string(col.Name)] = easyrest.FormatSQLTime(v.In(loc))
 			case []byte:
 				rowMap[string(col.Name)] = string(v)
 			case string, int, int8, int16, int32, int64, float32, float64, bool:
@@ -318,94 +377,81 @@ func (p *pgPlugin) resolveLocation(ctx map[string]any) *time.Location {
 	return loc
 }
 
+func (p *pgPlugin) withTx(ctx context.Context, pluginCtx map[string]any, preference string, fn func(tx pgx.Tx, loc *time.Location) error) (map[string]any, error) {
+	tx, err := p.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	loc := time.UTC
+	if pluginCtx != nil {
+		if err := ApplyPluginContext(ctx, tx, pluginCtx); err != nil {
+			return nil, err
+		}
+		loc = p.resolveLocation(pluginCtx)
+	}
+	if err := runContextRoutine(ctx, tx, pluginCtx, easyrest.CtxDBPreRequest); err != nil {
+		return nil, err
+	}
+	if err := fn(tx, loc); err != nil {
+		return nil, err
+	}
+	if err := runContextRoutine(ctx, tx, pluginCtx, easyrest.CtxDBPostRequest); err != nil {
+		return nil, err
+	}
+	outCtx, err := mergeHarvestedContext(ctx, tx, pluginCtx)
+	if err != nil {
+		return nil, err
+	}
+	if preference == "rollback" {
+		if err := tx.Rollback(ctx); err != nil {
+			return nil, fmt.Errorf("failed to rollback transaction: %w", err)
+		}
+	} else if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return outCtx, nil
+}
+
 // TableGet executes a SELECT query with optional WHERE, GROUP BY, ORDER BY, LIMIT and OFFSET.
 func (p *pgPlugin) TableGet(userID, table string, selectFields []string, where map[string]any,
-	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, error) {
+	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, map[string]any, error) {
 
 	queryCtx, cancel := p.newContextWithTimeout()
 	defer cancel()
 
-	var queryBuilder strings.Builder
-	queryBuilder.Grow(100 + len(table) + len(strings.Join(selectFields, ", ")))
-
-	queryBuilder.WriteString("SELECT ")
-	if len(selectFields) > 0 {
-		queryBuilder.WriteString(strings.Join(selectFields, ", "))
-	} else {
-		queryBuilder.WriteByte('*')
-	}
-	queryBuilder.WriteString(" FROM ")
-	queryBuilder.WriteString(table)
-
-	whereClause, args, err := easyrest.BuildWhereClauseSorted(where)
+	query, args, err := easyrest.BuildSelectQuery(table, selectFields, where, ordering, groupBy, limit, offset, easyrest.SelectOptions{})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	queryBuilder.WriteString(whereClause)
+	finalQuery := convertPlaceholders(query)
 
-	if len(groupBy) > 0 {
-		queryBuilder.WriteString(" GROUP BY ")
-		queryBuilder.WriteString(strings.Join(groupBy, ", "))
-	}
-	if len(ordering) > 0 {
-		queryBuilder.WriteString(" ORDER BY ")
-		queryBuilder.WriteString(strings.Join(ordering, ", "))
-	}
-	if limit > 0 {
-		queryBuilder.WriteString(" LIMIT ")
-		queryBuilder.WriteString(strconv.Itoa(limit))
-	}
-	if offset > 0 {
-		queryBuilder.WriteString(" OFFSET ")
-		queryBuilder.WriteString(strconv.Itoa(offset))
-	}
-
-	finalQuery := convertPlaceholders(queryBuilder.String())
-
-	tx, err := p.db.Begin(queryCtx)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback(queryCtx)
-
-	loc := time.UTC
-	if ctx != nil && len(ctx) > 0 {
-		if err := ApplyPluginContext(queryCtx, tx, ctx); err != nil {
-			tx.Rollback(queryCtx)
-			return nil, err
+	var results []map[string]any
+	outCtx, err := p.withTx(queryCtx, ctx, "commit", func(tx pgx.Tx, loc *time.Location) error {
+		rows, qerr := tx.Query(queryCtx, finalQuery, args...)
+		if qerr != nil {
+			return qerr
 		}
-		loc = p.resolveLocation(ctx)
-	}
-
-	rows, err := tx.Query(queryCtx, finalQuery, args...)
+		defer rows.Close()
+		results, qerr = p.processRows(rows, loc)
+		return qerr
+	})
 	if err != nil {
-		tx.Rollback(queryCtx)
-		return nil, err
+		return nil, nil, err
 	}
-	defer rows.Close()
-
-	results, err := p.processRows(rows, loc)
-	if err != nil {
-		tx.Rollback(queryCtx)
-		return nil, err
-	}
-
-	if err := tx.Commit(queryCtx); err != nil {
-		return nil, err
-	}
-
-	return results, nil
+	return results, outCtx, nil
 }
 
 // TableCreate performs an INSERT operation on the specified table
-func (p *pgPlugin) TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, error) {
+func (p *pgPlugin) TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, map[string]any, error) {
 	if len(data) == 0 {
-		return []map[string]any{}, nil
+		return []map[string]any{}, nil, nil
 	}
 	for _, row := range data {
 		for k := range row {
 			if err := easyrest.ValidateColumnName(k); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 	}
@@ -413,7 +459,7 @@ func (p *pgPlugin) TableCreate(userID, table string, data []map[string]any, ctx 
 	// Get transaction preference
 	txPreference, err := easyrest.GetTxPreference(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Use COPY for large datasets
@@ -421,23 +467,10 @@ func (p *pgPlugin) TableCreate(userID, table string, data []map[string]any, ctx 
 		// Note: bulkCreate currently does not support the rollback preference.
 		// It creates a temp table, copies, inserts, and commits within its own transaction.
 		if txPreference == "rollback" {
-			return nil, fmt.Errorf("rollback preference is not currently supported for bulk create operations (rows >= %d)", p.bulkThreshold)
+			return nil, nil, fmt.Errorf("rollback preference is not currently supported for bulk create operations (rows >= %d)", p.bulkThreshold)
 		}
-		return p.bulkCreate(table, data, ctx) // bulkCreate handles its own commit
-	}
-
-	tx, err := p.db.Begin(bgCtx)
-	if err != nil {
-		return nil, err
-	}
-	// Defer rollback in case of errors before the final commit/rollback decision
-	defer tx.Rollback(bgCtx) // This will be ignored if Commit() or Rollback() is called explicitly later
-
-	if ctx != nil {
-		if err := ApplyPluginContext(bgCtx, tx, ctx); err != nil {
-			// tx.Rollback() is handled by defer
-			return nil, err
-		}
+		result, outCtx, err := p.bulkCreate(table, data, ctx) // bulkCreate handles its own commit
+		return result, outCtx, err
 	}
 
 	keys := make([]string, 0, len(data[0]))
@@ -486,41 +519,24 @@ func (p *pgPlugin) TableCreate(userID, table string, data []map[string]any, ctx 
 
 	finalQuery := queryBuilder.String() // No need for convertPlaceholders anymore
 
-	if _, err := tx.Exec(bgCtx, finalQuery, args...); err != nil {
-		// tx.Rollback() is handled by defer
-		return nil, err
+	outCtx, err := p.withTx(bgCtx, ctx, txPreference, func(tx pgx.Tx, _ *time.Location) error {
+		_, execErr := tx.Exec(bgCtx, finalQuery, args...)
+		return execErr
+	})
+	if err != nil {
+		return nil, nil, err
 	}
-
-	// Conditionally commit or rollback based on preference
-	if txPreference == "rollback" {
-		if err := tx.Rollback(bgCtx); err != nil {
-			return nil, fmt.Errorf("failed to rollback transaction: %w", err)
-		}
-		// Return the data as if it were inserted, even though rolled back
-		return data, nil
-	} else {
-		if err := tx.Commit(bgCtx); err != nil {
-			return nil, fmt.Errorf("failed to commit transaction: %w", err)
-		}
-		return data, nil
-	}
+	return data, outCtx, nil
 }
 
 // bulkCreate uses COPY for efficient insertion of large amounts of data
-func (p *pgPlugin) bulkCreate(table string, data []map[string]any, ctx map[string]any) ([]map[string]any, error) {
-	tx, err := p.db.Begin(bgCtx)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback(bgCtx)
-
+func (p *pgPlugin) bulkCreate(table string, data []map[string]any, ctx map[string]any) ([]map[string]any, map[string]any, error) {
 	keys := make([]string, 0, len(data[0]))
 	for k := range data[0] {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 
-	// Build pgx CopyFromSource
 	records := make([][]any, len(data))
 	for i, row := range data {
 		rowVals := make([]any, len(keys))
@@ -529,57 +545,33 @@ func (p *pgPlugin) bulkCreate(table string, data []map[string]any, ctx map[strin
 		}
 		records[i] = rowVals
 	}
-
 	columns := make([]string, len(keys))
 	copy(columns, keys)
 
-	_, err = tx.CopyFrom(
-		bgCtx,
-		pgx.Identifier{table},
-		columns,
-		pgx.CopyFromRows(records),
-	)
+	outCtx, err := p.withTx(bgCtx, ctx, "commit", func(tx pgx.Tx, _ *time.Location) error {
+		_, copyErr := tx.CopyFrom(bgCtx, pgx.Identifier{table}, columns, pgx.CopyFromRows(records))
+		return copyErr
+	})
 	if err != nil {
-		tx.Rollback(bgCtx)
-		return nil, err
+		return nil, nil, err
 	}
-
-	if err := tx.Commit(bgCtx); err != nil {
-		return nil, err
-	}
-
-	return data, nil
+	return data, outCtx, nil
 }
 
 // TableUpdate executes an UPDATE query on the specified table.
-func (p *pgPlugin) TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, error) {
+func (p *pgPlugin) TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, map[string]any, error) {
 	for k := range data {
 		if err := easyrest.ValidateColumnName(k); err != nil {
-			return 0, err
+			return 0, nil, err
 		}
 	}
 
 	// Get transaction preference
 	txPreference, err := easyrest.GetTxPreference(ctx)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 
-	tx, err := p.db.Begin(bgCtx)
-	if err != nil {
-		return 0, err
-	}
-	// Defer rollback in case of errors
-	defer tx.Rollback(bgCtx)
-
-	if ctx != nil {
-		if err := ApplyPluginContext(bgCtx, tx, ctx); err != nil {
-			// tx.Rollback() is handled by defer
-			return 0, err
-		}
-	}
-
-	// Pre-allocate slices
 	setParts := make([]string, 0, len(data))
 	args := make([]any, 0, len(data)) // Initial capacity for SET args
 
@@ -598,7 +590,7 @@ func (p *pgPlugin) TableUpdate(userID, table string, data map[string]any, where 
 	whereClause, whereArgs, err := easyrest.BuildWhereClauseSorted(where)
 	if err != nil {
 		// tx.Rollback() is handled by defer
-		return 0, err
+		return 0, nil, err
 	}
 	args = append(args, whereArgs...) // Append WHERE args
 
@@ -613,98 +605,67 @@ func (p *pgPlugin) TableUpdate(userID, table string, data map[string]any, where 
 
 	finalQuery := convertPlaceholders(queryBuilder.String())
 
-	res, err := tx.Exec(bgCtx, finalQuery, args...)
+	var affected int64
+	outCtx, err := p.withTx(bgCtx, ctx, txPreference, func(tx pgx.Tx, _ *time.Location) error {
+		res, execErr := tx.Exec(bgCtx, finalQuery, args...)
+		if execErr != nil {
+			return execErr
+		}
+		affected = res.RowsAffected()
+		return nil
+	})
 	if err != nil {
-		// tx.Rollback() is handled by defer
-		return 0, err
+		return 0, nil, err
 	}
-	affected := res.RowsAffected()
-
-	// Conditionally commit or rollback based on preference
-	if txPreference == "rollback" {
-		if err := tx.Rollback(bgCtx); err != nil {
-			return 0, fmt.Errorf("failed to rollback transaction: %w", err)
-		}
-		// Return affected rows count even if rolled back
-		return int(affected), nil
-	} else {
-		if err := tx.Commit(bgCtx); err != nil {
-			return 0, fmt.Errorf("failed to commit transaction: %w", err)
-		}
-		return int(affected), nil
-	}
+	return int(affected), outCtx, nil
 }
 
 // TableDelete executes a DELETE query on the specified table.
-func (p *pgPlugin) TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, error) {
+func (p *pgPlugin) TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, map[string]any, error) {
 	// Get transaction preference
 	txPreference, err := easyrest.GetTxPreference(ctx)
 	if err != nil {
-		return 0, err
-	}
-
-	tx, err := p.db.Begin(bgCtx)
-	if err != nil {
-		return 0, err
-	}
-	// Defer rollback in case of errors
-	defer tx.Rollback(bgCtx)
-
-	if ctx != nil {
-		if err := ApplyPluginContext(bgCtx, tx, ctx); err != nil {
-			// tx.Rollback() is handled by defer
-			return 0, err
-		}
+		return 0, nil, err
 	}
 
 	whereClause, args, err := easyrest.BuildWhereClauseSorted(where)
 	if err != nil {
-		// tx.Rollback() is handled by defer
-		return 0, err
+		return 0, nil, err
 	}
 
 	var queryBuilder strings.Builder
 	queryBuilder.Grow(20 + len(table) + len(whereClause))
-
 	queryBuilder.WriteString("DELETE FROM ")
 	queryBuilder.WriteString(table)
 	queryBuilder.WriteString(whereClause)
-
 	finalQuery := convertPlaceholders(queryBuilder.String())
 
-	res, err := tx.Exec(bgCtx, finalQuery, args...)
+	var affected int64
+	outCtx, err := p.withTx(bgCtx, ctx, txPreference, func(tx pgx.Tx, _ *time.Location) error {
+		res, execErr := tx.Exec(bgCtx, finalQuery, args...)
+		if execErr != nil {
+			return execErr
+		}
+		affected = res.RowsAffected()
+		return nil
+	})
 	if err != nil {
-		// tx.Rollback() is handled by defer
-		return 0, err
+		return 0, nil, err
 	}
-	affected := res.RowsAffected()
-
-	// Conditionally commit or rollback
-	if txPreference == "rollback" {
-		if err := tx.Rollback(bgCtx); err != nil {
-			return 0, fmt.Errorf("failed to rollback transaction: %w", err)
-		}
-		// Return affected rows count even if rolled back
-		return int(affected), nil
-	} else {
-		if err := tx.Commit(bgCtx); err != nil {
-			return 0, fmt.Errorf("failed to commit transaction: %w", err)
-		}
-		return int(affected), nil
-	}
+	return int(affected), outCtx, nil
 }
 
 // CallFunction executes a function call using SELECT syntax.
 // Parameters are passed in sorted order by key.
 // It handles scalar, SETOF, JSON, and void return types.
-func (p *pgPlugin) CallFunction(userID, funcName string, data map[string]any, ctx map[string]any) (any, error) {
+func (p *pgPlugin) CallFunction(userID, funcName string, data map[string]any, ctx map[string]any) (any, map[string]any, error) {
 	queryCtx, cancel := p.newContextWithTimeout()
 	defer cancel()
 
 	// Get transaction preference
 	txPreference, err := easyrest.GetTxPreference(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	keys := make([]string, 0, len(data))
@@ -734,68 +695,30 @@ func (p *pgPlugin) CallFunction(userID, funcName string, data map[string]any, ct
 
 	finalQuery := convertPlaceholders(queryBuilder.String())
 
-	tx, err := p.db.Begin(queryCtx)
+	var results []map[string]any
+	outCtx, err := p.withTx(queryCtx, ctx, txPreference, func(tx pgx.Tx, loc *time.Location) error {
+		rows, qerr := tx.Query(queryCtx, finalQuery, args...)
+		if qerr != nil {
+			return fmt.Errorf("failed to execute function query: %w", qerr)
+		}
+		defer rows.Close()
+		results, qerr = p.processRows(rows, loc)
+		if qerr != nil {
+			return fmt.Errorf("failed to process function results: %w", qerr)
+		}
+		if qerr = rows.Err(); qerr != nil {
+			return fmt.Errorf("error during rows iteration: %w", qerr)
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback(queryCtx)
-
-	loc := time.UTC
-	if ctx != nil {
-		if err := ApplyPluginContext(queryCtx, tx, ctx); err != nil {
-			return nil, fmt.Errorf("failed to apply plugin context: %w", err)
-		}
-		if tz, ok := ctx["timezone"].(string); ok && tz != "" {
-			if l, err := time.LoadLocation(tz); err == nil {
-				loc = l
-			} else {
-				log.Printf("Warning: Could not load timezone '%s': %v", tz, err)
-			}
-		}
-	}
-
-	rows, err := tx.Query(queryCtx, finalQuery, args...)
-	if err != nil {
-		// Check for specific PostgreSQL error indicating function doesn't return SETOF
-		// This might require checking the pgerr code. For now, general error handling.
-		// If the error suggests it's not a set-returning function, we could retry with SELECT funcName(...)
-		return nil, fmt.Errorf("failed to execute function query: %w", err)
-	}
-	defer rows.Close() // Ensure rows are closed
-
-	// Use processRows to handle potential SETOF results or single composite results
-	results, err := p.processRows(rows, loc)
-	if err != nil {
-		return nil, fmt.Errorf("failed to process function results: %w", err)
-	}
-
-	// Check if rows.Err() occurred during iteration in processRows
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error during rows iteration: %w", err)
-	}
-
-	// Conditionally commit or rollback based on preference
-	var finalErr error
-	if txPreference == "rollback" {
-		if err := tx.Rollback(queryCtx); err != nil {
-			finalErr = fmt.Errorf("failed to rollback transaction: %w", err)
-		}
-		// No need to log here, behavior is intentional
-	} else {
-		if err := tx.Commit(queryCtx); err != nil {
-			finalErr = fmt.Errorf("failed to commit transaction: %w", err)
-		}
-	}
-
-	// Return results even if rollback was requested, but prioritize transaction error
-	if finalErr != nil {
-		return nil, finalErr
+		return nil, nil, err
 	}
 
 	// Analyze the results
 	if len(results) == 0 {
 		// Function returned void or an empty set
-		return nil, nil
+		return nil, outCtx, nil
 	}
 
 	if len(results) == 1 {
@@ -815,33 +738,33 @@ func (p *pgPlugin) CallFunction(userID, funcName string, data map[string]any, ct
 				var parsedResult any
 				if json.Unmarshal(v, &parsedResult) == nil {
 					log.Printf("Successfully unmarshaled []byte result from function %s", funcName)
-					return parsedResult, nil
+					return parsedResult, outCtx, nil
 				}
 				log.Printf("Result from function %s is []byte but not valid JSON, returning raw bytes", funcName)
-				return v, nil // Return raw bytes if not JSON
+				return v, outCtx, nil // Return raw bytes if not JSON
 			case string:
 				// Attempt to unmarshal if it looks like JSON
 				var parsedResult any
 				if json.Unmarshal([]byte(v), &parsedResult) == nil {
 					log.Printf("Successfully unmarshaled string result from function %s", funcName)
-					return parsedResult, nil
+					return parsedResult, outCtx, nil
 				}
 				log.Printf("Result from function %s is string but not valid JSON, returning raw string", funcName)
-				return v, nil // Return raw string if not JSON
+				return v, outCtx, nil // Return raw string if not JSON
 			default:
 				// Return other scalar types directly
 				log.Printf("Returning scalar result of type %T from function %s", v, funcName)
-				return v, nil
+				return v, outCtx, nil
 			}
 		}
 		// Single row, multiple columns: Return as is (map within a slice)
 		log.Printf("Returning single composite row result from function %s", funcName)
-		return results, nil
+		return results, outCtx, nil
 	}
 
 	// Multiple rows: Return the slice of maps directly (SETOF result)
 	log.Printf("Returning SETOF result (%d rows) from function %s", len(results), funcName)
-	return results, nil
+	return results, outCtx, nil
 }
 
 // convertPlaceholders replaces each "?" in the query with PostgreSQL-style "$1", "$2", etc.
@@ -1108,49 +1031,64 @@ func mapPostgresType(dt string) string {
 
 // GetSchema returns a schema object with "tables", "views" and "rpc" keys.
 // It applies the provided context to the session before retrieving the schema.
-func (p *pgPlugin) GetSchema(ctx map[string]any) (any, error) {
+func (p *pgPlugin) GetSchema(ctx map[string]any) (any, map[string]any, error) {
 	tx, err := p.db.Begin(bgCtx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer tx.Rollback(bgCtx)
 
 	if ctx != nil {
 		if err := ApplyPluginContext(bgCtx, tx, ctx); err != nil {
 			tx.Rollback(bgCtx)
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	tables, err := p.getTablesSchema(tx)
 	if err != nil {
 		tx.Rollback(bgCtx)
-		return nil, err
+		return nil, nil, err
 	}
 	views, err := p.getViewsSchema(tx)
 	if err != nil {
 		tx.Rollback(bgCtx)
-		return nil, err
+		return nil, nil, err
 	}
 	rpc, err := p.getRPCSchema(tx)
 	if err != nil {
 		tx.Rollback(bgCtx)
-		return nil, err
+		return nil, nil, err
+	}
+	outCtx, err := mergeHarvestedContext(bgCtx, tx, ctx)
+	if err != nil {
+		return nil, nil, err
 	}
 	if err := tx.Commit(bgCtx); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	return map[string]any{
 		"tables": tables,
 		"views":  views,
 		"rpc":    rpc,
-	}, nil
+	}, outCtx, nil
 }
 
-// pgCachePlugin implements the CachePlugin interface using PostgreSQL.
+var pgCacheDialect = sqlcache.Dialect{
+	CreateTable:   `CREATE TABLE IF NOT EXISTS easyrest_cache ( key TEXT PRIMARY KEY, value TEXT, expires_at TIMESTAMPTZ );`,
+	DeleteExpired: `DELETE FROM easyrest_cache WHERE expires_at <= NOW()`,
+	Upsert: `
+	INSERT INTO easyrest_cache (key, value, expires_at)
+	VALUES ($1, $2, $3)
+	ON CONFLICT (key) DO UPDATE SET
+		value = EXCLUDED.value,
+		expires_at = EXCLUDED.expires_at;`,
+	SelectLive: `SELECT value FROM easyrest_cache WHERE key = $1 AND expires_at > NOW()`,
+}
+
+// pgCachePlugin stores ETag version tokens in PostgreSQL.
 type pgCachePlugin struct {
 	dbPluginPointer *pgPlugin
-	stopCh          chan struct{}
-	stopOnce        sync.Once
+	store           sqlcache.Store
 }
 
 // InitConnection ensures the cache table exists and starts the cleanup goroutine.
@@ -1177,111 +1115,74 @@ func (p *pgCachePlugin) InitConnection(uri string) error {
 		return errors.New("database connection not available for cache plugin")
 	}
 
-	// Create cache table if it doesn't exist
-	createTableSQL := `
-	CREATE TABLE IF NOT EXISTS easyrest_cache ( ` +
-		`key TEXT PRIMARY KEY, ` +
-		`value TEXT, ` +
-		`expires_at TIMESTAMPTZ` +
-		` );`
-	// Use the established db pool to execute the command
-	_, err = p.dbPluginPointer.db.Exec(bgCtx, createTableSQL)
-	if err != nil {
+	p.bindStore()
+	if err := p.store.EnsureTable(bgCtx); err != nil {
 		return fmt.Errorf("failed to create cache table: %w", err)
 	}
-
-	// Launch background goroutine for cleanup if requested
 	if autoCleanup == "true" || autoCleanup == "1" {
-		if p.stopCh == nil {
-			p.stopCh = make(chan struct{})
-		}
-		go p.cleanupExpiredCacheEntries()
+		p.store.StartCleanup()
 	}
-
 	return nil
 }
 
-// deleteExpiredEntries performs a single cleanup run.
+func (p *pgCachePlugin) bindStore() {
+	p.store.Dialect = pgCacheDialect
+	p.store.Exec = sqlcache.FuncExec{
+		ExecFn: func(ctx context.Context, query string, args ...any) error {
+			if p.dbPluginPointer == nil || p.dbPluginPointer.db == nil {
+				fmt.Fprintf(os.Stderr, "Error cleaning cache: DB connection is nil\n")
+				return nil
+			}
+			_, err := p.dbPluginPointer.db.Exec(ctx, query, args...)
+			return err
+		},
+		QueryFn: func(ctx context.Context, query string, args ...any) (string, error) {
+			if p.dbPluginPointer == nil || p.dbPluginPointer.db == nil {
+				return "", errors.New("database connection not available for cache get")
+			}
+			var value string
+			err := p.dbPluginPointer.db.QueryRow(ctx, query, args...).Scan(&value)
+			return value, err
+		},
+	}
+}
+
 func (p *pgCachePlugin) deleteExpiredEntries(ctx context.Context) error {
-	if p.dbPluginPointer.db == nil {
-		// Don't return error, just log, as the cleanup goroutine should continue.
-		fmt.Fprintf(os.Stderr, "Error cleaning cache: DB connection is nil\n")
-		return nil
-	}
-	// Use NOW() which corresponds to TIMESTAMPTZ
-	_, err := p.dbPluginPointer.db.Exec(ctx, "DELETE FROM easyrest_cache WHERE expires_at <= NOW()")
+	p.bindStore()
+	err := p.store.DeleteExpired(ctx)
 	if err != nil {
-		// Log the error, but don't necessarily stop the goroutine.
 		fmt.Fprintf(os.Stderr, "Error cleaning up expired cache entries: %v\n", err)
-		return err // Return error so tests can check it if needed
 	}
-	return nil
+	return err
 }
 
-// cleanupExpiredCacheEntries periodically deletes expired cache entries.
-func (p *pgCachePlugin) cleanupExpiredCacheEntries() {
-	// Check more frequently initially, then back off
-	ticker := time.NewTicker(1 * time.Minute)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			_ = p.deleteExpiredEntries(bgCtx)
-		case <-p.stopCh:
-			return
-		}
-	}
-}
-
-// Close stops the cleanup goroutine and releases the underlying database pool.
 func (p *pgCachePlugin) Close() {
-	p.stopOnce.Do(func() {
-		if p.stopCh != nil {
-			close(p.stopCh)
-		}
-	})
+	p.store.Stop()
 	if p.dbPluginPointer != nil {
 		p.dbPluginPointer.Close()
 	}
 }
 
-// Set stores a key-value pair with a TTL in the cache.
 func (p *pgCachePlugin) Set(key string, value string, ttl time.Duration) error {
 	if p.dbPluginPointer.db == nil {
 		return errors.New("database connection not available for cache set")
 	}
-	// Calculate expiration time using TIMESTAMPTZ
-	expiresAt := time.Now().Add(ttl)
-	query := `
-	INSERT INTO easyrest_cache (key, value, expires_at)
-	VALUES ($1, $2, $3)
-	ON CONFLICT (key) DO UPDATE SET
-		value = EXCLUDED.value,
-		expires_at = EXCLUDED.expires_at;`
-
-	// Use background context for simple cache operation.
-	_, err := p.dbPluginPointer.db.Exec(bgCtx, query, key, value, expiresAt)
-	if err != nil {
+	p.bindStore()
+	if err := p.store.Set(bgCtx, key, value, ttl); err != nil {
 		return fmt.Errorf("failed to set cache entry: %w", err)
 	}
 	return nil
 }
 
-// Get retrieves a value from the cache if it exists and hasn't expired.
 func (p *pgCachePlugin) Get(key string) (string, error) {
 	if p.dbPluginPointer.db == nil {
 		return "", errors.New("database connection not available for cache get")
 	}
-	var value string
-	query := "SELECT value FROM easyrest_cache WHERE key = $1 AND expires_at > NOW()"
-
-	// Use background context for simple cache operation.
-	err := p.dbPluginPointer.db.QueryRow(bgCtx, query, key).Scan(&value)
+	p.bindStore()
+	value, err := p.store.Get(bgCtx, key)
 	if err != nil {
-		// Return standard sql.ErrNoRows if not found or expired, otherwise the specific error
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", sql.ErrNoRows // Standard way to signal cache miss
+			return "", sql.ErrNoRows
 		}
 		return "", fmt.Errorf("failed to get cache entry: %w", err)
 	}
@@ -1332,7 +1233,7 @@ func (p *pgQueryPlugin) QueryCall(query string, ctx map[string]any) ([]map[strin
 	}
 
 	loc := time.UTC
-	if ctx != nil && len(ctx) > 0 {
+	if len(ctx) > 0 {
 		if err := ApplyPluginContext(queryCtx, tx, ctx); err != nil {
 			return nil, err
 		}

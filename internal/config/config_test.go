@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -27,11 +28,7 @@ func clearEREnv(t *testing.T) {
 func TestLoadPluginConfigs_FromEnv(t *testing.T) {
 	clearEREnv(t)
 	t.Setenv("ER_DB_APP", "sqlite:///tmp/app.db")
-	t.Setenv("ER_CACHE_ENABLE_APP", "1")
 	t.Setenv("ER_USE_QUERY_APP", "1")
-	// CacheName lookup uses lowercase conn name in env key
-	t.Setenv("ER_DB_app_CACHENAME", "redis")
-	t.Setenv("ER_CACHE_REDIS", "redis://localhost:6379")
 
 	plugins := LoadPluginConfigs(nil)
 
@@ -42,28 +39,11 @@ func TestLoadPluginConfigs_FromEnv(t *testing.T) {
 	if app.Uri != "sqlite:///tmp/app.db" {
 		t.Errorf("Uri: %s", app.Uri)
 	}
-	if !app.EnableCache {
-		t.Error("expected EnableCache")
-	}
 	if !app.UseQuery {
 		t.Error("expected UseQuery")
 	}
-	if app.CacheName != "redis" {
-		t.Errorf("CacheName: %q", app.CacheName)
-	}
 	if app.DbTxEnd != "commit-allow-override" {
 		t.Errorf("DbTxEnd: %q", app.DbTxEnd)
-	}
-
-	redis, ok := plugins["redis"]
-	if !ok {
-		t.Fatalf("expected redis cache plugin from ER_CACHE_*")
-	}
-	if redis.Uri != "redis://localhost:6379" {
-		t.Errorf("redis Uri: %s", redis.Uri)
-	}
-	if redis.DbTxEnd != "commit" {
-		t.Errorf("redis DbTxEnd: %q", redis.DbTxEnd)
 	}
 }
 
@@ -241,6 +221,64 @@ func TestLoad_InvalidAnonClaimsAndCheckScopeOff(t *testing.T) {
 	}
 }
 
+func TestLoad_MiddlewareConfigFromYAML(t *testing.T) {
+	clearEREnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	content := `
+global_request_middlewares:
+  - rate_limit
+  - missing_mw
+middleware_plugins:
+  rate_limit:
+    settings:
+      max_rps: 100
+  audit:
+    path: ~/bin/easyrest-middleware-audit
+plugins:
+  test:
+    uri: sqlite:///test.db
+    request_middlewares:
+      - audit
+      - unknown_mw
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ER_CONFIG_FILE", path)
+	t.Setenv("ER_DEFAULT_TIMEZONE", "UTC")
+	t.Setenv("ER_TOKEN_SECRET", "s")
+
+	cfg := Load()
+	if len(cfg.GlobalRequestMiddlewares) != 2 {
+		t.Fatalf("GlobalRequestMiddlewares: %#v", cfg.GlobalRequestMiddlewares)
+	}
+	if cfg.GlobalRequestMiddlewares[0] != "rate_limit" {
+		t.Errorf("expected rate_limit first, got %q", cfg.GlobalRequestMiddlewares[0])
+	}
+	rateLimit, ok := cfg.MiddlewarePlugins["rate_limit"]
+	if !ok {
+		t.Fatal("expected rate_limit middleware plugin")
+	}
+	if fmt.Sprint(rateLimit.Settings["max_rps"]) != "100" {
+		t.Errorf("rate_limit settings: %#v", rateLimit.Settings)
+	}
+	audit, ok := cfg.MiddlewarePlugins["audit"]
+	if !ok || audit.Path != "~/bin/easyrest-middleware-audit" {
+		t.Errorf("audit middleware: %#v", audit)
+	}
+	testPlugin, ok := cfg.PluginMap["test"]
+	if !ok {
+		t.Fatal("expected test plugin")
+	}
+	if len(testPlugin.RequestMiddlewares) != 2 {
+		t.Fatalf("RequestMiddlewares: %#v", testPlugin.RequestMiddlewares)
+	}
+	if testPlugin.RequestMiddlewares[0] != "audit" {
+		t.Errorf("expected audit first in request_middlewares, got %q", testPlugin.RequestMiddlewares[0])
+	}
+}
+
 func TestLoad_ConfigFileOverlay(t *testing.T) {
 	clearEREnv(t)
 	dir := t.TempDir()
@@ -289,6 +327,38 @@ otel:
 	if fromfile.DbTxEnd != "commit" {
 		t.Errorf("DbTxEnd default: %q", fromfile.DbTxEnd)
 	}
+	if fromfile.DefaultLimit != 50 {
+		t.Errorf("plugin DefaultLimit should inherit global 50, got %d", fromfile.DefaultLimit)
+	}
+}
+
+func TestLoad_PluginDefaultLimitInheritsGlobal(t *testing.T) {
+	clearEREnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	content := `
+default_limit: 25
+plugins:
+  inherit:
+    uri: sqlite:///inherit.db
+  override:
+    uri: sqlite:///override.db
+    default_limit: 7
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ER_CONFIG_FILE", path)
+	t.Setenv("ER_DEFAULT_TIMEZONE", "UTC")
+	t.Setenv("ER_TOKEN_SECRET", "s")
+
+	cfg := Load()
+	if cfg.PluginMap["inherit"].DefaultLimit != 25 {
+		t.Errorf("inherit DefaultLimit: %d", cfg.PluginMap["inherit"].DefaultLimit)
+	}
+	if cfg.PluginMap["override"].DefaultLimit != 7 {
+		t.Errorf("override DefaultLimit: %d", cfg.PluginMap["override"].DefaultLimit)
+	}
 }
 
 func TestLoad_InvalidDurationAndSizeIgnored(t *testing.T) {
@@ -312,5 +382,27 @@ func TestLoad_InvalidDurationAndSizeIgnored(t *testing.T) {
 	}
 	if cfg.Server.TrustedProxyCount != 1 {
 		t.Errorf("expected default TrustedProxyCount, got %d", cfg.Server.TrustedProxyCount)
+	}
+}
+
+func TestLoadYAMLConfigMissingFile(t *testing.T) {
+	clearEREnv(t)
+	t.Setenv("ER_CONFIG_FILE", "/tmp/easyrest-missing-config-file.yaml")
+	cfg := Load()
+	if cfg.Port == "" {
+		t.Fatal("missing yaml should still load defaults")
+	}
+}
+
+func TestDefaultTimezone(t *testing.T) {
+	t.Setenv("ER_DEFAULT_TIMEZONE", "Europe/Berlin")
+	if got := defaultTimezone(); got != "Europe/Berlin" {
+		t.Fatalf("env: %s", got)
+	}
+	t.Setenv("ER_DEFAULT_TIMEZONE", "")
+	os.Unsetenv("ER_DEFAULT_TIMEZONE")
+	got := defaultTimezone()
+	if got == "" {
+		t.Fatal("expected timezone from localtime or GMT")
 	}
 }

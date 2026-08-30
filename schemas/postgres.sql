@@ -26,8 +26,13 @@ DROP TRIGGER IF EXISTS update_products_updated_at ON products;
 DROP FUNCTION IF EXISTS update_updated_at_column();
 DROP TRIGGER IF EXISTS before_product_update ON products;
 DROP FUNCTION IF EXISTS validate_product_update();
+DROP TRIGGER IF EXISTS after_product_insert ON products;
+DROP FUNCTION IF EXISTS products_insert_response();
 DROP FUNCTION IF EXISTS get_my_products();
 DROP FUNCTION IF EXISTS do_something(TEXT);
+DROP FUNCTION IF EXISTS teapot();
+DROP FUNCTION IF EXISTS invalidate_users();
+DROP FUNCTION IF EXISTS custom_headers();
 
 -- Create a trigger function to update updated_at timestamp
 CREATE FUNCTION update_updated_at_column()
@@ -82,5 +87,45 @@ CREATE FUNCTION do_something(json_param TEXT)
 RETURNS TEXT AS $$
 BEGIN
     RETURN 'Processed: ' || json_param;
+END;
+$$ LANGUAGE plpgsql;
+
+-- PostgREST-style response GUC: harvested into DBPlugin ctx before COMMIT
+CREATE FUNCTION teapot()
+RETURNS TEXT AS $$
+BEGIN
+    PERFORM set_config('response.status', '418', true);
+    PERFORM set_config('response.headers', '[{"Set-Cookie":"test=123"}]', true);
+    RETURN 'I''m a teapot';
+END;
+$$ LANGUAGE plpgsql;
+
+-- Harvested as cache.invalidate so cache middleware can bump table/view ETags
+CREATE FUNCTION invalidate_users()
+RETURNS TEXT AS $$
+BEGIN
+    PERFORM set_config('cache.invalidate', 'users,products', true);
+    RETURN 'ok';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE FUNCTION products_insert_response()
+RETURNS TRIGGER AS $$
+BEGIN
+    PERFORM set_config('response.headers', '[{"X-Inserted":"1"}]', true);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER after_product_insert
+    AFTER INSERT ON products
+    FOR EACH ROW
+    EXECUTE FUNCTION products_insert_response();
+
+-- Optional db.pre-request / db.post-request hook (SELECT custom_headers())
+CREATE FUNCTION custom_headers()
+RETURNS void AS $$
+BEGIN
+    PERFORM set_config('response.headers', '[{"X-Hook":"1"}]', true);
 END;
 $$ LANGUAGE plpgsql;

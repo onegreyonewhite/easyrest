@@ -19,22 +19,22 @@ type fakeDBPluginWithRPC struct{}
 
 func (f *fakeDBPluginWithRPC) InitConnection(uri string) error { return nil }
 func (f *fakeDBPluginWithRPC) TableGet(userID, table string, selectFields []string, where map[string]any,
-	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, error) {
-	return nil, nil
+	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, map[string]any, error) {
+	return nil, nil, nil
 }
-func (f *fakeDBPluginWithRPC) TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, error) {
-	return nil, nil
+func (f *fakeDBPluginWithRPC) TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, map[string]any, error) {
+	return nil, nil, nil
 }
-func (f *fakeDBPluginWithRPC) TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, error) {
-	return 0, nil
+func (f *fakeDBPluginWithRPC) TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, map[string]any, error) {
+	return 0, nil, nil
 }
-func (f *fakeDBPluginWithRPC) TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, error) {
-	return 0, nil
+func (f *fakeDBPluginWithRPC) TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, map[string]any, error) {
+	return 0, nil, nil
 }
-func (f *fakeDBPluginWithRPC) CallFunction(userID, funcName string, data map[string]any, ctx map[string]any) (any, error) {
-	return nil, nil
+func (f *fakeDBPluginWithRPC) CallFunction(userID, funcName string, data map[string]any, ctx map[string]any) (any, map[string]any, error) {
+	return nil, nil, nil
 }
-func (f *fakeDBPluginWithRPC) GetSchema(ctx map[string]any) (any, error) {
+func (f *fakeDBPluginWithRPC) GetSchema(ctx map[string]any) (any, map[string]any, error) {
 	// Return a fake schema with separate tables and views, plus an RPC.
 	return map[string]any{
 		"tables": map[string]any{
@@ -89,7 +89,7 @@ func (f *fakeDBPluginWithRPC) GetSchema(ctx map[string]any) (any, error) {
 				},
 			},
 		},
-	}, nil
+	}, nil, nil
 }
 
 // setupTestDBForSchema creates a test DB and a "test" table with various field types.
@@ -315,22 +315,22 @@ type fakeDBPluginWithAllowList struct{}
 
 func (f *fakeDBPluginWithAllowList) InitConnection(uri string) error { return nil }
 func (f *fakeDBPluginWithAllowList) TableGet(userID, table string, selectFields []string, where map[string]any,
-	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, error) {
-	return nil, nil
+	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, map[string]any, error) {
+	return nil, nil, nil
 }
-func (f *fakeDBPluginWithAllowList) TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, error) {
-	return nil, nil
+func (f *fakeDBPluginWithAllowList) TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, map[string]any, error) {
+	return nil, nil, nil
 }
-func (f *fakeDBPluginWithAllowList) TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, error) {
-	return 0, nil
+func (f *fakeDBPluginWithAllowList) TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, map[string]any, error) {
+	return 0, nil, nil
 }
-func (f *fakeDBPluginWithAllowList) TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, error) {
-	return 0, nil
+func (f *fakeDBPluginWithAllowList) TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, map[string]any, error) {
+	return 0, nil, nil
 }
-func (f *fakeDBPluginWithAllowList) CallFunction(userID, funcName string, data map[string]any, ctx map[string]any) (any, error) {
-	return nil, nil
+func (f *fakeDBPluginWithAllowList) CallFunction(userID, funcName string, data map[string]any, ctx map[string]any) (any, map[string]any, error) {
+	return nil, nil, nil
 }
-func (f *fakeDBPluginWithAllowList) GetSchema(ctx map[string]any) (any, error) {
+func (f *fakeDBPluginWithAllowList) GetSchema(ctx map[string]any) (any, map[string]any, error) {
 	// Return a fake schema with tables, views, and RPCs.
 	return map[string]any{
 		"tables": map[string]any{
@@ -347,7 +347,7 @@ func (f *fakeDBPluginWithAllowList) GetSchema(ctx map[string]any) (any, error) {
 			"other_func":    []any{map[string]any{"type": "object"}, map[string]any{"type": "object"}}, // Not in allow list
 			"excluded_func": []any{map[string]any{"type": "object"}, map[string]any{"type": "object"}}, // Excluded
 		},
-	}, nil
+	}, nil, nil
 }
 
 func TestSwaggerSchemaWithAllowList(t *testing.T) {
@@ -454,7 +454,7 @@ type countingSchemaPlugin struct {
 	calls int
 }
 
-func (p *countingSchemaPlugin) GetSchema(ctx map[string]any) (any, error) {
+func (p *countingSchemaPlugin) GetSchema(ctx map[string]any) (any, map[string]any, error) {
 	p.mu.Lock()
 	p.calls++
 	p.mu.Unlock()

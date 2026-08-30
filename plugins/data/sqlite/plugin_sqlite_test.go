@@ -2,11 +2,15 @@ package sqlite
 
 import (
 	"database/sql"
+	"errors"
 	"os"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/DATA-DOG/go-sqlmock"
+	"regexp"
 
 	_ "modernc.org/sqlite"
 )
@@ -67,7 +71,7 @@ func TestTableGet_NoContext(t *testing.T) {
 	where := map[string]any{
 		"name": map[string]any{"=": "Alice"},
 	}
-	results, err := plugin.TableGet("testuser", "users", selectFields, where, nil, nil, 0, 0, nil)
+	results, _, err := plugin.TableGet("testuser", "users", selectFields, where, nil, nil, 0, 0, nil)
 	if err != nil {
 		t.Fatalf("TableGet failed: %v", err)
 	}
@@ -106,7 +110,7 @@ func TestTableGet_WithContext(t *testing.T) {
 		"name": map[string]any{"=": "Alice"},
 	}
 	// Context is not used by the plugin now.
-	results, err := plugin.TableGet("testuser", "users", selectFields, where, nil, nil, 0, 0, nil)
+	results, _, err := plugin.TableGet("testuser", "users", selectFields, where, nil, nil, 0, 0, nil)
 	if err != nil {
 		t.Fatalf("TableGet with context failed: %v", err)
 	}
@@ -141,7 +145,7 @@ func TestTableCreate_WithContext(t *testing.T) {
 			"update_field": "TestAgent",
 		},
 	}
-	created, err := plugin.TableCreate("testuser", "users", data, nil)
+	created, _, err := plugin.TableCreate("testuser", "users", data, nil)
 	if err != nil {
 		t.Fatalf("TableCreate failed: %v", err)
 	}
@@ -153,7 +157,7 @@ func TestTableCreate_WithContext(t *testing.T) {
 	where := map[string]any{
 		"name": map[string]any{"=": "Bob"},
 	}
-	results, err := plugin.TableGet("testuser", "users", selectFields, where, nil, nil, 0, 0, nil)
+	results, _, err := plugin.TableGet("testuser", "users", selectFields, where, nil, nil, 0, 0, nil)
 	if err != nil {
 		t.Fatalf("TableGet failed: %v", err)
 	}
@@ -182,7 +186,7 @@ func TestTableCreate_RejectsMaliciousColumn(t *testing.T) {
 	data := []map[string]any{
 		{"name) VALUES ('boom'); --": "x"},
 	}
-	_, err = plugin.TableCreate("testuser", "users", data, nil)
+	_, _, err = plugin.TableCreate("testuser", "users", data, nil)
 	if err == nil {
 		t.Fatal("expected error for malicious column name")
 	}
@@ -225,7 +229,7 @@ func TestTableUpdate_WithContext(t *testing.T) {
 	where := map[string]any{
 		"name": map[string]any{"=": "Charlie"},
 	}
-	updated, err := plugin.TableUpdate("testuser", "users", data, where, nil)
+	updated, _, err := plugin.TableUpdate("testuser", "users", data, where, nil)
 	if err != nil {
 		t.Fatalf("TableUpdate failed: %v", err)
 	}
@@ -233,7 +237,7 @@ func TestTableUpdate_WithContext(t *testing.T) {
 		t.Fatalf("Expected 1 row updated, got %d", updated)
 	}
 	selectFields := []string{"id", "name", "update_field"}
-	results, err := plugin.TableGet("testuser", "users", selectFields, where, nil, nil, 0, 0, nil)
+	results, _, err := plugin.TableGet("testuser", "users", selectFields, where, nil, nil, 0, 0, nil)
 	if err != nil {
 		t.Fatalf("TableGet failed: %v", err)
 	}
@@ -265,7 +269,7 @@ func TestTableUpdate_RejectsMaliciousColumn(t *testing.T) {
 	}
 	data := map[string]any{"name = 'pwned', update_field": "x"}
 	where := map[string]any{"name": map[string]any{"=": "Charlie"}}
-	_, err = plugin.TableUpdate("testuser", "users", data, where, nil)
+	_, _, err = plugin.TableUpdate("testuser", "users", data, where, nil)
 	if err == nil {
 		t.Fatal("expected error for malicious column name")
 	}
@@ -309,7 +313,7 @@ func TestTableDelete_WithContext(t *testing.T) {
 	where := map[string]any{
 		"name": map[string]any{"=": "Dave"},
 	}
-	deleted, err := plugin.TableDelete("testuser", "users", where, nil)
+	deleted, _, err := plugin.TableDelete("testuser", "users", where, nil)
 	if err != nil {
 		t.Fatalf("TableDelete failed: %v", err)
 	}
@@ -326,7 +330,7 @@ func TestCallFunction_WithContext(t *testing.T) {
 		t.Fatalf("InitConnection failed: %v", err)
 	}
 	ctx := buildTestContext()
-	_, err := plugin.CallFunction("testuser", "myFunc", map[string]any{"param": "value"}, ctx)
+	_, _, err := plugin.CallFunction("testuser", "myFunc", map[string]any{"param": "value"}, ctx)
 	if err == nil {
 		t.Fatalf("CallFunction is not supported for SQLite")
 	}
@@ -367,7 +371,7 @@ func TestGetSchema(t *testing.T) {
 	}
 
 	// Call GetSchema
-	schemaRaw, err := plugin.GetSchema(nil)
+	schemaRaw, _, err := plugin.GetSchema(nil)
 	if err != nil {
 		t.Fatalf("GetSchema failed: %v", err)
 	}
@@ -490,7 +494,7 @@ func TestTableGet_GroupBy(t *testing.T) {
 
 	selectFields := []string{"name", "COUNT(*) as count"}
 	groupBy := []string{"name"}
-	results, err := plugin.TableGet("testuser", "users", selectFields, nil, nil, groupBy, 0, 0, nil)
+	results, _, err := plugin.TableGet("testuser", "users", selectFields, nil, nil, groupBy, 0, 0, nil)
 	if err != nil {
 		t.Fatalf("TableGet failed: %v", err)
 	}
@@ -541,7 +545,7 @@ func TestTableGet_Ordering(t *testing.T) {
 
 	selectFields := []string{"name"}
 	ordering := []string{"name DESC"}
-	results, err := plugin.TableGet("testuser", "users", selectFields, nil, ordering, nil, 0, 0, nil)
+	results, _, err := plugin.TableGet("testuser", "users", selectFields, nil, ordering, nil, 0, 0, nil)
 	if err != nil {
 		t.Fatalf("TableGet failed: %v", err)
 	}
@@ -592,7 +596,7 @@ func TestTableGet_LimitOffset(t *testing.T) {
 	ordering := []string{"name"}
 
 	// Test limit
-	results, err := plugin.TableGet("testuser", "users", selectFields, nil, ordering, nil, 2, 0, nil)
+	results, _, err := plugin.TableGet("testuser", "users", selectFields, nil, ordering, nil, 2, 0, nil)
 	if err != nil {
 		t.Fatalf("TableGet failed: %v", err)
 	}
@@ -601,7 +605,7 @@ func TestTableGet_LimitOffset(t *testing.T) {
 	}
 
 	// Test offset
-	results, err = plugin.TableGet("testuser", "users", selectFields, nil, ordering, nil, 0, 2, nil)
+	results, _, err = plugin.TableGet("testuser", "users", selectFields, nil, ordering, nil, 0, 2, nil)
 	if err != nil {
 		t.Fatalf("TableGet failed: %v", err)
 	}
@@ -610,7 +614,7 @@ func TestTableGet_LimitOffset(t *testing.T) {
 	}
 
 	// Test limit and offset together
-	results, err = plugin.TableGet("testuser", "users", selectFields, nil, ordering, nil, 2, 1, nil)
+	results, _, err = plugin.TableGet("testuser", "users", selectFields, nil, ordering, nil, 2, 1, nil)
 	if err != nil {
 		t.Fatalf("TableGet failed: %v", err)
 	}
@@ -646,7 +650,7 @@ func TestTableGet_TimeFormat(t *testing.T) {
 	}
 
 	selectFields := []string{"name", "created_at"}
-	results, err := plugin.TableGet("testuser", "users", selectFields, nil, nil, nil, 0, 0, nil)
+	results, _, err := plugin.TableGet("testuser", "users", selectFields, nil, nil, nil, 0, 0, nil)
 	if err != nil {
 		t.Fatalf("TableGet failed: %v", err)
 	}
@@ -703,7 +707,7 @@ func TestTableGet_ILIKE(t *testing.T) {
 		},
 	}
 	selectFields := []string{"name", "update_field"}
-	results, err := plugin.TableGet("testuser", "users", selectFields, where, nil, nil, 0, 0, nil)
+	results, _, err := plugin.TableGet("testuser", "users", selectFields, where, nil, nil, 0, 0, nil)
 	if err != nil {
 		t.Fatalf("TableGet failed: %v", err)
 	}
@@ -726,7 +730,7 @@ func TestTableGet_ILIKE(t *testing.T) {
 			"ILIKE": "%li%",
 		},
 	}
-	results, err = plugin.TableGet("testuser", "users", selectFields, where, nil, nil, 0, 0, nil)
+	results, _, err = plugin.TableGet("testuser", "users", selectFields, where, nil, nil, 0, 0, nil)
 	if err != nil {
 		t.Fatalf("TableGet failed: %v", err)
 	}
@@ -744,7 +748,7 @@ func TestTableGet_ILIKE(t *testing.T) {
 			"ILIKE": "test%%",
 		},
 	}
-	results, err = plugin.TableGet("testuser", "users", selectFields, where, nil, nil, 0, 0, nil)
+	results, _, err = plugin.TableGet("testuser", "users", selectFields, where, nil, nil, 0, 0, nil)
 	if err != nil {
 		t.Fatalf("TableGet failed: %v", err)
 	}
@@ -760,7 +764,7 @@ func TestTableGet_ILIKE(t *testing.T) {
 			"ILIKE": "test",
 		},
 	}
-	results, err = plugin.TableGet("testuser", "users", selectFields, where, nil, nil, 0, 0, nil)
+	results, _, err = plugin.TableGet("testuser", "users", selectFields, where, nil, nil, 0, 0, nil)
 	if err != nil {
 		t.Fatalf("TableGet failed: %v", err)
 	}
@@ -826,7 +830,7 @@ func TestTableGet_AllWhereOps(t *testing.T) {
 		{"eq not match", map[string]any{"NOT name": "Alice"}, 0},
 	}
 	for _, tc := range whereCases {
-		results, err := plugin.TableGet("testuser", "users", selectFields, tc.where, nil, nil, 0, 0, nil)
+		results, _, err := plugin.TableGet("testuser", "users", selectFields, tc.where, nil, nil, 0, 0, nil)
 		if err != nil {
 			t.Errorf("%s: TableGet failed: %v", tc.desc, err)
 			continue
@@ -855,7 +859,7 @@ func TestGetSchema_SkipsUnsafeTableNames(t *testing.T) {
 		t.Fatalf("create unsafe table failed: %v", err)
 	}
 
-	schemaRaw, err := plugin.GetSchema(nil)
+	schemaRaw, _, err := plugin.GetSchema(nil)
 	if err != nil {
 		t.Fatalf("GetSchema failed: %v", err)
 	}
@@ -898,6 +902,40 @@ func TestSqliteCachePluginCloseStopsCleanupGoroutine(t *testing.T) {
 	}
 }
 
+func TestSqliteCacheSetGet(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "sqlite-cache-setget-*.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(dbPath)
+
+	plugin := NewSqliteCachePlugin()
+	if err := plugin.InitConnection("sqlite://" + dbPath); err != nil {
+		t.Fatalf("InitConnection: %v", err)
+	}
+	defer plugin.Close()
+
+	if err := plugin.Set("k1", "v1", time.Minute); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	got, err := plugin.Get("k1")
+	if err != nil || got != "v1" {
+		t.Fatalf("Get hit: %q %v", got, err)
+	}
+	if _, err := plugin.Get("missing"); err == nil {
+		t.Fatal("expected miss")
+	}
+	if err := plugin.Set("exp", "gone", time.Millisecond); err != nil {
+		t.Fatalf("Set exp: %v", err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	if _, err := plugin.Get("exp"); err == nil {
+		t.Fatal("expected expired miss")
+	}
+}
+
 func TestTableUpdate_PreferTxRollback(t *testing.T) {
 	uri := "sqlite://:memory:"
 	plugin := &sqlitePlugin{}
@@ -920,7 +958,7 @@ func TestTableUpdate_PreferTxRollback(t *testing.T) {
 	ctx := map[string]any{
 		"prefer": map[string]any{"tx": "rollback"},
 	}
-	updated, err := plugin.TableUpdate("u", "users", map[string]any{"update_field": "new"}, map[string]any{"name": map[string]any{"=": "Alice"}}, ctx)
+	updated, _, err := plugin.TableUpdate("u", "users", map[string]any{"update_field": "new"}, map[string]any{"name": map[string]any{"=": "Alice"}}, ctx)
 	if err != nil {
 		t.Fatalf("TableUpdate: %v", err)
 	}
@@ -954,7 +992,7 @@ func TestTableUpdate_InvalidPreferTx(t *testing.T) {
 	ctx := map[string]any{
 		"prefer": map[string]any{"tx": "banana"},
 	}
-	_, err = plugin.TableUpdate("u", "users", map[string]any{"update_field": "x"}, map[string]any{"name": map[string]any{"=": "Alice"}}, ctx)
+	_, _, err = plugin.TableUpdate("u", "users", map[string]any{"update_field": "x"}, map[string]any{"name": map[string]any{"=": "Alice"}}, ctx)
 	if err == nil {
 		t.Fatal("expected invalid prefer.tx error")
 	}
@@ -978,7 +1016,7 @@ func TestTableCreate_PreferTxRollbackStillReturnsRows(t *testing.T) {
 	ctx := map[string]any{
 		"prefer": map[string]any{"tx": "rollback"},
 	}
-	rows, err := plugin.TableCreate("u", "users", []map[string]any{{"name": "Bob", "update_field": "x"}}, ctx)
+	rows, _, err := plugin.TableCreate("u", "users", []map[string]any{{"name": "Bob", "update_field": "x"}}, ctx)
 	if err != nil {
 		t.Fatalf("TableCreate: %v", err)
 	}
@@ -991,5 +1029,156 @@ func TestTableCreate_PreferTxRollbackStillReturnsRows(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("expected rollback to leave table empty, got count=%d", count)
+	}
+}
+
+func TestVerifyReadOnlyConnectionErrorPaths(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	mock.ExpectExec(regexp.QuoteMeta("PRAGMA query_only = ON")).WillReturnError(errors.New("pragma fail"))
+	if err := verifyReadOnlyConnection(db); err == nil || !strings.Contains(err.Error(), "failed to set query_only") {
+		t.Fatalf("pragma fail: %v", err)
+	}
+
+	mock.ExpectExec(regexp.QuoteMeta("PRAGMA query_only = ON")).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta("PRAGMA query_only")).WillReturnError(errors.New("read fail"))
+	if err := verifyReadOnlyConnection(db); err == nil || !strings.Contains(err.Error(), "failed to read query_only") {
+		t.Fatalf("read fail: %v", err)
+	}
+
+	mock.ExpectExec(regexp.QuoteMeta("PRAGMA query_only = ON")).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta("PRAGMA query_only")).
+		WillReturnRows(sqlmock.NewRows([]string{"query_only"}).AddRow(0))
+	if err := verifyReadOnlyConnection(db); err == nil || !strings.Contains(err.Error(), "not read-only") {
+		t.Fatalf("not ro: %v", err)
+	}
+
+	mock.ExpectExec(regexp.QuoteMeta("PRAGMA query_only = ON")).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta("PRAGMA query_only")).
+		WillReturnRows(sqlmock.NewRows([]string{"query_only"}).AddRow(1))
+	mock.ExpectExec(regexp.QuoteMeta("CREATE TABLE IF NOT EXISTS _easyrest_ro_check (id INTEGER)")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	if err := verifyReadOnlyConnection(db); err == nil || !strings.Contains(err.Error(), "allows writes") {
+		t.Fatalf("writable: %v", err)
+	}
+
+	mock.ExpectExec(regexp.QuoteMeta("PRAGMA query_only = ON")).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta("PRAGMA query_only")).
+		WillReturnRows(sqlmock.NewRows([]string{"query_only"}).AddRow(1))
+	mock.ExpectExec(regexp.QuoteMeta("CREATE TABLE IF NOT EXISTS _easyrest_ro_check (id INTEGER)")).
+		WillReturnError(errors.New("readonly"))
+	if err := verifyReadOnlyConnection(db); err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+}
+
+func TestTableDeleteInvalidWhere(t *testing.T) {
+	plugin := &sqlitePlugin{}
+	if err := plugin.InitConnection("sqlite://:memory:"); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openInMemoryDB("sqlite://:memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugin.db = db
+	if err := initTestDB(plugin.db); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := plugin.TableDelete("u", "users", map[string]any{"id;drop": 1}, nil); err == nil {
+		t.Fatal("expected invalid where")
+	}
+}
+
+func TestTableGetInvalidWhereAndGroupBy(t *testing.T) {
+	plugin := &sqlitePlugin{}
+	if err := plugin.InitConnection("sqlite://:memory:"); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openInMemoryDB("sqlite://:memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugin.db = db
+	if err := initTestDB(plugin.db); err != nil {
+		t.Fatal(err)
+	}
+	_, err = plugin.db.Exec(`INSERT INTO users (name, update_field) VALUES ('Alice', 'old')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := plugin.TableGet("u", "users", []string{"name"}, map[string]any{"id;drop": 1}, nil, nil, 0, 0, nil); err == nil {
+		t.Fatal("expected invalid where")
+	}
+	rows, _, err := plugin.TableGet("u", "users", []string{"name"}, nil, []string{"name"}, []string{"name"}, 1, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("groupby: %d", len(rows))
+	}
+}
+
+func TestHandleTransactionRollbackPreference(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	plugin := &sqlitePlugin{db: db}
+	mock.ExpectBegin()
+	mock.ExpectRollback()
+	got, err := plugin.handleTransaction("u", map[string]any{"prefer": map[string]any{"tx": "rollback"}}, func(tx *sql.Tx) (any, error) {
+		return 4, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 0 {
+		t.Fatalf("expected 0 after rollback, got %v", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHandleTransactionBeginFailure(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	plugin := &sqlitePlugin{db: db}
+	mock.ExpectBegin().WillReturnError(errors.New("begin fail"))
+	_, err = plugin.handleTransaction("u", nil, func(tx *sql.Tx) (any, error) {
+		return 1, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "failed to begin tx") {
+		t.Fatalf("expected begin failure, got %v", err)
+	}
+}
+
+func TestHandleTransactionCommitFailure(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	plugin := &sqlitePlugin{db: db}
+	mock.ExpectBegin()
+	mock.ExpectCommit().WillReturnError(errors.New("commit fail"))
+
+	_, err = plugin.handleTransaction("u", nil, func(tx *sql.Tx) (any, error) {
+		return 1, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "failed to commit") {
+		t.Fatalf("expected commit failure, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
 	}
 }

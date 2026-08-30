@@ -1,5 +1,5 @@
 port: 8080
-access_log: true
+access_log: false
 token_user_search: sub
 token_url: https://auth.example.com/token
 auth_flow: password
@@ -24,25 +24,33 @@ auth_plugins:
   jwt:
     settings: {}
       # jwt_secret: "mytestsecret"
+  basic:
+    settings:
+      userlist:
+        admin: admin
+        user: user
+middleware_plugins:
+  cache-redis:
+    settings:
+      uri: redis://localhost:6379/1
+      ttl: 2h
+      invalidation_map:
+        mydb:
+          refresh_users: [users]
 plugin_configs:
   - ./test.yaml
+global_request_middlewares:
+  - cache-redis
 plugins:
   sqlite:
     title: "SQLite API"
     uri: sqlite://./test.db
-    enable_cache: true
   postgres:
     title: "Postgres API"
     uri: postgres://postgres:root@localhost:5433/easyrestdb?maxOpenConns=100&maxIdleConns=25&connMaxLifetime=5&connMaxIdleTime=10&timeout=30&bulkThreshold=100&sslmode=disable&search_path=public&autoCleanup=true
-    enable_cache: true
   mysql:
     title: "MySQL API"
     uri: mysql://root:root@localhost:3307/easyrestdb?parseTime=true&autoCleanup=true
-    enable_cache: true
-  redis:
-    uri: redis://localhost:6379/1
-  # test:
-  #   uri: sqlite://./test.db
 anon_claims:
   role: "anonymous"
   sub: 0

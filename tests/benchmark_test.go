@@ -77,9 +77,6 @@ func BenchmarkTableGet(b *testing.B) {
 	server.PreservedDbPlugins["sqlite"] = func() easyrest.DBPlugin {
 		return sqlitePlugin.NewSqlitePlugin()
 	}
-	server.PreservedCachePlugins["sqlite"] = func() easyrest.CachePlugin {
-		return sqlitePlugin.NewSqliteCachePlugin()
-	}
 	server.PreservedAuthPlugins["jwt"] = func() easyrest.AuthPlugin {
 		return &jwtplugin.JWTAuthPlugin{}
 	}
@@ -151,9 +148,6 @@ func BenchmarkTableCreate(b *testing.B) {
 	// Initialize the server router
 	server.PreservedDbPlugins["sqlite"] = func() easyrest.DBPlugin {
 		return sqlitePlugin.NewSqlitePlugin()
-	}
-	server.PreservedCachePlugins["sqlite"] = func() easyrest.CachePlugin {
-		return sqlitePlugin.NewSqliteCachePlugin()
 	}
 	server.PreservedAuthPlugins["jwt"] = func() easyrest.AuthPlugin {
 		return &jwtplugin.JWTAuthPlugin{}
@@ -239,9 +233,6 @@ func BenchmarkTableUpdate(b *testing.B) {
 	// Initialize the server router
 	server.PreservedDbPlugins["sqlite"] = func() easyrest.DBPlugin {
 		return sqlitePlugin.NewSqlitePlugin()
-	}
-	server.PreservedCachePlugins["sqlite"] = func() easyrest.CachePlugin {
-		return sqlitePlugin.NewSqliteCachePlugin()
 	}
 	server.PreservedAuthPlugins["jwt"] = func() easyrest.AuthPlugin {
 		return &jwtplugin.JWTAuthPlugin{}

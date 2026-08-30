@@ -8,14 +8,13 @@ import (
 	"fmt"
 	"net/url"
 	"sort"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/goccy/go-json"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
+	"github.com/onegreyonewhite/easyrest/plugins/data/sqlcache"
 )
 
 // rowScanner is the interface needed by scanRows to fetch results.
@@ -109,6 +108,159 @@ func (m *mysqlPlugin) injectContext(conn *sql.Conn, ctx map[string]any) error {
 	return nil
 }
 
+const harvestUserVarsSQL = `SELECT VARIABLE_NAME, VARIABLE_VALUE FROM performance_schema.user_variables_by_thread WHERE THREAD_ID = ( SELECT THREAD_ID FROM performance_schema.threads WHERE PROCESSLIST_ID = CONNECTION_ID() ) AND (VARIABLE_NAME LIKE 'response.%' OR VARIABLE_NAME = 'cache.invalidate')`
+
+const harvestFallbackSQL = "SELECT @`response.headers` AS h, @`response.status` AS s, @`cache.invalidate` AS c"
+
+const clearKnownResponseVarsSQL = "SET @`response.headers` = NULL, @`response.status` = NULL, @`cache.invalidate` = NULL"
+
+type sessionQueryExec interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+func harvestResponseSettings(q sessionQueryExec) (map[string]string, error) {
+	settings, err := harvestFromPerformanceSchema(q)
+	if err != nil {
+		settings, err = harvestFallbackKnownKeys(q)
+		if err != nil {
+			return nil, fmt.Errorf("failed to harvest response settings: %w", err)
+		}
+	}
+	return settings, nil
+}
+
+func harvestFromPerformanceSchema(q sessionQueryExec) (map[string]string, error) {
+	rows, err := q.QueryContext(context.Background(), harvestUserVarsSQL)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]string)
+	for rows.Next() {
+		var name string
+		var value sql.NullString
+		if err := rows.Scan(&name, &value); err != nil {
+			return nil, err
+		}
+		if name == "" || !value.Valid || value.String == "" {
+			continue
+		}
+		out[name] = value.String
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func harvestFallbackKnownKeys(q sessionQueryExec) (map[string]string, error) {
+	var headers, status, invalidate sql.NullString
+	if err := q.QueryRowContext(context.Background(), harvestFallbackSQL).Scan(&headers, &status, &invalidate); err != nil {
+		return nil, err
+	}
+	out := make(map[string]string)
+	if headers.Valid && headers.String != "" {
+		out["response.headers"] = headers.String
+	}
+	if status.Valid && status.String != "" {
+		out["response.status"] = status.String
+	}
+	if invalidate.Valid && invalidate.String != "" {
+		out[easyrest.CtxCacheInvalidate] = invalidate.String
+	}
+	return out, nil
+}
+
+func namesToClear(settings map[string]string) []string {
+	seen := map[string]struct{}{
+		"response.headers":          {},
+		"response.status":           {},
+		easyrest.CtxCacheInvalidate: {},
+	}
+	out := []string{"response.headers", "response.status", easyrest.CtxCacheInvalidate}
+	extra := make([]string, 0)
+	for k := range settings {
+		if k == "" {
+			continue
+		}
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		extra = append(extra, k)
+	}
+	sort.Strings(extra)
+	return append(out, extra...)
+}
+
+func clearResponseSettingsSQL(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("SET ")
+	for i, n := range names {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString("@`")
+		b.WriteString(n)
+		b.WriteString("` = NULL")
+	}
+	return b.String()
+}
+
+func clearResponseSettings(q sessionQueryExec, settings map[string]string) error {
+	sqlText := clearResponseSettingsSQL(namesToClear(settings))
+	if sqlText == "" {
+		return nil
+	}
+	if _, err := q.ExecContext(context.Background(), sqlText); err != nil {
+		return fmt.Errorf("failed to clear response settings: %w", err)
+	}
+	return nil
+}
+
+func mergeHarvestedContext(q sessionQueryExec, pluginCtx map[string]any) (map[string]any, map[string]string, error) {
+	settings, err := harvestResponseSettings(q)
+	if err != nil {
+		return nil, nil, err
+	}
+	return easyrest.MergeResponseSettings(pluginCtx, settings), settings, nil
+}
+
+func runContextRoutine(q sessionQueryExec, pluginCtx map[string]any, key string) error {
+	name := easyrest.ContextRoutineName(pluginCtx, key)
+	if name == "" {
+		return nil
+	}
+	rows, err := q.QueryContext(context.Background(), "CALL "+name+"()")
+	if err != nil {
+		var me *mysqldriver.MySQLError
+		if errors.As(err, &me) && me.Number == 1305 {
+			return nil
+		}
+		return fmt.Errorf("failed to run %s %s: %w", key, name, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+	}
+	for rows.NextResultSet() {
+		for rows.Next() {
+		}
+	}
+	if err := rows.Err(); err != nil {
+		var me *mysqldriver.MySQLError
+		if errors.As(err, &me) && me.Number == 1305 {
+			return nil
+		}
+		return fmt.Errorf("failed to run %s %s: %w", key, name, err)
+	}
+	return nil
+}
+
 // scanRows converts row data into []map[string]any.
 // Pre-allocates memory for results with a capacity of 100 for better performance.
 func scanRows(r rowScanner) ([]map[string]any, error) {
@@ -132,11 +284,7 @@ func scanRows(r rowScanner) ([]map[string]any, error) {
 		for i, colName := range cols {
 			val := columns[i]
 			if t, ok := val.(time.Time); ok {
-				if t.Hour() == 0 && t.Minute() == 0 && t.Second() == 0 && t.Nanosecond() == 0 {
-					rowMap[colName] = t.Format("2006-01-02")
-				} else {
-					rowMap[colName] = t.Format("2006-01-02 15:04:05")
-				}
+				rowMap[colName] = easyrest.FormatSQLTime(t)
 			} else if b, ok := val.([]byte); ok {
 				// Attempt to unmarshal as JSON
 				var jsonData any
@@ -356,19 +504,19 @@ ORDER BY SPECIFIC_NAME, ORDINAL_POSITION;`
 }
 
 // GetSchema enumerates tables + views and routines, building a swagger-ish schema.
-func (m *mysqlPlugin) GetSchema(ctx map[string]any) (any, error) {
+func (m *mysqlPlugin) GetSchema(ctx map[string]any) (any, map[string]any, error) {
 	tables, err := m.getTablesSchema()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	rpc, err := m.getRPCSchema()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	return map[string]any{
 		"tables": tables,
 		"rpc":    rpc,
-	}, nil
+	}, nil, nil
 }
 
 // getTablesSchema enumerates both tables and views from INFORMATION_SCHEMA.TABLES.
@@ -510,10 +658,10 @@ func (m *mysqlPlugin) getRPCSchema() (map[string]any, error) {
 }
 
 // CallFunction executes a stored procedure/function with final parameters.
-func (m *mysqlPlugin) CallFunction(userID, funcName string, data map[string]any, ctx map[string]any) (any, error) {
+func (m *mysqlPlugin) CallFunction(userID, funcName string, data map[string]any, ctx map[string]any) (any, map[string]any, error) {
 	rInfo, ok := m.routines[funcName]
 	if !ok {
-		return nil, fmt.Errorf("routine %s not found", funcName)
+		return nil, nil, fmt.Errorf("routine %s not found", funcName)
 	}
 	sort.Slice(rInfo.Params, func(i, j int) bool {
 		return rInfo.Params[i].Ordinal < rInfo.Params[j].Ordinal
@@ -524,7 +672,7 @@ func (m *mysqlPlugin) CallFunction(userID, funcName string, data map[string]any,
 		placeholders = append(placeholders, "?")
 		val, found := data[param.Name]
 		if !found {
-			return nil, fmt.Errorf("missing required argument: %s", param.Name)
+			return nil, nil, fmt.Errorf("missing required argument: %s", param.Name)
 		}
 		callArgs = append(callArgs, val)
 	}
@@ -538,7 +686,7 @@ func (m *mysqlPlugin) CallFunction(userID, funcName string, data map[string]any,
 			}
 		}
 		if !found {
-			return nil, fmt.Errorf("unexpected argument: %s", k)
+			return nil, nil, fmt.Errorf("unexpected argument: %s", k)
 		}
 	}
 	var callQuery string
@@ -549,7 +697,7 @@ func (m *mysqlPlugin) CallFunction(userID, funcName string, data map[string]any,
 	}
 
 	// Use handleTransaction for managing the transaction and context
-	res, err := m.handleTransaction(ctx, func(tx *sql.Tx) (any, error) {
+	res, outCtx, err := m.handleTransaction(ctx, func(tx *sql.Tx) (any, error) {
 		rows, err := tx.QueryContext(context.Background(), callQuery, callArgs...)
 		if err != nil {
 			// Error during query execution, transaction will be rolled back by handleTransaction
@@ -566,24 +714,24 @@ func (m *mysqlPlugin) CallFunction(userID, funcName string, data map[string]any,
 	})
 
 	if err != nil {
-		return nil, err // Error already includes context from handleTransaction or the operation
+		return nil, nil, err // Error already includes context from handleTransaction or the operation
 	}
 
 	// Return the result obtained from handleTransaction
-	return res, nil
+	return res, outCtx, nil
 }
 
 // handleTransaction manages the transaction lifecycle including context injection and conditional commit/rollback.
-func (m *mysqlPlugin) handleTransaction(ctxMap map[string]any, operation func(tx *sql.Tx) (any, error)) (any, error) {
+func (m *mysqlPlugin) handleTransaction(ctxMap map[string]any, operation func(tx *sql.Tx) (any, error)) (any, map[string]any, error) {
 	conn, err := m.db.Conn(context.Background())
 	if err != nil {
-		return nil, fmt.Errorf("failed to get connection: %w", err)
+		return nil, nil, fmt.Errorf("failed to get connection: %w", err)
 	}
 	defer conn.Close()
 
 	tx, err := conn.BeginTx(context.Background(), nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to begin tx: %w", err)
+		return nil, nil, fmt.Errorf("failed to begin tx: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -593,53 +741,76 @@ func (m *mysqlPlugin) handleTransaction(ctxMap map[string]any, operation func(tx
 	if ctxMap != nil {
 		txPreference, err = easyrest.GetTxPreference(ctxMap)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		// Inject context *after* validating preference, but before the main operation
 		if err := m.injectContext(conn, ctxMap); err != nil {
 			tx.Rollback() // Rollback on injection error
-			return nil, fmt.Errorf("failed to inject context: %w", err)
+			return nil, nil, fmt.Errorf("failed to inject context: %w", err)
 		}
+	}
+
+	if err := runContextRoutine(tx, ctxMap, easyrest.CtxDBPreRequest); err != nil {
+		tx.Rollback()
+		return nil, nil, err
 	}
 
 	// Execute the core operation
 	result, err := operation(tx)
 	if err != nil {
-		tx.Rollback()   // Rollback on operation error
-		return nil, err // Return the original error from the operation
+		tx.Rollback()        // Rollback on operation error
+		return nil, nil, err // Return the original error from the operation
+	}
+
+	if err := runContextRoutine(tx, ctxMap, easyrest.CtxDBPostRequest); err != nil {
+		tx.Rollback()
+		return nil, nil, err
+	}
+
+	outCtx, settings, err := mergeHarvestedContext(tx, ctxMap)
+	if err != nil {
+		tx.Rollback()
+		return nil, nil, err
 	}
 
 	// Commit or Rollback based on preference
 	if txPreference == "rollback" {
 		if err := tx.Rollback(); err != nil {
 			// Even rollback can fail, though it's less critical than a failed commit
-			return nil, fmt.Errorf("failed to rollback transaction: %w", err)
+			return nil, nil, fmt.Errorf("failed to rollback transaction: %w", err)
+		}
+		if err := clearResponseSettings(conn, settings); err != nil {
+			return nil, nil, err
 		}
 		// Modify result for Update/Delete if rollback occurred
 		// For Update/Delete, the operation returns int(affectedRows). If rolled back, return 0.
 		// For Create, the operation returns []map[string]any (input data). Return it as is.
 		switch res := result.(type) {
 		case int: // Assumed from TableUpdate/TableDelete
-			return 0, nil
+			return 0, outCtx, nil
 		case int64: // Handle potential int64 return from RowsAffected directly
-			return int64(0), nil
+			return int64(0), outCtx, nil
 		default: // Assumed from TableCreate or others; return original result
-			return res, nil
+			return res, outCtx, nil
 		}
 	} else { // commit or default
 		if err := tx.Commit(); err != nil {
 			// Attempt rollback if commit fails, but return the commit error
 			rbErr := tx.Rollback()
 			if rbErr != nil {
-				return nil, fmt.Errorf("failed to commit transaction: %w (rollback also failed: %v)", err, rbErr)
+				return nil, nil, fmt.Errorf("failed to commit transaction: %w (rollback also failed: %v)", err, rbErr)
 			}
-			return nil, fmt.Errorf("failed to commit transaction: %w", err)
+			return nil, nil, fmt.Errorf("failed to commit transaction: %w", err)
 		}
 	}
 
+	if err := clearResponseSettings(conn, settings); err != nil {
+		return nil, nil, err
+	}
+
 	// Return the original result from the operation if committed successfully
-	return result, nil
+	return result, outCtx, nil
 }
 
 // convertILIKEtoLower transforms ILIKE operations in a WHERE clause map
@@ -696,71 +867,72 @@ func convertILIKEtoLower(where map[string]any) map[string]any {
 
 // TableGet builds and executes a SELECT query.
 func (m *mysqlPlugin) TableGet(userID, table string, selectFields []string, where map[string]any,
-	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, error) {
+	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, map[string]any, error) {
 
-	var query strings.Builder
-	query.WriteString("SELECT ")
-	if len(selectFields) > 0 {
-		query.WriteString(strings.Join(selectFields, ", "))
-	} else {
-		query.WriteString("*")
-	}
-	query.WriteString(" FROM ")
-	query.WriteString(table)
-
-	processedWhere := convertILIKEtoLower(where)
-	whereClause, args, err := easyrest.BuildWhereClauseSorted(processedWhere)
+	query, args, err := easyrest.BuildSelectQuery(table, selectFields, where, ordering, groupBy, limit, offset, easyrest.SelectOptions{
+		WhereRewriter: convertILIKEtoLower,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to build WHERE: %w", err)
-	}
-	query.WriteString(whereClause)
-	if len(groupBy) > 0 {
-		query.WriteString(" GROUP BY ")
-		query.WriteString(strings.Join(groupBy, ", "))
-	}
-	if len(ordering) > 0 {
-		query.WriteString(" ORDER BY ")
-		query.WriteString(strings.Join(ordering, ", "))
-	}
-	if limit > 0 {
-		query.WriteString(" LIMIT ")
-		query.WriteString(strconv.Itoa(limit))
-	}
-	if offset > 0 {
-		query.WriteString(" OFFSET ")
-		query.WriteString(strconv.Itoa(offset))
+		return nil, nil, fmt.Errorf("failed to build WHERE: %w", err)
 	}
 
 	queryCtx := context.Background()
 
 	conn, err := m.db.Conn(queryCtx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get connection: %w", err)
+		return nil, nil, fmt.Errorf("failed to get connection: %w", err)
 	}
 	defer conn.Close()
 	if ctx != nil {
 		if err := m.injectContext(conn, ctx); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
-	rows, err := conn.QueryContext(queryCtx, query.String(), args...)
+	tx, err := conn.BeginTx(queryCtx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to execute query: %w", err)
+		return nil, nil, fmt.Errorf("failed to begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if err := runContextRoutine(tx, ctx, easyrest.CtxDBPreRequest); err != nil {
+		return nil, nil, err
+	}
+
+	rows, err := tx.QueryContext(queryCtx, query, args...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to execute query: %w", err)
 	}
 	defer rows.Close()
-	return scanRows(rows)
+	result, err := scanRows(rows)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := runContextRoutine(tx, ctx, easyrest.CtxDBPostRequest); err != nil {
+		return nil, nil, err
+	}
+	outCtx, settings, err := mergeHarvestedContext(tx, ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	if err := clearResponseSettings(conn, settings); err != nil {
+		return nil, nil, err
+	}
+	return result, outCtx, nil
 }
 
 // TableCreate builds and executes an INSERT statement from data.
-func (m *mysqlPlugin) TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, error) {
+func (m *mysqlPlugin) TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, map[string]any, error) {
 	for _, row := range data {
 		for k := range row {
 			if err := easyrest.ValidateColumnName(k); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 	}
-	res, err := m.handleTransaction(ctx, func(tx *sql.Tx) (any, error) {
+	res, outCtx, err := m.handleTransaction(ctx, func(tx *sql.Tx) (any, error) {
 		var results []map[string]any
 		queryCtx := context.Background()
 		for _, row := range data {
@@ -790,25 +962,25 @@ func (m *mysqlPlugin) TableCreate(userID, table string, data []map[string]any, c
 	})
 
 	if err != nil {
-		return nil, err // Error already includes context from handleTransaction or the operation
+		return nil, nil, err // Error already includes context from handleTransaction or the operation
 	}
 
 	// Type assertion for the result
 	if results, ok := res.([]map[string]any); ok {
-		return results, nil
+		return results, outCtx, nil
 	}
 	// This should ideally not happen if handleTransaction works correctly.
-	return nil, fmt.Errorf("unexpected result type from handleTransaction: %T", res)
+	return nil, nil, fmt.Errorf("unexpected result type from handleTransaction: %T", res)
 }
 
 // TableUpdate builds and executes an UPDATE statement.
-func (m *mysqlPlugin) TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, error) {
+func (m *mysqlPlugin) TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, map[string]any, error) {
 	for k := range data {
 		if err := easyrest.ValidateColumnName(k); err != nil {
-			return 0, err
+			return 0, nil, err
 		}
 	}
-	res, err := m.handleTransaction(ctx, func(tx *sql.Tx) (any, error) {
+	res, outCtx, err := m.handleTransaction(ctx, func(tx *sql.Tx) (any, error) {
 		var keys []string
 		for k := range data {
 			keys = append(keys, k)
@@ -849,20 +1021,20 @@ func (m *mysqlPlugin) TableUpdate(userID, table string, data map[string]any, whe
 	})
 
 	if err != nil {
-		return 0, err // Error already includes context from handleTransaction or the operation
+		return 0, nil, err // Error already includes context from handleTransaction or the operation
 	}
 
 	// Type assertion for the result
 	if affected, ok := res.(int); ok {
-		return affected, nil
+		return affected, outCtx, nil
 	}
 	// This should ideally not happen if handleTransaction works correctly.
-	return 0, fmt.Errorf("unexpected result type from handleTransaction: %T", res)
+	return 0, nil, fmt.Errorf("unexpected result type from handleTransaction: %T", res)
 }
 
 // TableDelete builds and executes a DELETE statement.
-func (m *mysqlPlugin) TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, error) {
-	res, err := m.handleTransaction(ctx, func(tx *sql.Tx) (any, error) {
+func (m *mysqlPlugin) TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, map[string]any, error) {
+	res, outCtx, err := m.handleTransaction(ctx, func(tx *sql.Tx) (any, error) {
 		processedWhere := convertILIKEtoLower(where)
 		whereClause, whereArgs, err := easyrest.BuildWhereClauseSorted(processedWhere)
 		if err != nil {
@@ -885,22 +1057,28 @@ func (m *mysqlPlugin) TableDelete(userID, table string, where map[string]any, ct
 	})
 
 	if err != nil {
-		return 0, err // Error already includes context from handleTransaction or the operation
+		return 0, nil, err // Error already includes context from handleTransaction or the operation
 	}
 
 	// Type assertion for the result
 	if affected, ok := res.(int); ok {
-		return affected, nil
+		return affected, outCtx, nil
 	}
 	// This should ideally not happen if handleTransaction works correctly.
-	return 0, fmt.Errorf("unexpected result type from handleTransaction: %T", res)
+	return 0, nil, fmt.Errorf("unexpected result type from handleTransaction: %T", res)
 }
 
-// mysqlCachePlugin implements the CachePlugin interface using MySQL.
+var mysqlCacheDialect = sqlcache.Dialect{
+	CreateTable:   "CREATE TABLE IF NOT EXISTS easyrest_cache (`key` VARCHAR(255) PRIMARY KEY, value TEXT, expires_at DATETIME) ENGINE = MEMORY",
+	DeleteExpired: "DELETE FROM easyrest_cache WHERE expires_at <= NOW()",
+	Upsert:        "INSERT INTO easyrest_cache (`key`, value, expires_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value), expires_at = VALUES(expires_at)",
+	SelectLive:    "SELECT value FROM easyrest_cache WHERE `key` = ? AND expires_at > NOW()",
+}
+
+// mysqlCachePlugin stores ETag version tokens in MySQL.
 type mysqlCachePlugin struct {
 	dbPluginPointer *mysqlPlugin
-	stopCh          chan struct{}
-	stopOnce        sync.Once
+	store           sqlcache.Store
 }
 
 // InitConnection ensures the cache table exists and starts the cleanup goroutine.
@@ -936,95 +1114,48 @@ func (p *mysqlCachePlugin) InitConnection(uri string) error {
 		return errors.New("database connection not available for cache plugin")
 	}
 
-	// Create cache table if it doesn't exist
-	// Use DATETIME for expires_at in MySQL
-	createTableSQL := "CREATE TABLE IF NOT EXISTS easyrest_cache (`key` VARCHAR(255) PRIMARY KEY, value TEXT, expires_at DATETIME) ENGINE = MEMORY"
-
-	// Use a background context as table creation is an initialization step.
-	_, err = p.dbPluginPointer.db.ExecContext(context.Background(), createTableSQL)
-	if err != nil {
+	p.bindStore()
+	if err := p.store.EnsureTable(context.Background()); err != nil {
 		return fmt.Errorf("failed to create cache table: %w", err)
 	}
-
-	// Launch background goroutine for cleanup if autoCleanup is set
 	if autoCleanup == "1" || autoCleanup == "true" {
-		if p.stopCh == nil {
-			p.stopCh = make(chan struct{})
-		}
-		go p.cleanupExpiredCacheEntries()
+		p.store.StartCleanup()
 	}
-
 	return nil
 }
 
-// cleanupExpiredCacheEntries periodically deletes expired cache entries.
-func (p *mysqlCachePlugin) cleanupExpiredCacheEntries() {
-	ticker := time.NewTicker(1 * time.Minute)
-	defer ticker.Stop()
-	queryCtx := context.Background()
-
-	for {
-		select {
-		case <-ticker.C:
-			if p.dbPluginPointer.db == nil {
-				fmt.Printf("Error cleaning cache: DB connection is nil\n")
-				continue
-			}
-			_, err := p.dbPluginPointer.db.ExecContext(queryCtx, "DELETE FROM easyrest_cache WHERE expires_at <= NOW()")
-			if err != nil {
-				fmt.Printf("Error cleaning up expired cache entries: %v\n", err)
-			}
-		case <-p.stopCh:
-			return
-		}
-	}
+func (p *mysqlCachePlugin) bindStore() {
+	p.store.Dialect = mysqlCacheDialect
+	p.store.Exec = sqlcache.SQLDB{DB: p.dbPluginPointer.db}
 }
 
-// Close stops the cleanup goroutine and releases the underlying database pool.
 func (p *mysqlCachePlugin) Close() {
-	p.stopOnce.Do(func() {
-		if p.stopCh != nil {
-			close(p.stopCh)
-		}
-	})
+	p.store.Stop()
 	if p.dbPluginPointer != nil {
 		p.dbPluginPointer.Close()
 	}
 }
 
-// Set stores a key-value pair with a TTL in the cache.
 func (p *mysqlCachePlugin) Set(key string, value string, ttl time.Duration) error {
 	if p.dbPluginPointer.db == nil {
 		return errors.New("database connection not available for cache set")
 	}
-	// Calculate expiration time
-	expiresAt := time.Now().Add(ttl)
-	// MySQL uses INSERT ... ON DUPLICATE KEY UPDATE - Use interpreted string
-	query := "INSERT INTO easyrest_cache (`key`, value, expires_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value), expires_at = VALUES(expires_at)"
-
-	// Use background context for simple cache operation.
-	_, err := p.dbPluginPointer.db.ExecContext(context.Background(), query, key, value, expiresAt)
-	if err != nil {
+	p.bindStore()
+	if err := p.store.Set(context.Background(), key, value, ttl); err != nil {
 		return fmt.Errorf("failed to set cache entry: %w", err)
 	}
 	return nil
 }
 
-// Get retrieves a value from the cache if it exists and hasn't expired.
 func (p *mysqlCachePlugin) Get(key string) (string, error) {
 	if p.dbPluginPointer.db == nil {
 		return "", errors.New("database connection not available for cache get")
 	}
-	var value string
-	// MySQL uses NOW() for current time comparison - Use interpreted string
-	query := "SELECT value FROM easyrest_cache WHERE `key` = ? AND expires_at > NOW()"
-
-	// Use background context for simple cache operation.
-	err := p.dbPluginPointer.db.QueryRowContext(context.Background(), query, key).Scan(&value)
+	p.bindStore()
+	value, err := p.store.Get(context.Background(), key)
 	if err != nil {
-		// Return standard sql.ErrNoRows if not found or expired, otherwise the specific error
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", sql.ErrNoRows // Standard way to signal cache miss
+			return "", sql.ErrNoRows
 		}
 		return "", fmt.Errorf("failed to get cache entry: %w", err)
 	}

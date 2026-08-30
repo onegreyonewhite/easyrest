@@ -49,9 +49,6 @@ func registerSQLitePreservedPlugins() {
 	server.PreservedDbPlugins["sqlite"] = func() easyrest.DBPlugin {
 		return sqlitePlugin.NewSqlitePlugin()
 	}
-	server.PreservedCachePlugins["sqlite"] = func() easyrest.CachePlugin {
-		return sqlitePlugin.NewSqliteCachePlugin()
-	}
 	server.PreservedQueryPlugins["sqlite"] = func() easyrest.DBQueryPlugin {
 		return sqlitePlugin.NewSqliteQueryPlugin()
 	}

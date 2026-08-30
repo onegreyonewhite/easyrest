@@ -21,22 +21,25 @@ type AccessConfig struct {
 }
 
 type PluginConfig struct {
-	Name                string              `yaml:"name,omitempty"`
-	Uri                 string              `yaml:"uri"`
-	Path                string              `yaml:"path,omitempty"`
-	FuncInvalidationMap map[string][]string `yaml:"cache_invalidation_map,omitempty"`
-	EnableCache         bool                `yaml:"enable_cache,omitempty"`
-	UseQuery            bool                `yaml:"use_query,omitempty"`
-	CacheName           string              `yaml:"cache_name,omitempty"`
-	DbTxEnd             string              `yaml:"db_tx_end,omitempty"`
-	Public              AccessConfig        `yaml:"public,omitempty"`
-	Exclude             AccessConfig        `yaml:"exclude,omitempty"`
-	AllowList           AccessConfig        `yaml:"allow,omitempty"`
-	Title               string              `yaml:"title,omitempty"`
-	DefaultLimit        int                 `yaml:"default_limit,omitempty"`
+	Name               string       `yaml:"name,omitempty"`
+	Uri                string       `yaml:"uri"`
+	Path               string       `yaml:"path,omitempty"`
+	UseQuery           bool         `yaml:"use_query,omitempty"`
+	DbTxEnd            string       `yaml:"db_tx_end,omitempty"`
+	Public             AccessConfig `yaml:"public,omitempty"`
+	Exclude            AccessConfig `yaml:"exclude,omitempty"`
+	AllowList          AccessConfig `yaml:"allow,omitempty"`
+	RequestMiddlewares []string     `yaml:"request_middlewares,omitempty"`
+	Title              string       `yaml:"title,omitempty"`
+	DefaultLimit       int          `yaml:"default_limit,omitempty"`
 }
 
 type AuthConfig struct {
+	Path     string         `yaml:"path,omitempty"`
+	Settings map[string]any `yaml:"settings,omitempty"`
+}
+
+type MiddlewareConfig struct {
 	Path     string         `yaml:"path,omitempty"`
 	Settings map[string]any `yaml:"settings,omitempty"`
 }
@@ -102,11 +105,13 @@ type Config struct {
 	TLSCertFile string `yaml:"tls_cert_file"`
 	TLSKeyFile  string `yaml:"tls_key_file"`
 	// Plugin settings
-	Plugins     []string                `yaml:"plugin_configs"`
-	PluginMap   map[string]PluginConfig `yaml:"plugins"`
-	AuthPlugins map[string]AuthConfig   `yaml:"auth_plugins"`
-	AnonClaims  map[string]any          `yaml:"anon_claims,omitempty"`
-	Server      ServerConfig            `yaml:"server"`
+	Plugins                  []string                    `yaml:"plugin_configs"`
+	PluginMap                map[string]PluginConfig     `yaml:"plugins"`
+	AuthPlugins              map[string]AuthConfig       `yaml:"auth_plugins"`
+	MiddlewarePlugins        map[string]MiddlewareConfig `yaml:"middleware_plugins"`
+	GlobalRequestMiddlewares []string                    `yaml:"global_request_middlewares"`
+	AnonClaims               map[string]any              `yaml:"anon_claims,omitempty"`
+	Server                   ServerConfig                `yaml:"server"`
 }
 
 func LoadPluginConfigs(configs []string) map[string]PluginConfig {
@@ -119,27 +124,11 @@ func LoadPluginConfigs(configs []string) map[string]PluginConfig {
 			}
 			envName := parts[0]
 			connName := strings.ToLower(strings.TrimPrefix(envName, "ER_DB_"))
-			// Look for specific cache config for this DB connection
-			cacheName := os.Getenv(fmt.Sprintf("ER_DB_%s_CACHENAME", connName))
 			plugins[connName] = PluginConfig{
-				Name:        connName,
-				Uri:         parts[1],
-				EnableCache: os.Getenv(fmt.Sprintf("ER_CACHE_ENABLE_%s", strings.ToUpper(connName))) == "1",
-				UseQuery:    os.Getenv(fmt.Sprintf("ER_USE_QUERY_%s", strings.ToUpper(connName))) == "1",
-				CacheName:   cacheName,
-				DbTxEnd:     "commit-allow-override",
-			}
-		} else if strings.HasPrefix(env, "ER_CACHE_") && !strings.HasPrefix(env, "ER_CACHE_ENABLE_") {
-			parts := strings.SplitN(env, "=", 2)
-			if len(parts) != 2 {
-				continue
-			}
-			envName := parts[0]
-			connName := strings.ToLower(strings.TrimPrefix(envName, "ER_CACHE_"))
-			plugins[connName] = PluginConfig{
-				Name:    connName,
-				Uri:     parts[1],
-				DbTxEnd: "commit",
+				Name:     connName,
+				Uri:      parts[1],
+				UseQuery: os.Getenv(fmt.Sprintf("ER_USE_QUERY_%s", strings.ToUpper(connName))) == "1",
+				DbTxEnd:  "commit-allow-override",
 			}
 		}
 	}
@@ -180,217 +169,179 @@ func LoadPluginConfigs(configs []string) map[string]PluginConfig {
 	return plugins
 }
 
+func envDuration(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return def
+}
+
+func envCSV(key string, def []string) []string {
+	parts := strings.Split(os.Getenv(key), ",")
+	if len(parts) == 1 && parts[0] == "" {
+		return def
+	}
+	return parts
+}
+
+func envFlagDefaultTrue(key string) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return true
+	}
+	return v == "1"
+}
+
+func loadEnvCORS() CORSConfig {
+	maxAge := 86400
+	if v := os.Getenv("ER_CORS_MAX_AGE"); v != "" {
+		if age, err := strconv.Atoi(v); err == nil {
+			maxAge = age
+		}
+	}
+	return CORSConfig{
+		Enabled: os.Getenv("ER_CORS_ENABLED") == "1",
+		Origins: envCSV("ER_CORS_ORIGINS", []string{"*"}),
+		Methods: envCSV("ER_CORS_METHODS", []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}),
+		Headers: envCSV("ER_CORS_HEADERS", []string{"Content-Type", "Authorization", "X-Requested-With"}),
+		MaxAge:  maxAge,
+	}
+}
+
+func loadEnvHTTP2() ServerConfig {
+	cfg := ServerConfig{}
+	if v := os.Getenv("ER_HTTP2_MAX_CONCURRENT_STREAMS"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 32); err == nil {
+			cfg.HTTP2MaxConcurrentStreams = uint32(n)
+		}
+	}
+	if v := os.Getenv("ER_HTTP2_MAX_READ_FRAME_SIZE"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 32); err == nil {
+			cfg.HTTP2MaxReadFrameSize = uint32(n)
+		}
+	}
+	if v := os.Getenv("ER_HTTP2_MAX_UPLOAD_BUFFER_PER_CONNECTION"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 32); err == nil {
+			cfg.HTTP2MaxUploadBufferPerConnection = int32(n)
+		}
+	}
+	if v := os.Getenv("ER_HTTP2_MAX_UPLOAD_BUFFER_PER_STREAM"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 32); err == nil {
+			cfg.HTTP2MaxUploadBufferPerStream = int32(n)
+		}
+	}
+	cfg.HTTP2IdleTimeout = envDuration("ER_HTTP2_IDLE_TIMEOUT", 0)
+	cfg.HTTP2ReadIdleTimeout = envDuration("ER_HTTP2_READ_IDLE_TIMEOUT", 0)
+	cfg.HTTP2PingTimeout = envDuration("ER_HTTP2_PING_TIMEOUT", 0)
+	if v := os.Getenv("ER_HTTP2_PERMIT_PROHIBITED_CIPHER_SUITES"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.HTTP2PermitProhibitedCipherSuites = b
+		}
+	}
+	return cfg
+}
+
+func loadEnvServerConfig() ServerConfig {
+	server := loadEnvHTTP2()
+	server.ReadTimeout = envDuration("ER_SERVER_READ_TIMEOUT", 5*time.Second)
+	server.WriteTimeout = envDuration("ER_SERVER_WRITE_TIMEOUT", 10*time.Second)
+	server.IdleTimeout = envDuration("ER_SERVER_IDLE_TIMEOUT", 120*time.Second)
+	server.ReadHeaderTimeout = envDuration("ER_SERVER_READ_HEADER_TIMEOUT", 5*time.Second)
+	server.KeepAlivePeriod = envDuration("ER_SERVER_KEEP_ALIVE_PERIOD", 3*time.Minute)
+	server.MaxHeaderBytes = 1 << 20
+	if v := os.Getenv("ER_SERVER_MAX_HEADER_BYTES"); v != "" {
+		if n, err := units.FromHumanSize(v); err == nil {
+			server.MaxHeaderBytes = int(n)
+		}
+	}
+	server.MaxBodySize = int64(10 * 1024 * 1024)
+	if v := os.Getenv("ER_SERVER_MAX_BODY_SIZE"); v != "" {
+		if n, err := units.FromHumanSize(v); err == nil {
+			server.MaxBodySize = n
+		}
+	}
+	server.TrustedProxyMode = "none"
+	if v := os.Getenv("ER_SERVER_TRUSTED_PROXY_MODE"); v != "" {
+		server.TrustedProxyMode = strings.ToLower(strings.TrimSpace(v))
+	}
+	server.TrustedProxyCount = 1
+	if v := os.Getenv("ER_SERVER_TRUSTED_PROXY_COUNT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			server.TrustedProxyCount = n
+		}
+	}
+	server.TrustedProxyHeader = os.Getenv("ER_SERVER_TRUSTED_PROXY_HEADER")
+	return server
+}
+
+func loadYAMLConfig(cfg *Config) {
+	configFile := os.Getenv("ER_CONFIG_FILE")
+	if configFile == "" {
+		return
+	}
+	data, err := os.ReadFile(configFile)
+	if err != nil {
+		return
+	}
+	log.Printf("Loading config from %s\n", configFile)
+	yaml.Unmarshal(data, cfg)
+}
+
+func finalizePluginMap(cfg *Config) {
+	for pluginName, pluginCfg := range cfg.PluginMap {
+		pluginCfg.Name = pluginName
+		if pluginCfg.DbTxEnd == "" {
+			pluginCfg.DbTxEnd = "commit"
+		}
+		if pluginCfg.DefaultLimit == 0 {
+			pluginCfg.DefaultLimit = cfg.DefaultLimit
+		}
+		cfg.PluginMap[pluginName] = pluginCfg
+	}
+	for name, plcfg := range LoadPluginConfigs(cfg.Plugins) {
+		if _, exists := cfg.PluginMap[name]; !exists {
+			cfg.PluginMap[name] = plcfg
+		}
+	}
+}
+
+func defaultTimezone() string {
+	if tz := os.Getenv("ER_DEFAULT_TIMEZONE"); tz != "" {
+		return tz
+	}
+	link, err := os.Readlink("/etc/localtime")
+	if err != nil {
+		return "GMT"
+	}
+	parts := strings.Split(link, "/")
+	if len(parts) > 2 {
+		return strings.Join(parts[len(parts)-2:], "/")
+	}
+	return link
+}
+
 func Load() Config {
-	// Port: default "8080"
 	port := os.Getenv("ER_PORT")
 	if port == "" {
 		port = "8080"
 	}
-
-	// CheckScope: default true, unless set to other value than "1"
-	checkScopeStr := os.Getenv("ER_CHECK_SCOPE")
-	checkScope := true
-	if checkScopeStr != "" {
-		if checkScopeStr == "1" {
-			checkScope = true
-		} else {
-			checkScope = false
-		}
-	}
-
-	// TokenSecret and TokenUserSearch with default for TokenUserSearch.
 	tokenSecret := os.Getenv("ER_TOKEN_SECRET")
 	tokenUserSearch := os.Getenv("ER_TOKEN_USER_SEARCH")
 	if tokenUserSearch == "" {
 		tokenUserSearch = "sub"
 	}
-
-	// NoPluginLog: default true, unless set to other value than "1"
-	noPluginLogStr := os.Getenv("ER_NO_PLUGIN_LOG")
-	noPluginLog := true
-	if noPluginLogStr != "" {
-		if noPluginLogStr == "1" {
-			noPluginLog = true
-		} else {
-			noPluginLog = false
-		}
-	}
-
-	// AccessLogOn: if set to "1" then true, else false (default false).
-	accessLogOnStr := os.Getenv("ER_ACCESSLOG")
-	accessLogOn := false
-	if accessLogOnStr == "1" {
-		accessLogOn = true
-	}
-
-	// DefaultTimezone: try environment variable, then system /etc/localtime
-	defaultTimezone := os.Getenv("ER_DEFAULT_TIMEZONE")
-	if defaultTimezone == "" {
-		link, err := os.Readlink("/etc/localtime")
-		if err != nil {
-			defaultTimezone = "GMT"
-		} else {
-			parts := strings.Split(link, "/")
-			if len(parts) > 2 {
-				defaultTimezone = strings.Join(parts[len(parts)-2:], "/")
-			} else {
-				defaultTimezone = link
-			}
-		}
-	}
-
 	authFlow := os.Getenv("ER_TOKEN_AUTHFLOW")
-
 	if authFlow == "" {
 		authFlow = "password"
 	}
-
-	// CORS configuration
-	corsEnabled := os.Getenv("ER_CORS_ENABLED") == "1"
-
-	corsOrigins := strings.Split(os.Getenv("ER_CORS_ORIGINS"), ",")
-	if len(corsOrigins) == 1 && corsOrigins[0] == "" {
-		corsOrigins = []string{"*"}
-	}
-
-	corsMethods := strings.Split(os.Getenv("ER_CORS_METHODS"), ",")
-	if len(corsMethods) == 1 && corsMethods[0] == "" {
-		corsMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}
-	}
-
-	corsHeaders := strings.Split(os.Getenv("ER_CORS_HEADERS"), ",")
-	if len(corsHeaders) == 1 && corsHeaders[0] == "" {
-		corsHeaders = []string{"Content-Type", "Authorization", "X-Requested-With"}
-	}
-
-	corsMaxAge := 86400 // 24 hours default
-	if maxAge := os.Getenv("ER_CORS_MAX_AGE"); maxAge != "" {
-		if age, err := strconv.Atoi(maxAge); err == nil {
-			corsMaxAge = age
-		}
-	}
-
-	// Load TLS settings
 	tlsCertFile := os.Getenv("ER_TLS_CERT_FILE")
 	tlsKeyFile := os.Getenv("ER_TLS_KEY_FILE")
-	tlsEnabled := false
-	if tlsCertFile != "" && tlsKeyFile != "" {
-		tlsEnabled = true
-	}
-
 	pluginsList := []string{}
 	if plugins := os.Getenv("ER_PLUGINS"); plugins != "" {
-		// Split the plugins by comma and trim whitespace
 		pluginsList = strings.Split(plugins, ",")
 	}
-
-	// Server settings
-	serverReadTimeout := 5 * time.Second
-	if v := os.Getenv("ER_SERVER_READ_TIMEOUT"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			serverReadTimeout = d
-		}
-	}
-	serverWriteTimeout := 10 * time.Second
-	if v := os.Getenv("ER_SERVER_WRITE_TIMEOUT"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			serverWriteTimeout = d
-		}
-	}
-	serverIdleTimeout := 120 * time.Second
-	if v := os.Getenv("ER_SERVER_IDLE_TIMEOUT"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			serverIdleTimeout = d
-		}
-	}
-	serverMaxHeaderBytes := 1 << 20
-	if v := os.Getenv("ER_SERVER_MAX_HEADER_BYTES"); v != "" {
-		if n, err := units.FromHumanSize(v); err == nil {
-			serverMaxHeaderBytes = int(n)
-		}
-	}
-	serverReadHeaderTimeout := 5 * time.Second
-	if v := os.Getenv("ER_SERVER_READ_HEADER_TIMEOUT"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			serverReadHeaderTimeout = d
-		}
-	}
-	serverKeepAlivePeriod := 3 * time.Minute
-	if v := os.Getenv("ER_SERVER_KEEP_ALIVE_PERIOD"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			serverKeepAlivePeriod = d
-		}
-	}
-
-	serverMaxBodySize := int64(10 * 1024 * 1024) // 10 MB default
-	if v := os.Getenv("ER_SERVER_MAX_BODY_SIZE"); v != "" {
-		if n, err := units.FromHumanSize(v); err == nil {
-			serverMaxBodySize = n
-		}
-	}
-
-	// HTTP/2 settings
-	http2MaxConcurrentStreams := uint32(0)
-	if v := os.Getenv("ER_HTTP2_MAX_CONCURRENT_STREAMS"); v != "" {
-		if n, err := strconv.ParseUint(v, 10, 32); err == nil {
-			http2MaxConcurrentStreams = uint32(n)
-		}
-	}
-	http2MaxReadFrameSize := uint32(0)
-	if v := os.Getenv("ER_HTTP2_MAX_READ_FRAME_SIZE"); v != "" {
-		if n, err := strconv.ParseUint(v, 10, 32); err == nil {
-			http2MaxReadFrameSize = uint32(n)
-		}
-	}
-	http2MaxUploadBufferPerConn := int32(0)
-	if v := os.Getenv("ER_HTTP2_MAX_UPLOAD_BUFFER_PER_CONNECTION"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 32); err == nil {
-			http2MaxUploadBufferPerConn = int32(n)
-		}
-	}
-	http2MaxUploadBufferPerStream := int32(0)
-	if v := os.Getenv("ER_HTTP2_MAX_UPLOAD_BUFFER_PER_STREAM"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 32); err == nil {
-			http2MaxUploadBufferPerStream = int32(n)
-		}
-	}
-	http2IdleTimeout := time.Duration(0)
-	if v := os.Getenv("ER_HTTP2_IDLE_TIMEOUT"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			http2IdleTimeout = d
-		}
-	}
-	http2ReadIdleTimeout := time.Duration(0)
-	if v := os.Getenv("ER_HTTP2_READ_IDLE_TIMEOUT"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			http2ReadIdleTimeout = d
-		}
-	}
-	http2PingTimeout := time.Duration(0)
-	if v := os.Getenv("ER_HTTP2_PING_TIMEOUT"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			http2PingTimeout = d
-		}
-	}
-	http2PermitProhibitedCipherSuites := false
-	if v := os.Getenv("ER_HTTP2_PERMIT_PROHIBITED_CIPHER_SUITES"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			http2PermitProhibitedCipherSuites = b
-		}
-	}
-
-	trustedProxyMode := "none"
-	if v := os.Getenv("ER_SERVER_TRUSTED_PROXY_MODE"); v != "" {
-		trustedProxyMode = strings.ToLower(strings.TrimSpace(v))
-	}
-	trustedProxyCount := 1
-	if v := os.Getenv("ER_SERVER_TRUSTED_PROXY_COUNT"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			trustedProxyCount = n
-		}
-	}
-	trustedProxyHeader := os.Getenv("ER_SERVER_TRUSTED_PROXY_HEADER")
-
 	tokenCacheTTL := -1
 	if v := os.Getenv("ER_TOKEN_CACHE_TTL"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -399,53 +350,25 @@ func Load() Config {
 	}
 
 	cfg := Config{
-		Port:            port,
-		CheckScope:      checkScope,
-		TokenUserSearch: tokenUserSearch,
-		NoPluginLog:     noPluginLog,
-		AccessLogOn:     accessLogOn,
-		DefaultTimezone: defaultTimezone,
-		TokenCacheTTL:   tokenCacheTTL,
-		// CORS settings
-		CORS: CORSConfig{
-			Enabled: corsEnabled,
-			Origins: corsOrigins,
-			Methods: corsMethods,
-			Headers: corsHeaders,
-			MaxAge:  corsMaxAge,
-		},
-		// TLS settings
-		TLSEnabled:  tlsEnabled,
-		TLSCertFile: tlsCertFile,
-		TLSKeyFile:  tlsKeyFile,
-		// Plugin settings
-		Plugins:     pluginsList,
-		PluginMap:   make(map[string]PluginConfig),
-		AuthPlugins: make(map[string]AuthConfig),
-		AnonClaims:  make(map[string]any),
-		Server: ServerConfig{
-			ReadTimeout:                       serverReadTimeout,
-			WriteTimeout:                      serverWriteTimeout,
-			IdleTimeout:                       serverIdleTimeout,
-			MaxHeaderBytes:                    serverMaxHeaderBytes,
-			MaxBodySize:                       serverMaxBodySize,
-			ReadHeaderTimeout:                 serverReadHeaderTimeout,
-			KeepAlivePeriod:                   serverKeepAlivePeriod,
-			HTTP2MaxConcurrentStreams:         http2MaxConcurrentStreams,
-			HTTP2MaxReadFrameSize:             http2MaxReadFrameSize,
-			HTTP2MaxUploadBufferPerConnection: http2MaxUploadBufferPerConn,
-			HTTP2MaxUploadBufferPerStream:     http2MaxUploadBufferPerStream,
-			HTTP2IdleTimeout:                  http2IdleTimeout,
-			HTTP2ReadIdleTimeout:              http2ReadIdleTimeout,
-			HTTP2PingTimeout:                  http2PingTimeout,
-			HTTP2PermitProhibitedCipherSuites: http2PermitProhibitedCipherSuites,
-			TrustedProxyMode:                  trustedProxyMode,
-			TrustedProxyCount:                 trustedProxyCount,
-			TrustedProxyHeader:                trustedProxyHeader,
-		},
+		Port:              port,
+		CheckScope:        envFlagDefaultTrue("ER_CHECK_SCOPE"),
+		TokenUserSearch:   tokenUserSearch,
+		NoPluginLog:       envFlagDefaultTrue("ER_NO_PLUGIN_LOG"),
+		AccessLogOn:       os.Getenv("ER_ACCESSLOG") == "1",
+		DefaultTimezone:   defaultTimezone(),
+		TokenCacheTTL:     tokenCacheTTL,
+		CORS:              loadEnvCORS(),
+		TLSEnabled:        tlsCertFile != "" && tlsKeyFile != "",
+		TLSCertFile:       tlsCertFile,
+		TLSKeyFile:        tlsKeyFile,
+		Plugins:           pluginsList,
+		PluginMap:         make(map[string]PluginConfig),
+		AuthPlugins:       make(map[string]AuthConfig),
+		MiddlewarePlugins: make(map[string]MiddlewareConfig),
+		AnonClaims:        make(map[string]any),
+		Server:            loadEnvServerConfig(),
 	}
 
-	// Load AnonClaims from environment variable if present (as JSON)
 	if anonClaimsStr := os.Getenv("ER_ANON_CLAIMS"); anonClaimsStr != "" {
 		var anonClaims map[string]any
 		if err := json.Unmarshal([]byte(anonClaimsStr), &anonClaims); err == nil {
@@ -455,42 +378,28 @@ func Load() Config {
 		}
 	}
 
-	// Load config from environment variable
-	configFile := os.Getenv("ER_CONFIG_FILE")
-	if configFile != "" {
-		data, err := os.ReadFile(configFile)
-		if err == nil {
-			log.Printf("Loading config from %s\n", configFile)
-			yaml.Unmarshal(data, &cfg)
-		}
-	}
+	loadYAMLConfig(&cfg)
 
 	if cfg.AccessLogOn {
 		log.Print("Access log enabled\n")
 	}
-
 	if cfg.CheckScope {
 		log.Print("Token's scope check enabled\n")
 	}
-
 	log.Printf("Default server timezone: %s\n", cfg.DefaultTimezone)
 
 	if cfg.DefaultLimit == 0 {
 		cfg.DefaultLimit = 100
 	}
-
 	if cfg.Otel.Endpoint == "" {
 		cfg.Otel.Enabled = false
 	}
-
 	if cfg.Otel.Protocol == "" {
 		cfg.Otel.Protocol = "otlp"
 	}
-
 	if cfg.Otel.ServiceName == "" {
 		cfg.Otel.ServiceName = "easyrest-server"
 	}
-
 	if cfg.Otel.Enabled {
 		log.Printf("Otel enabled with protocol %s, endpoint %s and service name %s\n", cfg.Otel.Protocol, cfg.Otel.Endpoint, cfg.Otel.ServiceName)
 	}
@@ -505,22 +414,7 @@ func Load() Config {
 			},
 		}
 	}
-	for pluginName, pluginCfg := range cfg.PluginMap {
-		pluginCfg.Name = pluginName
-		if pluginCfg.DbTxEnd == "" {
-			pluginCfg.DbTxEnd = "commit"
-		}
-		cfg.PluginMap[pluginName] = pluginCfg
-		if pluginCfg.DefaultLimit == 0 {
-			pluginCfg.DefaultLimit = cfg.DefaultLimit
-		}
-	}
-
-	for name, plcfg := range LoadPluginConfigs(cfg.Plugins) {
-		if _, exists := cfg.PluginMap[name]; !exists {
-			cfg.PluginMap[name] = plcfg
-		}
-	}
+	finalizePluginMap(&cfg)
 	log.Printf("Loaded %d plugins\n", len(cfg.PluginMap))
 	if cfg.CORS.Enabled {
 		log.Printf(

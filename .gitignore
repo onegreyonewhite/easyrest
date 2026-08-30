@@ -20,3 +20,4 @@ pgo/profiles/oha-logs
 cpu.prof
 mem.prof
 tests.test
+graphify-out

@@ -21,7 +21,6 @@ func main() {
 		HandshakeConfig: easyrest.Handshake,
 		Plugins: map[string]hplugin.Plugin{
 			"db":    &easyrest.DBPluginPlugin{Impl: postgresPlugin.NewPgPlugin()},
-			"cache": &easyrest.CachePluginPlugin{Impl: postgresPlugin.NewPgCachePlugin()},
 			"query": &easyrest.DBQueryPluginPlugin{Impl: postgresPlugin.NewPgQueryPlugin()},
 		},
 	})

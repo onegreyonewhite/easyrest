@@ -6,7 +6,6 @@ import (
 	"net/rpc"
 	"sync"
 	"testing"
-	"time"
 
 	goplugin "github.com/hashicorp/go-plugin"
 )
@@ -14,7 +13,8 @@ import (
 // --- stubs ---
 
 type stubDBPlugin struct {
-	fail bool
+	fail      bool
+	returnCtx map[string]any
 }
 
 func (s *stubDBPlugin) InitConnection(uri string) error {
@@ -25,90 +25,46 @@ func (s *stubDBPlugin) InitConnection(uri string) error {
 }
 
 func (s *stubDBPlugin) TableGet(userID, table string, selectFields []string, where map[string]any,
-	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, error) {
+	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, map[string]any, error) {
 	if s.fail {
-		return nil, errors.New("get failed")
+		return nil, s.returnCtx, errors.New("get failed")
 	}
-	return []map[string]any{{"id": 1, "user": userID, "table": table}}, nil
+	return []map[string]any{{"id": 1, "user": userID, "table": table}}, s.returnCtx, nil
 }
 
-func (s *stubDBPlugin) TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, error) {
+func (s *stubDBPlugin) TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, map[string]any, error) {
 	if s.fail {
-		return nil, errors.New("create failed")
+		return nil, s.returnCtx, errors.New("create failed")
 	}
-	return data, nil
+	return data, s.returnCtx, nil
 }
 
-func (s *stubDBPlugin) TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, error) {
+func (s *stubDBPlugin) TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, map[string]any, error) {
 	if s.fail {
-		return 0, errors.New("update failed")
+		return 0, s.returnCtx, errors.New("update failed")
 	}
-	return 2, nil
+	return 2, s.returnCtx, nil
 }
 
-func (s *stubDBPlugin) TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, error) {
+func (s *stubDBPlugin) TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, map[string]any, error) {
 	if s.fail {
-		return 0, errors.New("delete failed")
+		return 0, s.returnCtx, errors.New("delete failed")
 	}
-	return 3, nil
+	return 3, s.returnCtx, nil
 }
 
-func (s *stubDBPlugin) CallFunction(userID, funcName string, data map[string]any, ctx map[string]any) (any, error) {
+func (s *stubDBPlugin) CallFunction(userID, funcName string, data map[string]any, ctx map[string]any) (any, map[string]any, error) {
 	if s.fail {
-		return nil, errors.New("call failed")
+		return nil, s.returnCtx, errors.New("call failed")
 	}
-	return map[string]any{"func": funcName, "data": data}, nil
+	return map[string]any{"func": funcName, "data": data}, s.returnCtx, nil
 }
 
-func (s *stubDBPlugin) GetSchema(ctx map[string]any) (any, error) {
+func (s *stubDBPlugin) GetSchema(ctx map[string]any) (any, map[string]any, error) {
 	if s.fail {
-		return nil, errors.New("schema failed")
+		return nil, s.returnCtx, errors.New("schema failed")
 	}
-	return map[string]any{"tables": []string{"users"}}, nil
-}
-
-type stubCachePlugin struct {
-	fail  bool
-	store map[string]string
-	mu    sync.Mutex
-}
-
-func (s *stubCachePlugin) InitConnection(uri string) error {
-	if s.fail {
-		return errors.New("cache init failed")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.store == nil {
-		s.store = make(map[string]string)
-	}
-	return nil
-}
-
-func (s *stubCachePlugin) Set(key, value string, ttl time.Duration) error {
-	if s.fail {
-		return errors.New("set failed")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.store == nil {
-		s.store = make(map[string]string)
-	}
-	s.store[key] = value
-	return nil
-}
-
-func (s *stubCachePlugin) Get(key string) (string, error) {
-	if s.fail {
-		return "", errors.New("get failed")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	v, ok := s.store[key]
-	if !ok {
-		return "", errors.New("not found")
-	}
-	return v, nil
+	return map[string]any{"tables": []string{"users"}}, s.returnCtx, nil
 }
 
 type stubQueryPlugin struct {
@@ -127,6 +83,38 @@ func (s *stubQueryPlugin) QueryCall(query string, ctx map[string]any) ([]map[str
 		return nil, errors.New("query failed")
 	}
 	return []map[string]any{{"q": query}}, nil
+}
+
+type stubMiddlewarePlugin struct {
+	failInit         bool
+	failPreRequest   bool
+	failPostRequest  bool
+	preRequestStatus *int
+	postHeaders      map[string]string
+}
+
+func (s *stubMiddlewarePlugin) Init(settings map[string]any) error {
+	if s.failInit {
+		return errors.New("middleware init failed")
+	}
+	return nil
+}
+
+func (s *stubMiddlewarePlugin) PreRequest(dbKey string, ctx map[string]any) (map[string]any, *int, error) {
+	if s.failPreRequest {
+		return ctx, s.preRequestStatus, errors.New("pre-request failed")
+	}
+	return ctx, nil, nil
+}
+
+func (s *stubMiddlewarePlugin) PostRequest(dbKey string, ctx map[string]any) (map[string]string, error) {
+	if s.failPostRequest {
+		return s.postHeaders, errors.New("post-request failed")
+	}
+	if s.postHeaders != nil {
+		return s.postHeaders, nil
+	}
+	return map[string]string{"X-MW-Post": dbKey}, nil
 }
 
 type stubAuthPlugin struct {
@@ -193,30 +181,30 @@ func TestDBPluginRPC_SuccessAndError(t *testing.T) {
 	if err := db.InitConnection("sqlite://mem"); err != nil {
 		t.Fatalf("InitConnection: %v", err)
 	}
-	rows, err := db.TableGet("u1", "users", []string{"id"}, nil, nil, nil, 10, 0, nil)
+	rows, _, err := db.TableGet("u1", "users", []string{"id"}, nil, nil, nil, 10, 0, nil)
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("TableGet: rows=%v err=%v", rows, err)
 	}
-	created, err := db.TableCreate("u1", "users", []map[string]any{{"name": "a"}}, nil)
+	created, _, err := db.TableCreate("u1", "users", []map[string]any{{"name": "a"}}, nil)
 	if err != nil || len(created) != 1 {
 		t.Fatalf("TableCreate: %v %v", created, err)
 	}
-	updated, err := db.TableUpdate("u1", "users", map[string]any{"name": "b"}, map[string]any{"id": "eq.1"}, nil)
+	updated, _, err := db.TableUpdate("u1", "users", map[string]any{"name": "b"}, map[string]any{"id": "eq.1"}, nil)
 	if err != nil || updated != 2 {
 		t.Fatalf("TableUpdate: %d %v", updated, err)
 	}
-	deleted, err := db.TableDelete("u1", "users", map[string]any{"id": "eq.1"}, nil)
+	deleted, _, err := db.TableDelete("u1", "users", map[string]any{"id": "eq.1"}, nil)
 	if err != nil || deleted != 3 {
 		t.Fatalf("TableDelete: %d %v", deleted, err)
 	}
-	result, err := db.CallFunction("u1", "myFunc", map[string]any{"x": 1}, nil)
+	result, _, err := db.CallFunction("u1", "myFunc", map[string]any{"x": 1}, nil)
 	if err != nil {
 		t.Fatalf("CallFunction: %v", err)
 	}
 	if m, ok := result.(map[string]any); !ok || m["func"] != "myFunc" {
 		t.Fatalf("CallFunction result: %v", result)
 	}
-	schema, err := db.GetSchema(nil)
+	schema, _, err := db.GetSchema(nil)
 	if err != nil {
 		t.Fatalf("GetSchema: %v", err)
 	}
@@ -228,23 +216,68 @@ func TestDBPluginRPC_SuccessAndError(t *testing.T) {
 	if err := db.InitConnection("x"); err == nil || err.Error() != "init failed" {
 		t.Fatalf("expected init failed, got %v", err)
 	}
-	if _, err := db.TableGet("u", "t", nil, nil, nil, nil, 0, 0, nil); err == nil {
+	if _, _, err := db.TableGet("u", "t", nil, nil, nil, nil, 0, 0, nil); err == nil {
 		t.Fatal("expected TableGet error")
 	}
-	if _, err := db.TableCreate("u", "t", nil, nil); err == nil {
+	if _, _, err := db.TableCreate("u", "t", nil, nil); err == nil {
 		t.Fatal("expected TableCreate error")
 	}
-	if _, err := db.TableUpdate("u", "t", nil, nil, nil); err == nil {
+	if _, _, err := db.TableUpdate("u", "t", nil, nil, nil); err == nil {
 		t.Fatal("expected TableUpdate error")
 	}
-	if _, err := db.TableDelete("u", "t", nil, nil); err == nil {
+	if _, _, err := db.TableDelete("u", "t", nil, nil); err == nil {
 		t.Fatal("expected TableDelete error")
 	}
-	if _, err := db.CallFunction("u", "f", nil, nil); err == nil {
+	if _, _, err := db.CallFunction("u", "f", nil, nil); err == nil {
 		t.Fatal("expected CallFunction error")
 	}
-	if _, err := db.GetSchema(nil); err == nil {
+	if _, _, err := db.GetSchema(nil); err == nil {
 		t.Fatal("expected GetSchema error")
+	}
+}
+
+func TestDBPluginRPC_ReturnsCtx(t *testing.T) {
+	outCtx := map[string]any{"from": "plugin"}
+	impl := &stubDBPlugin{returnCtx: outCtx}
+	client, cleanup := startRPCServer(t, &DBPluginRPCServer{Impl: impl})
+	defer cleanup()
+	db := &DBPluginRPC{client: client}
+
+	_, got, err := db.TableGet("u1", "users", nil, nil, nil, nil, 0, 0, nil)
+	if err != nil {
+		t.Fatalf("TableGet: %v", err)
+	}
+	if got["from"] != "plugin" {
+		t.Fatalf("TableGet ctx: %#v", got)
+	}
+	_, got, err = db.TableCreate("u1", "users", nil, nil)
+	if err != nil || got["from"] != "plugin" {
+		t.Fatalf("TableCreate ctx=%#v err=%v", got, err)
+	}
+	_, got, err = db.TableUpdate("u1", "users", nil, nil, nil)
+	if err != nil || got["from"] != "plugin" {
+		t.Fatalf("TableUpdate ctx=%#v err=%v", got, err)
+	}
+	_, got, err = db.TableDelete("u1", "users", nil, nil)
+	if err != nil || got["from"] != "plugin" {
+		t.Fatalf("TableDelete ctx=%#v err=%v", got, err)
+	}
+	_, got, err = db.CallFunction("u1", "f", nil, nil)
+	if err != nil || got["from"] != "plugin" {
+		t.Fatalf("CallFunction ctx=%#v err=%v", got, err)
+	}
+	_, got, err = db.GetSchema(nil)
+	if err != nil || got["from"] != "plugin" {
+		t.Fatalf("GetSchema ctx=%#v err=%v", got, err)
+	}
+
+	impl.fail = true
+	_, got, err = db.TableGet("u", "t", nil, nil, nil, nil, 0, 0, nil)
+	if err == nil || err.Error() != "get failed" {
+		t.Fatalf("expected get failed, got %v", err)
+	}
+	if got["from"] != "plugin" {
+		t.Fatalf("error path ctx: %#v", got)
 	}
 }
 
@@ -256,67 +289,23 @@ func TestDBPluginRPC_ClientCallFailure(t *testing.T) {
 	if err := db.InitConnection("x"); err == nil {
 		t.Fatal("expected RPC error after close")
 	}
-	if _, err := db.TableGet("u", "t", nil, nil, nil, nil, 0, 0, nil); err == nil {
+	if _, _, err := db.TableGet("u", "t", nil, nil, nil, nil, 0, 0, nil); err == nil {
 		t.Fatal("expected TableGet RPC error")
 	}
-	if _, err := db.TableCreate("u", "t", nil, nil); err == nil {
+	if _, _, err := db.TableCreate("u", "t", nil, nil); err == nil {
 		t.Fatal("expected TableCreate RPC error")
 	}
-	if _, err := db.TableUpdate("u", "t", nil, nil, nil); err == nil {
+	if _, _, err := db.TableUpdate("u", "t", nil, nil, nil); err == nil {
 		t.Fatal("expected TableUpdate RPC error")
 	}
-	if _, err := db.TableDelete("u", "t", nil, nil); err == nil {
+	if _, _, err := db.TableDelete("u", "t", nil, nil); err == nil {
 		t.Fatal("expected TableDelete RPC error")
 	}
-	if _, err := db.CallFunction("u", "f", nil, nil); err == nil {
+	if _, _, err := db.CallFunction("u", "f", nil, nil); err == nil {
 		t.Fatal("expected CallFunction RPC error")
 	}
-	if _, err := db.GetSchema(nil); err == nil {
+	if _, _, err := db.GetSchema(nil); err == nil {
 		t.Fatal("expected GetSchema RPC error")
-	}
-}
-
-func TestCachePluginRPC_SuccessAndError(t *testing.T) {
-	impl := &stubCachePlugin{}
-	client, cleanup := startRPCServer(t, &CachePluginRPCServer{Impl: impl})
-	defer cleanup()
-	cache := &CachePluginRPC{client: client}
-
-	if err := cache.InitConnection("mem"); err != nil {
-		t.Fatalf("InitConnection: %v", err)
-	}
-	if err := cache.Set("k", "v", time.Second); err != nil {
-		t.Fatalf("Set: %v", err)
-	}
-	val, err := cache.Get("k")
-	if err != nil || val != "v" {
-		t.Fatalf("Get: %q %v", val, err)
-	}
-
-	impl.fail = true
-	if err := cache.InitConnection("x"); err == nil {
-		t.Fatal("expected InitConnection error")
-	}
-	if err := cache.Set("k", "v", 0); err == nil {
-		t.Fatal("expected Set error")
-	}
-	if _, err := cache.Get("k"); err == nil {
-		t.Fatal("expected Get error")
-	}
-}
-
-func TestCachePluginRPC_ClientCallFailure(t *testing.T) {
-	client, cleanup := startRPCServer(t, &CachePluginRPCServer{Impl: &stubCachePlugin{}})
-	cleanup()
-	cache := &CachePluginRPC{client: client}
-	if err := cache.InitConnection("x"); err == nil {
-		t.Fatal("expected RPC error")
-	}
-	if err := cache.Set("k", "v", 0); err == nil {
-		t.Fatal("expected Set RPC error")
-	}
-	if _, err := cache.Get("k"); err == nil {
-		t.Fatal("expected Get RPC error")
 	}
 }
 
@@ -352,6 +341,66 @@ func TestDBQueryPluginRPC_ClientCallFailure(t *testing.T) {
 	}
 	if _, err := q.QueryCall("SELECT 1", nil); err == nil {
 		t.Fatal("expected QueryCall RPC error")
+	}
+}
+
+func TestMiddlewarePluginRPC_SuccessAndError(t *testing.T) {
+	impl := &stubMiddlewarePlugin{}
+	client, cleanup := startRPCServer(t, &MiddlewarePluginRPCServer{Impl: impl})
+	defer cleanup()
+	mw := &MiddlewarePluginRPC{client: client}
+
+	if err := mw.Init(map[string]any{"k": "v"}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	ctx, status, err := mw.PreRequest("test", map[string]any{"method": "GET"})
+	if err != nil || status != nil || ctx["method"] != "GET" {
+		t.Fatalf("PreRequest: ctx=%v status=%v err=%v", ctx, status, err)
+	}
+
+	impl.failInit = true
+	if err := mw.Init(nil); err == nil {
+		t.Fatal("expected Init error")
+	}
+	impl.failInit = false
+	impl.failPreRequest = true
+	_, status, err = mw.PreRequest("test", nil)
+	if err == nil {
+		t.Fatal("expected PreRequest error")
+	}
+	status403 := 403
+	impl.preRequestStatus = &status403
+	_, status, err = mw.PreRequest("test", nil)
+	if err == nil || status == nil || *status != 403 {
+		t.Fatalf("expected PreRequest error with status 403: status=%v err=%v", status, err)
+	}
+
+	impl.failPreRequest = false
+	impl.preRequestStatus = nil
+	headers, err := mw.PostRequest("test", map[string]any{"method": "GET"})
+	if err != nil || headers["X-MW-Post"] != "test" {
+		t.Fatalf("PostRequest: headers=%v err=%v", headers, err)
+	}
+	impl.failPostRequest = true
+	impl.postHeaders = map[string]string{"X-MW-Post": "partial"}
+	headers, err = mw.PostRequest("test", nil)
+	if err == nil || headers["X-MW-Post"] != "partial" {
+		t.Fatalf("expected PostRequest error with headers: headers=%v err=%v", headers, err)
+	}
+}
+
+func TestMiddlewarePluginRPC_ClientCallFailure(t *testing.T) {
+	client, cleanup := startRPCServer(t, &MiddlewarePluginRPCServer{Impl: &stubMiddlewarePlugin{}})
+	cleanup()
+	mw := &MiddlewarePluginRPC{client: client}
+	if err := mw.Init(nil); err == nil {
+		t.Fatal("expected Init RPC error")
+	}
+	if _, _, err := mw.PreRequest("test", nil); err == nil {
+		t.Fatal("expected PreRequest RPC error")
+	}
+	if _, err := mw.PostRequest("test", nil); err == nil {
+		t.Fatal("expected PostRequest RPC error")
 	}
 }
 
@@ -409,16 +458,6 @@ func TestPluginBrokerConstructors(t *testing.T) {
 		t.Fatalf("DBPluginPlugin.Client: %v %v", clientObj, err)
 	}
 
-	cacheP := &CachePluginPlugin{Impl: &stubCachePlugin{}}
-	srv, err = cacheP.Server(broker)
-	if err != nil || srv == nil {
-		t.Fatalf("CachePluginPlugin.Server: %v %v", srv, err)
-	}
-	clientObj, err = cacheP.Client(broker, cli)
-	if err != nil || clientObj == nil {
-		t.Fatalf("CachePluginPlugin.Client: %v %v", clientObj, err)
-	}
-
 	queryP := &DBQueryPluginPlugin{Impl: &stubQueryPlugin{}}
 	srv, err = queryP.Server(broker)
 	if err != nil || srv == nil {
@@ -437,6 +476,16 @@ func TestPluginBrokerConstructors(t *testing.T) {
 	clientObj, err = authP.Client(broker, cli)
 	if err != nil || clientObj == nil {
 		t.Fatalf("AuthPluginPlugin.Client: %v %v", clientObj, err)
+	}
+
+	mwP := &MiddlewarePluginPlugin{Impl: &stubMiddlewarePlugin{}}
+	srv, err = mwP.Server(broker)
+	if err != nil || srv == nil {
+		t.Fatalf("MiddlewarePluginPlugin.Server: %v %v", srv, err)
+	}
+	clientObj, err = mwP.Client(broker, cli)
+	if err != nil || clientObj == nil {
+		t.Fatalf("MiddlewarePluginPlugin.Client: %v %v", clientObj, err)
 	}
 }
 

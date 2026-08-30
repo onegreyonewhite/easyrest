@@ -1,24 +1,24 @@
 package plugin
 
 import (
-	"time"
-
 	"github.com/hashicorp/go-plugin"
 )
 
 // Version is the plugin version.
-var Version = "v0.18.2"
+var Version = "v0.19.0"
 
 // DBPlugin – interface for DB access plugins.
+// Methods that take ctx may return an updated context map. A nil returned ctx
+// means the caller should keep its existing context. A non-nil map replaces it.
 type DBPlugin interface {
 	InitConnection(uri string) error
 	TableGet(userID string, table string, selectFields []string, where map[string]any,
-		ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, error)
-	TableCreate(userID string, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, error)
-	TableUpdate(userID string, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, error)
-	TableDelete(userID string, table string, where map[string]any, ctx map[string]any) (int, error)
-	CallFunction(userID string, funcName string, data map[string]any, ctx map[string]any) (any, error)
-	GetSchema(ctx map[string]any) (any, error)
+		ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, map[string]any, error)
+	TableCreate(userID string, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, map[string]any, error)
+	TableUpdate(userID string, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, map[string]any, error)
+	TableDelete(userID string, table string, where map[string]any, ctx map[string]any) (int, map[string]any, error)
+	CallFunction(userID string, funcName string, data map[string]any, ctx map[string]any) (any, map[string]any, error)
+	GetSchema(ctx map[string]any) (any, map[string]any, error)
 }
 
 // RPC request/response structures.
@@ -44,6 +44,7 @@ type TableGetRequest struct {
 
 type TableGetResponse struct {
 	Rows  []map[string]any
+	Ctx   map[string]any
 	Error string
 }
 
@@ -56,6 +57,7 @@ type TableCreateRequest struct {
 
 type TableCreateResponse struct {
 	Rows  []map[string]any
+	Ctx   map[string]any
 	Error string
 }
 
@@ -69,6 +71,7 @@ type TableUpdateRequest struct {
 
 type TableUpdateResponse struct {
 	Updated int
+	Ctx     map[string]any
 	Error   string
 }
 
@@ -81,6 +84,7 @@ type TableDeleteRequest struct {
 
 type TableDeleteResponse struct {
 	Deleted int
+	Ctx     map[string]any
 	Error   string
 }
 
@@ -93,6 +97,7 @@ type CallFunctionRequest struct {
 
 type CallFunctionResponse struct {
 	Result any
+	Ctx    map[string]any
 	Error  string
 }
 
@@ -103,6 +108,7 @@ type GetSchemaRequest struct {
 
 type GetSchemaResponse struct {
 	Schema any
+	Ctx    map[string]any
 	Error  string
 }
 
@@ -123,48 +129,6 @@ type QueryCallRequest struct {
 // QueryCallResponse holds the query result rows or an error.
 type QueryCallResponse struct {
 	Rows  []map[string]any
-	Error string
-}
-
-// --- CachePlugin ---
-
-// CachePlugin defines the interface for cache operations.
-type CachePlugin interface {
-	InitConnection(uri string) error
-	Set(key string, value string, ttl time.Duration) error
-	Get(key string) (string, error)
-}
-
-// CacheInitConnectionRequest holds the URI for cache connection initialization.
-type CacheInitConnectionRequest struct {
-	URI string
-}
-
-// CacheInitConnectionResponse indicates success or error during cache connection initialization.
-type CacheInitConnectionResponse struct {
-	Error string
-}
-
-// CacheSetRequest holds the key, value, and TTL for setting a cache entry.
-type CacheSetRequest struct {
-	Key   string
-	Value string
-	TTL   time.Duration
-}
-
-// CacheSetResponse indicates success or error during cache set operation.
-type CacheSetResponse struct {
-	Error string
-}
-
-// CacheGetRequest holds the key for retrieving a cache entry.
-type CacheGetRequest struct {
-	Key string
-}
-
-// CacheGetResponse holds the retrieved value or an error.
-type CacheGetResponse struct {
-	Value string
 	Error string
 }
 
@@ -198,6 +162,50 @@ type AuthAuthenticateRequest struct {
 type AuthAuthenticateResponse struct {
 	Claims map[string]any
 	Error  string
+}
+
+// --- MiddlewarePlugin ---
+
+// MiddlewarePlugin defines the interface for request middleware plugins.
+type MiddlewarePlugin interface {
+	Init(settings map[string]any) error
+	PreRequest(dbKey string, ctx map[string]any) (map[string]any, *int, error)
+	PostRequest(dbKey string, ctx map[string]any) (map[string]string, error)
+}
+
+// MiddlewareInitRequest holds the settings for middleware plugin initialization.
+type MiddlewareInitRequest struct {
+	Settings map[string]any
+}
+
+// MiddlewareInitResponse indicates success or error during middleware plugin initialization.
+type MiddlewareInitResponse struct {
+	Error string
+}
+
+// MiddlewarePreRequestRequest holds the dbKey and context for PreRequest.
+type MiddlewarePreRequestRequest struct {
+	DbKey string
+	Ctx   map[string]any
+}
+
+// MiddlewarePreRequestResponse holds the updated context, optional HTTP status, or an error.
+type MiddlewarePreRequestResponse struct {
+	Ctx    map[string]any
+	Status *int
+	Error  string
+}
+
+// MiddlewarePostRequestRequest holds the dbKey and context for PostRequest.
+type MiddlewarePostRequestRequest struct {
+	DbKey string
+	Ctx   map[string]any
+}
+
+// MiddlewarePostRequestResponse holds response headers or an error.
+type MiddlewarePostRequestResponse struct {
+	Headers map[string]string
+	Error   string
 }
 
 // Handshake configuration for plugin security.

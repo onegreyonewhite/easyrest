@@ -20,11 +20,20 @@ auth_plugins:
     settings:
       open_id_connect_url: "http://mock-oidc:9000/.well-known/openid-configuration"
 
+middleware_plugins:
+  cache-redis:
+    settings:
+      uri: "redis://redis:6379/0"
+  cache-memcached:
+    settings:
+      uri: "memcached://memcached:11211"
+  cache-lru:
+    settings: {}
+
 plugins:
   sqlite_crud:
     title: "SQLite CRUD"
     uri: "sqlite:///data/sqlite/pgo.db"
-    enable_cache: false
 
   sqlite_query:
     title: "SQLite Query (read-only)"
@@ -34,33 +43,25 @@ plugins:
   mysql_crud:
     title: "MySQL CRUD"
     uri: "mysql://root:root@mysql:3306/easyrestdb?parseTime=true&maxOpenConns=50&maxIdleConns=10"
-    enable_cache: false
 
   postgres_crud:
     title: "PostgreSQL CRUD"
     uri: "postgres://postgres:root@postgres:5432/easyrestdb?sslmode=disable&maxOpenConns=50&maxIdleConns=5"
-    enable_cache: false
 
   redis_cache_test:
     title: "SQLite with Redis cache"
     uri: "sqlite:///data/sqlite/pgo.db"
-    enable_cache: true
-    cache_name: redis_cache
+    request_middlewares:
+      - cache-redis
 
   memcached_cache_test:
     title: "SQLite with Memcached cache"
     uri: "sqlite:///data/sqlite/pgo.db"
-    enable_cache: true
-    cache_name: memcached_cache
+    request_middlewares:
+      - cache-memcached
 
   lru_cache_test:
     title: "SQLite with LRU cache"
     uri: "sqlite:///data/sqlite/pgo.db"
-    enable_cache: true
-    cache_name: lru
-
-  redis_cache:
-    uri: "redis://redis:6379/0"
-
-  memcached_cache:
-    uri: "memcached://memcached:11211"
+    request_middlewares:
+      - cache-lru

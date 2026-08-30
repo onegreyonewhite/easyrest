@@ -6,14 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
+	"github.com/onegreyonewhite/easyrest/plugins/data/sqlcache"
 	"golang.org/x/sync/singleflight"
 	_ "modernc.org/sqlite"
 )
@@ -31,12 +29,17 @@ type sqlitePlugin struct {
 	stmtGroup     singleflight.Group
 }
 
+var sqliteCacheDialect = sqlcache.Dialect{
+	CreateTable:   "CREATE TABLE IF NOT EXISTS easyrest_cache (key TEXT PRIMARY KEY, value TEXT, expires_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
+	DeleteExpired: "DELETE FROM easyrest_cache WHERE expires_at <= CURRENT_TIMESTAMP",
+	Upsert:        "INSERT OR REPLACE INTO easyrest_cache (key, value, expires_at) VALUES (?, ?, ?)",
+	SelectLive:    "SELECT value FROM easyrest_cache WHERE key = ? AND expires_at > ? ORDER BY expires_at LIMIT 1",
+	GetUsesNowArg: true,
+}
+
 type sqliteCachePlugin struct {
 	dbPluginPointer *sqlitePlugin
-	getStmt         *sql.Stmt
-	setStmt         *sql.Stmt
-	stopCh          chan struct{}
-	stopOnce        sync.Once
+	store           sqlcache.Store
 }
 
 type sqliteQueryPlugin struct {
@@ -161,90 +164,31 @@ func (s *sqliteCachePlugin) InitConnection(uri string) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.dbPluginPointer.db.Exec("CREATE TABLE IF NOT EXISTS easyrest_cache (key TEXT PRIMARY KEY, value TEXT, expires_at DATETIME DEFAULT CURRENT_TIMESTAMP)")
-	if err != nil {
+	s.store.Dialect = sqliteCacheDialect
+	s.store.Exec = sqlcache.SQLDB{DB: s.dbPluginPointer.db}
+	if err := s.store.EnsureTable(backgroundCtx); err != nil {
 		return fmt.Errorf("failed to create cache table: %w", err)
 	}
-
-	// Prepare the "get" statement for future use
-	getStmt, err := s.dbPluginPointer.db.Prepare("SELECT value FROM easyrest_cache WHERE key = ? AND expires_at > ? ORDER BY expires_at LIMIT 1")
-	if err != nil {
-		return fmt.Errorf("failed to prepare get cache statement: %w", err)
+	if err := s.store.Prepare(s.dbPluginPointer.db); err != nil {
+		return err
 	}
-	s.getStmt = getStmt
-
-	// Prepare the "set" statement for future use
-	setStmt, err := s.dbPluginPointer.db.Prepare("INSERT OR REPLACE INTO easyrest_cache (key, value, expires_at) VALUES (?, ?, ?)")
-	if err != nil {
-		return fmt.Errorf("failed to prepare set cache statement: %w", err)
-	}
-	s.setStmt = setStmt
-
-	if s.stopCh == nil {
-		s.stopCh = make(chan struct{})
-	}
-	go s.cleanupExpiredCacheEntries()
-
+	s.store.StartCleanup()
 	return nil
 }
 
-// cleanupExpiredCacheEntries periodically deletes expired cache entries.
-func (s *sqliteCachePlugin) cleanupExpiredCacheEntries() {
-	ticker := time.NewTicker(1 * time.Minute)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			if s.dbPluginPointer.db == nil {
-				continue
-			}
-			_, err := s.dbPluginPointer.db.Exec("DELETE FROM easyrest_cache WHERE expires_at <= CURRENT_TIMESTAMP")
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error cleaning up expired cache entries: %v\n", err)
-			}
-		case <-s.stopCh:
-			return
-		}
-	}
-}
-
-// Close stops the cleanup goroutine and releases cache resources.
 func (s *sqliteCachePlugin) Close() {
-	s.stopOnce.Do(func() {
-		if s.stopCh != nil {
-			close(s.stopCh)
-		}
-	})
-	if s.getStmt != nil {
-		s.getStmt.Close()
-		s.getStmt = nil
-	}
-	if s.setStmt != nil {
-		s.setStmt.Close()
-		s.setStmt = nil
-	}
+	s.store.Stop()
 	if s.dbPluginPointer != nil {
 		s.dbPluginPointer.Close()
 	}
 }
 
 func (s *sqliteCachePlugin) Set(key string, value string, ttl time.Duration) error {
-	_, err := s.setStmt.Exec(key, value, time.Now().Add(ttl))
-	if err != nil {
-		return err
-	}
-	return nil
+	return s.store.Set(backgroundCtx, key, value, ttl)
 }
 
 func (s *sqliteCachePlugin) Get(key string) (string, error) {
-	var value string
-	// use the prepared statement
-	err := s.getStmt.QueryRow(key, time.Now()).Scan(&value)
-	if err != nil {
-		return "", err
-	}
-	return value, nil
+	return s.store.Get(backgroundCtx, key)
 }
 
 // Get prepared statement from cache or create new
@@ -303,11 +247,7 @@ func scanResultRows(rows *sql.Rows, initCap int) ([]map[string]any, error) {
 		rowMap := make(map[string]any, numCols)
 		for i, colName := range cols {
 			if t, ok := columns[i].(time.Time); ok {
-				if t.Hour() == 0 && t.Minute() == 0 && t.Second() == 0 && t.Nanosecond() == 0 {
-					rowMap[colName] = t.Format("2006-01-02")
-				} else {
-					rowMap[colName] = t.Format("2006-01-02 15:04:05")
-				}
+				rowMap[colName] = easyrest.FormatSQLTime(t)
 			} else {
 				rowMap[colName] = columns[i]
 			}
@@ -400,69 +340,40 @@ func (s *sqlitePlugin) handleTransaction(userID string, ctxMap map[string]any, o
 
 // TableGet constructs and executes a SELECT query.
 func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, where map[string]any,
-	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, error) {
+	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, map[string]any, error) {
 
-	fields := "*"
-	if len(selectFields) > 0 {
-		fields = strings.Join(selectFields, ", ")
-	}
-	var sb strings.Builder
-	sb.WriteString("SELECT ")
-	sb.WriteString(fields)
-	sb.WriteString(" FROM ")
-	sb.WriteString(table)
-
-	// Convert ILIKE to LIKE COLLATE NOCASE before building where clause
-	where = convertILIKEtoLike(where)
-	whereClause, args, err := easyrest.BuildWhereClauseSorted(where)
+	query, args, err := easyrest.BuildSelectQuery(table, selectFields, where, ordering, groupBy, limit, offset, easyrest.SelectOptions{
+		WhereRewriter:    convertILIKEtoLike,
+		OffsetNeedsLimit: true,
+	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	sb.WriteString(whereClause)
-	if len(groupBy) > 0 {
-		sb.WriteString(" GROUP BY ")
-		sb.WriteString(strings.Join(groupBy, ", "))
-	}
-	if len(ordering) > 0 {
-		sb.WriteString(" ORDER BY ")
-		sb.WriteString(strings.Join(ordering, ", "))
-	}
-	if limit > 0 {
-		sb.WriteString(" LIMIT ")
-		sb.WriteString(strconv.Itoa(limit))
-		if offset > 0 {
-			sb.WriteString(" OFFSET ")
-			sb.WriteString(strconv.Itoa(offset))
-		}
-	} else if offset > 0 {
-		sb.WriteString(" LIMIT -1 OFFSET ")
-		sb.WriteString(strconv.Itoa(offset))
-	}
-	query := sb.String()
 
 	ctxQuery := context.WithValue(backgroundCtx, userIDKey, userID)
 
 	// Use prepared statement for better performance
 	stmt, err := s.getPreparedStmt(query, ctxQuery)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	rows, err := stmt.QueryContext(ctxQuery, args...)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 
-	return scanResultRows(rows, limit)
+	result, err := scanResultRows(rows, limit)
+	return result, nil, err
 }
 
 // TableCreate builds and executes an INSERT query.
-func (s *sqlitePlugin) TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, error) {
+func (s *sqlitePlugin) TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, map[string]any, error) {
 	for _, row := range data {
 		for k := range row {
 			if err := easyrest.ValidateColumnName(k); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 	}
@@ -499,21 +410,21 @@ func (s *sqlitePlugin) TableCreate(userID, table string, data []map[string]any, 
 	})
 
 	if err != nil {
-		return nil, err // Error already includes context from handleTransaction or the operation
+		return nil, nil, err // Error already includes context from handleTransaction or the operation
 	}
 
 	// Type assertion for the result
 	if results, ok := res.([]map[string]any); ok {
-		return results, nil
+		return results, nil, nil
 	}
-	return nil, fmt.Errorf("unexpected result type from handleTransaction: %T", res)
+	return nil, nil, fmt.Errorf("unexpected result type from handleTransaction: %T", res)
 }
 
 // TableUpdate builds and executes an UPDATE query.
-func (s *sqlitePlugin) TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, error) {
+func (s *sqlitePlugin) TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, map[string]any, error) {
 	for k := range data {
 		if err := easyrest.ValidateColumnName(k); err != nil {
-			return 0, err
+			return 0, nil, err
 		}
 	}
 	res, err := s.handleTransaction(userID, ctx, func(tx *sql.Tx) (any, error) {
@@ -561,18 +472,18 @@ func (s *sqlitePlugin) TableUpdate(userID, table string, data map[string]any, wh
 	})
 
 	if err != nil {
-		return 0, err // Error already includes context from handleTransaction or the operation
+		return 0, nil, err // Error already includes context from handleTransaction or the operation
 	}
 
 	// Type assertion for the result
 	if affected, ok := res.(int); ok {
-		return affected, nil
+		return affected, nil, nil
 	}
-	return 0, fmt.Errorf("unexpected result type from handleTransaction: %T", res)
+	return 0, nil, fmt.Errorf("unexpected result type from handleTransaction: %T", res)
 }
 
 // TableDelete builds and executes a DELETE query.
-func (s *sqlitePlugin) TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, error) {
+func (s *sqlitePlugin) TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, map[string]any, error) {
 	res, err := s.handleTransaction(userID, ctx, func(tx *sql.Tx) (any, error) {
 		ctxQuery := context.WithValue(backgroundCtx, userIDKey, userID)
 		// Convert ILIKE to LIKE COLLATE NOCASE before building where clause
@@ -601,39 +512,39 @@ func (s *sqlitePlugin) TableDelete(userID, table string, where map[string]any, c
 	})
 
 	if err != nil {
-		return 0, err // Error already includes context from handleTransaction or the operation
+		return 0, nil, err // Error already includes context from handleTransaction or the operation
 	}
 
 	// Type assertion for the result
 	if affected, ok := res.(int); ok {
-		return affected, nil
+		return affected, nil, nil
 	}
-	return 0, fmt.Errorf("unexpected result type from handleTransaction: %T", res)
+	return 0, nil, fmt.Errorf("unexpected result type from handleTransaction: %T", res)
 }
 
 // CallFunction returns an error since it is not supported.
-func (s *sqlitePlugin) CallFunction(userID, funcName string, data map[string]any, ctx map[string]any) (any, error) {
-	return nil, http.ErrNotSupported
+func (s *sqlitePlugin) CallFunction(userID, funcName string, data map[string]any, ctx map[string]any) (any, map[string]any, error) {
+	return nil, nil, http.ErrNotSupported
 }
 
 // GetSchema returns a schema object with three keys:
 // "tables" is a map from table names to JSON schema (Swagger 2.0 compatible),
 // "views" is a map from view names to JSON schema,
 // "rpc" is nil since SQLite does not support stored procedures.
-func (s *sqlitePlugin) GetSchema(ctx map[string]any) (any, error) {
+func (s *sqlitePlugin) GetSchema(ctx map[string]any) (any, map[string]any, error) {
 	tables := make(map[string]any)
 	views := make(map[string]any)
 	// Query for both tables and views, excluding internal objects.
 	rows, err := s.db.Query("SELECT name, type FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%'")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 	var name, typ string
 	var items = make(map[string]string)
 	for rows.Next() {
 		if err := rows.Scan(&name, &typ); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		items[name] = typ
 	}
@@ -655,7 +566,7 @@ func (s *sqlitePlugin) GetSchema(ctx map[string]any) (any, error) {
 		"views":  views,
 		"rpc":    nil,
 	}
-	return result, nil
+	return result, nil, nil
 }
 
 // getJSONSchemaForTable builds a JSON schema for a given table by querying PRAGMA table_info.

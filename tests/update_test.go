@@ -164,7 +164,6 @@ func TestUpdateWhereLt(t *testing.T) {
 	insertUser(t, dbPath, "Bob", "test2")
 	id3 := insertUser(t, dbPath, "Charlie", "test3")
 
-	os.Setenv("ER_CACHE_ENABLE_TEST", "1")
 	router := setupServerWithDB(t, dbPath)
 	tokenStr := generateToken(t)
 

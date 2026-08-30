@@ -19,8 +19,10 @@ $(BUILD_DIR)/$(PREFIX)%: $(SRC_DIR)/%/*.go
 clean:
 	rm -rf $(BUILD_DIR)
 
+COVERPKG ?= $(shell go list ./... | grep -v '/cmd/' | tr '\n' ',' | sed 's/,$$//')
+
 test: plugin-sqlite auth-jwt
-	go test -v -coverpkg=./... -coverprofile=$(COVERAGE) ./...
+	go test -v -coverpkg=$(COVERPKG) -coverprofile=$(COVERAGE) ./...
 	go tool cover -func=$(COVERAGE)
 
 bench:

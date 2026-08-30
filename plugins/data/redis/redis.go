@@ -10,7 +10,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// redisCachePlugin implements the CachePlugin interface using Redis.
+// redisCachePlugin stores ETag version tokens in Redis.
 type redisCachePlugin struct {
 	client *redis.Client
 }

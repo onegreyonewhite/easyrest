@@ -20,7 +20,7 @@ type memcacheClientInterface interface {
 	Delete(key string) error // Added Delete in case it's needed in future, though not used now
 }
 
-// memcachedCachePlugin implements the CachePlugin interface using Memcached.
+// memcachedCachePlugin stores ETag version tokens in Memcached.
 type memcachedCachePlugin struct {
 	client memcacheClientInterface // Changed to interface
 }

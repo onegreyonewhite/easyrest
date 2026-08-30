@@ -92,6 +92,36 @@ func TestSimpleCachePluginClose(t *testing.T) {
 	}
 }
 
+func TestSimpleCachePlugin_URIQueryParams(t *testing.T) {
+	plugin := NewSimpleCachePlugin()
+	if err := plugin.InitConnection("memory:///?cleanupInterval=1s&maxOpenConns=1s"); err != nil {
+		t.Fatalf("InitConnection failed: %v", err)
+	}
+	if plugin.cache == nil {
+		t.Fatal("expected cache to be initialized from URI query params")
+	}
+	if err := plugin.Set("k", "v", 0); err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+	got, err := plugin.Get("k")
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if got != "v" {
+		t.Errorf("Get returned %q, want v", got)
+	}
+}
+
+func TestSimpleCachePlugin_MalformedURIDoesNotPanic(t *testing.T) {
+	plugin := NewSimpleCachePlugin()
+	if err := plugin.InitConnection("://%zz"); err != nil {
+		t.Fatalf("InitConnection should ignore parse errors, got %v", err)
+	}
+	if plugin.cache == nil {
+		t.Fatal("expected cache to fall back to defaults")
+	}
+}
+
 func TestSimpleCachePlugin_GetNonStringValue(t *testing.T) {
 	plugin := NewSimpleCachePlugin()
 	if err := plugin.InitConnection(""); err != nil {

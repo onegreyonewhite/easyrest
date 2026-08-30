@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -205,108 +204,6 @@ func TestSelectAcceptStarFallbackToContentType(t *testing.T) {
 	}
 }
 
-func TestIfMatchStaleReturns412(t *testing.T) {
-	dbPath := setupTestDB(t)
-	defer os.Remove(dbPath)
-	defer server.StopPlugins()
-	id := insertUser(t, dbPath, "Alice", "old")
-	router := setupServerWithDB(t, dbPath)
-	tokenStr := generateToken(t)
-
-	// Prime ETag via GET
-	reqGet, _ := http.NewRequest("GET", "/api/test/users/?select=id,name", nil)
-	reqGet.Header.Set("Authorization", "Bearer "+tokenStr)
-	rrGet := httptest.NewRecorder()
-	router.ServeHTTP(rrGet, reqGet)
-	etag := rrGet.Header().Get("ETag")
-	if etag == "" {
-		t.Fatal("expected ETag from GET")
-	}
-
-	body := strings.NewReader(`{"name":"Updated"}`)
-	req, err := http.NewRequest("PATCH", fmt.Sprintf("/api/test/users/?where.eq.id=%d", id), body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Authorization", "Bearer "+tokenStr)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("If-Match", "stale-etag-value")
-	rr := httptest.NewRecorder()
-	router.ServeHTTP(rr, req)
-	if rr.Code != http.StatusPreconditionFailed {
-		t.Fatalf("Expected 412, got %d: %s", rr.Code, rr.Body.String())
-	}
-}
-
-type memCachePlugin struct {
-	mu    sync.Mutex
-	store map[string]string
-}
-
-func (m *memCachePlugin) InitConnection(uri string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.store == nil {
-		m.store = make(map[string]string)
-	}
-	return nil
-}
-func (m *memCachePlugin) Set(key, value string, ttl time.Duration) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.store == nil {
-		m.store = make(map[string]string)
-	}
-	m.store[key] = value
-	return nil
-}
-func (m *memCachePlugin) Get(key string) (string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	v, ok := m.store[key]
-	if !ok {
-		return "", fmt.Errorf("miss")
-	}
-	return v, nil
-}
-
-func TestCacheNameMismatchFallsBack(t *testing.T) {
-	dbPath := setupTestDB(t)
-	defer os.Remove(dbPath)
-	defer server.StopPlugins()
-	insertUser(t, dbPath, "Alice", "")
-	router := setupServerWithDB(t, dbPath)
-
-	cfg := server.GetConfig()
-	pl := cfg.PluginMap["test"]
-	pl.EnableCache = true
-	pl.CacheName = "missing-cache"
-	cfg.PluginMap["test"] = pl
-	server.SetConfig(cfg)
-
-	alt := &memCachePlugin{store: map[string]string{}}
-	caches := map[string]easyrest.CachePlugin{"alt": alt}
-	server.CachePlugins.Store(&caches)
-
-	tokenStr := generateToken(t)
-	req, _ := http.NewRequest("GET", "/api/test/users/?select=id,name", nil)
-	req.Header.Set("Authorization", "Bearer "+tokenStr)
-	rr := httptest.NewRecorder()
-	router.ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("Expected 200, got %d: %s", rr.Code, rr.Body.String())
-	}
-	// Fallback should use first available (alt) and set an ETag via it
-	if rr.Header().Get("ETag") == "" {
-		t.Fatal("expected ETag from fallback cache plugin")
-	}
-	alt.mu.Lock()
-	defer alt.mu.Unlock()
-	if len(alt.store) == 0 {
-		t.Fatal("expected fallback cache to store ETag")
-	}
-}
-
 func TestTrustedProxyHeaderMode(t *testing.T) {
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
@@ -314,7 +211,6 @@ func TestTrustedProxyHeaderMode(t *testing.T) {
 	insertUser(t, dbPath, "Alice", "")
 
 	os.Setenv("ER_DB_TEST", "sqlite://"+dbPath)
-	os.Setenv("ER_CACHE_ENABLE_TEST", "1")
 	os.Setenv("ER_CHECK_SCOPE", "0")
 	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
 	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
@@ -344,7 +240,6 @@ func TestTrustedProxyXFFCountMode(t *testing.T) {
 	insertUser(t, dbPath, "Alice", "")
 
 	os.Setenv("ER_DB_TEST", "sqlite://"+dbPath)
-	os.Setenv("ER_CACHE_ENABLE_TEST", "1")
 	os.Setenv("ER_CHECK_SCOPE", "0")
 	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
 	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
@@ -403,61 +298,6 @@ func TestRPCScopeForbidden(t *testing.T) {
 	router.ServeHTTP(rr, req)
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("Expected 403, got %d: %s", rr.Code, rr.Body.String())
-	}
-}
-
-func TestRPCFuncInvalidationMap(t *testing.T) {
-	mockPlugin := &mockDBPlugin{
-		callFunction: func(userID, funcName string, data map[string]any, ctx map[string]any) (any, error) {
-			return map[string]any{"ok": true}, nil
-		},
-	}
-	cache := &memCachePlugin{store: map[string]string{"etag:mock:users": "old-etag"}}
-	defer server.StopPlugins()
-
-	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
-	server.ReloadConfig()
-	router := server.SetupRouter()
-
-	cfg := server.GetConfig()
-	cfg.CheckScope = false
-	cfg.PluginMap["mock"] = config.PluginConfig{
-		Name:        "mock",
-		EnableCache: true,
-		FuncInvalidationMap: map[string][]string{
-			"refresh": {"users"},
-		},
-	}
-	server.SetConfig(cfg)
-	newDB := map[string]easyrest.DBPlugin{"mock": mockPlugin}
-	server.DbPlugins.Store(&newDB)
-	newCache := map[string]easyrest.CachePlugin{"mock": cache}
-	server.CachePlugins.Store(&newCache)
-
-	claims := jwt.MapClaims{
-		"sub":   "testuser",
-		"exp":   time.Now().Add(time.Hour).Unix(),
-		"scope": "refresh-write",
-	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	tokenStr, _ := token.SignedString([]byte("mytestsecret"))
-
-	req, _ := http.NewRequest("POST", "/api/mock/rpc/refresh/", strings.NewReader(`{}`))
-	req.Header.Set("Authorization", "Bearer "+tokenStr)
-	req.Header.Set("Content-Type", "application/json")
-	rr := httptest.NewRecorder()
-	router.ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("Expected 200, got %d: %s", rr.Code, rr.Body.String())
-	}
-	pref := rr.Header().Get("Preference-Applied")
-	if !strings.Contains(pref, "timezone=") || strings.HasSuffix(pref, " ") {
-		t.Fatalf("Preference-Applied should contain timezone without trailing space: %q", pref)
-	}
-	cache.mu.Lock()
-	defer cache.mu.Unlock()
-	if cache.store["etag:mock:users"] == "old-etag" {
-		t.Fatal("expected ETag for users to be invalidated/updated")
 	}
 }
 

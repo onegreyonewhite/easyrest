@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/onegreyonewhite/easyrest/internal/config"
 	"github.com/onegreyonewhite/easyrest/internal/server"
@@ -278,6 +280,30 @@ func TestBuildPluginContext(t *testing.T) {
 		t.Errorf("Expected jwt.claims.sub = 'Alice', got %v", jwtClaimsMap["sub"])
 	}
 
+	req.RemoteAddr = "203.0.113.10:54321"
+	gotIP := server.BuildPluginContext(req)
+	if gotIP["client_ip"] != "203.0.113.10" {
+		t.Errorf("Expected client_ip without port, got %v", gotIP["client_ip"])
+	}
+
+	req.Header.Add("Cookie", "a=1")
+	req.Header.Add("Cookie", "b=2")
+	gotCookies := server.BuildPluginContext(req)
+	hdrs, _ := gotCookies["headers"].(map[string]any)
+	if hdrs["cookie"] != "a=1; b=2" {
+		t.Errorf("Expected cookie headers joined with '; ', got %v", hdrs["cookie"])
+	}
+
+	ipHandler := middleware.ClientIPFromRemoteAddr(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotFromChi := server.BuildPluginContext(r)
+		if gotFromChi["client_ip"] != "198.51.100.7" {
+			t.Errorf("Expected chi ClientIP to win, got %v", gotFromChi["client_ip"])
+		}
+	}))
+	chiReq, _ := http.NewRequest("GET", "/api/test/users/", nil)
+	chiReq.RemoteAddr = "198.51.100.7:9"
+	ipHandler.ServeHTTP(httptest.NewRecorder(), chiReq)
+
 	// --- New test: traceparent ---
 	// Enable Otel in config
 	oldCfg := server.GetConfig()
@@ -300,6 +326,33 @@ func TestBuildPluginContext(t *testing.T) {
 	cfg2.Otel.Enabled = false
 	server.SetConfig(cfg2)
 	got3 := server.BuildPluginContext(req2)
+	if got3[easyrest.CtxDBType] != "" {
+		t.Errorf("expected empty db.type without plugin URI, got %v", got3[easyrest.CtxDBType])
+	}
+
+	cfgDB := oldCfg
+	pm := make(map[string]config.PluginConfig, len(oldCfg.PluginMap)+2)
+	for k, v := range oldCfg.PluginMap {
+		pm[k] = v
+	}
+	pm["orders"] = config.PluginConfig{Uri: "mysql://user@host/db"}
+	pm["reports"] = config.PluginConfig{Uri: "postgres://user@host/db"}
+	cfgDB.PluginMap = pm
+	server.SetConfig(cfgDB)
+
+	withDB := func(db string) *http.Request {
+		req, _ := http.NewRequest("GET", "/api/"+db+"/users/", nil)
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("db", db)
+		return req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	}
+	if got := server.BuildPluginContext(withDB("orders"))[easyrest.CtxDBType]; got != "mysql" {
+		t.Errorf("expected db.type mysql, got %v", got)
+	}
+	if got := server.BuildPluginContext(withDB("Reports"))[easyrest.CtxDBType]; got != "postgres" {
+		t.Errorf("expected db.type postgres for mixed-case db key, got %v", got)
+	}
+
 	if _, ok := got3["traceparent"]; ok {
 		t.Errorf("Did not expect traceparent in plugin context when Otel.Enabled is false")
 	}
@@ -522,7 +575,7 @@ func TestFormatToContextTypeBranches(t *testing.T) {
 		"nested": map[string]any{
 			"inner": "value",
 		},
-		"list": []any{"a", "b"},
+		"list":      []any{"a", "b"},
 		"dangerous": "val;ue",
 		"dash-key":  "dashed",
 		"dot.key":   "dotted",

@@ -24,7 +24,11 @@ CREATE TABLE IF NOT EXISTS products (
 -- Create a stored procedure 'doSomething'
 DROP FUNCTION IF EXISTS doSomething;
 DROP FUNCTION IF EXISTS getMyProducts;
+DROP FUNCTION IF EXISTS teapot;
+DROP FUNCTION IF EXISTS invalidate_users;
+DROP PROCEDURE IF EXISTS custom_headers;
 DROP TRIGGER IF EXISTS before_product_update;
+DROP TRIGGER IF EXISTS after_product_insert;
 DELIMITER //
 CREATE FUNCTION doSomething(jsonParam TEXT)
 RETURNS TEXT
@@ -70,6 +74,42 @@ BEGIN
              SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Authorization failed: You can only modify products you created.';
         END IF;
     END IF;
+END;
+//
+
+
+CREATE FUNCTION teapot()
+RETURNS TEXT
+DETERMINISTIC                -- or NO SQL, if function doesn't use tables
+BEGIN
+SET @`response.status` = '418';
+    SET @`response.headers` = '[{"Set-Cookie":"test=123"}]';
+    RETURN 'I''m a teapot';
+END;
+//
+
+-- Harvested as cache.invalidate so cache middleware can bump table/view ETags
+CREATE FUNCTION invalidate_users()
+RETURNS TEXT
+DETERMINISTIC
+BEGIN
+    SET @`cache.invalidate` = 'users,products';
+    RETURN 'ok';
+END;
+//
+
+CREATE TRIGGER after_product_insert
+AFTER INSERT ON products
+FOR EACH ROW
+BEGIN
+    SET @`response.headers` = '[{"X-Inserted":"1"}]';
+END;
+//
+
+-- Optional db.pre-request / db.post-request hook (CALL custom_headers())
+CREATE PROCEDURE custom_headers()
+BEGIN
+    SET @`response.headers` = '[{"X-Hook":"1"}]';
 END;
 //
 

@@ -87,22 +87,18 @@ func ParseFlags() (config.Config, error) {
 	if *port != "" {
 		os.Setenv("ER_PORT", *port)
 	}
-	if flag.Lookup("check-scope").Value.String() != "" {
-		os.Setenv("ER_CHECK_SCOPE", flag.Lookup("check-scope").Value.String())
-	}
+	os.Setenv("ER_CHECK_SCOPE", strconv.FormatBool(*checkScope))
 	if *tokenSecret != "" {
 		os.Setenv("ER_TOKEN_SECRET", *tokenSecret)
 	}
 	if *tokenUserSearch != "" {
 		os.Setenv("ER_TOKEN_USER_SEARCH", *tokenUserSearch)
 	}
-	if flag.Lookup("enable-plugin-log").Value.String() != "" {
-		if *enablePluginLog {
-			os.Setenv("ER_NO_PLUGIN_LOG", "true")
-		}
+	if *enablePluginLog {
+		os.Setenv("ER_NO_PLUGIN_LOG", "0")
 	}
-	if flag.Lookup("access-log").Value.String() != "" && *accessLogOn {
-		os.Setenv("ER_ACCESS_LOG", "true")
+	if *accessLogOn {
+		os.Setenv("ER_ACCESSLOG", "1")
 	}
 	if *defaultTimezone != "" {
 		os.Setenv("ER_DEFAULT_TIMEZONE", *defaultTimezone)
@@ -111,7 +107,7 @@ func ParseFlags() (config.Config, error) {
 		os.Setenv("ER_TOKEN_URL", *tokenURL)
 	}
 	if *authFlow != "" {
-		os.Setenv("ER_AUTH_FLOW", *authFlow)
+		os.Setenv("ER_TOKEN_AUTHFLOW", *authFlow)
 	}
 	if *corsEnabled {
 		os.Setenv("ER_CORS_ENABLED", "1")
@@ -133,9 +129,6 @@ func ParseFlags() (config.Config, error) {
 	}
 	if tlsKeyFile != "" {
 		os.Setenv("ER_TLS_KEY_FILE", tlsKeyFile)
-	}
-	if *checkScope {
-		os.Setenv("ER_CHECK_SCOPE", "true")
 	}
 
 	// Load base configuration from environment variables

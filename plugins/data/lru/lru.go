@@ -8,7 +8,7 @@ import (
 	cache "github.com/patrickmn/go-cache"
 )
 
-// SimpleCachePlugin implements the easyrest.CachePlugin interface using an in-memory cache
+// SimpleCachePlugin stores ETag version tokens in an in-memory cache
 // with expiring keys based on github.com/patrickmn/go-cache.
 // Note: This is not strictly LRU, but provides the required Set-with-TTL functionality.
 type SimpleCachePlugin struct {
@@ -27,7 +27,7 @@ func (p *SimpleCachePlugin) InitConnection(uri string) error {
 	parsedURI, err := url.Parse(uri)
 	defaultExpiration := 5 * time.Minute // Default expiration if TTL <= 0 in Set
 	cleanupInterval := 10 * time.Minute  // How often expired items are cleaned up
-	if err != nil {
+	if err == nil {
 		queryParams := parsedURI.Query()
 		if val := queryParams.Get("maxOpenConns"); val != "" {
 			if duration, err := time.ParseDuration(val); err == nil {

@@ -514,6 +514,57 @@ func TestOIDCAuthPlugin_Authenticate(t *testing.T) {
 		assert.EqualError(t, err, "userinfo_endpoint not configured or not found during OIDC discovery, cannot authenticate")
 	})
 
+	t.Run("Userinfo returns malformed JSON", func(t *testing.T) {
+		mockedUserinfoURL := setupMockUserInfoServer(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"user_id":`)
+		})
+		discoveryDoc := OpenIDConfiguration{UserinfoEndpoint: mockedUserinfoURL, AuthorizationEndpoint: "http://dummy/auth"}
+		mockedOIDCURL := setupMockOIDCServer(discoveryDoc)
+
+		plugin := &OIDCAuthPlugin{}
+		_, err := plugin.Init(map[string]any{"open_id_connect_url": mockedOIDCURL})
+		require.NoError(t, err)
+
+		_, err = plugin.Authenticate(map[string]string{"Authorization": "Bearer user-token"}, "GET", "/test", "param=val")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "error decoding JSON from userinfo_endpoint")
+	})
+
+	t.Run("Userinfo network error", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		userinfoURL := srv.URL
+		srv.Close()
+
+		discoveryDoc := OpenIDConfiguration{UserinfoEndpoint: userinfoURL, AuthorizationEndpoint: "http://dummy/auth"}
+		mockedOIDCURL := setupMockOIDCServer(discoveryDoc)
+
+		plugin := &OIDCAuthPlugin{}
+		_, err := plugin.Init(map[string]any{"open_id_connect_url": mockedOIDCURL})
+		require.NoError(t, err)
+
+		_, err = plugin.Authenticate(map[string]string{"Authorization": "Bearer user-token"}, "GET", "/test", "param=val")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "error calling userinfo_endpoint")
+	})
+
+	t.Run("Userinfo returns malformed JWT", func(t *testing.T) {
+		mockedUserinfoURL := setupMockUserInfoServer(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/jwt")
+			fmt.Fprint(w, "not-a-jwt")
+		})
+		discoveryDoc := OpenIDConfiguration{UserinfoEndpoint: mockedUserinfoURL, AuthorizationEndpoint: "http://dummy/auth"}
+		mockedOIDCURL := setupMockOIDCServer(discoveryDoc)
+
+		plugin := &OIDCAuthPlugin{}
+		_, err := plugin.Init(map[string]any{"open_id_connect_url": mockedOIDCURL})
+		require.NoError(t, err)
+
+		_, err = plugin.Authenticate(map[string]string{"Authorization": "Bearer user-token"}, "GET", "/test", "param=val")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid JWT format from userinfo")
+	})
+
 	t.Run("Userinfo returns unsupported content type", func(t *testing.T) {
 		mockedUserinfoURL := setupMockUserInfoServer(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/plain")

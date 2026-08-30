@@ -5,8 +5,6 @@ import (
 	"slices"
 	"strings"
 
-	stdlog "log" // Added for logging cache invalidation errors
-
 	"github.com/go-chi/chi/v5"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
@@ -21,34 +19,10 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get global config
-	config := currentConfig()
-
-	// Get plugin config
-	pluginCfg, hasPluginCfg := config.PluginMap[dbKey]
-
-	// Check if function is restricted for this dbKey
-	if hasPluginCfg {
-		if slices.Contains(pluginCfg.Exclude.Func, funcName) {
-			http.Error(w, "Not found", http.StatusNotFound)
-			return
-		}
-		// Check AllowList if it's defined and not empty
-		if len(pluginCfg.AllowList.Func) > 0 {
-			if !slices.Contains(pluginCfg.AllowList.Func, funcName) {
-				http.Error(w, "Not found", http.StatusNotFound)
-				return
-			}
-		}
-	}
-
-	// Get current plugins map
-	currentDbPlugins := *DbPlugins.Load()
-
-	// Get the specific plugin
-	dbPlug, ok := currentDbPlugins[dbKey]
+	preCfg := currentConfig()
+	prePluginCfg := preCfg.PluginMap[dbKey]
+	dbPlug, config, pluginCfg, ok := resolveDBPlugin(w, dbKey, funcName, prePluginCfg.Exclude.Func, prePluginCfg.AllowList.Func, nil)
 	if !ok {
-		http.Error(w, "DB plugin not found", http.StatusNotFound)
 		return
 	}
 
@@ -58,20 +32,9 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if function is public for this dbKey
-	isPublicFunc := false
-	if hasPluginCfg {
-		isPublicFunc = slices.Contains(pluginCfg.Public.Func, funcName)
-	}
-
-	if config.CheckScope && !isPublicFunc {
-		requiredScope := funcName + "-write" // Assuming RPC calls are write operations for scope check
-		w.Header().Add("Vary", "Authorization")
-		claims := getTokenClaims(r)
-		if !CheckScope(claims, requiredScope) {
-			http.Error(w, "Forbidden: insufficient scope", http.StatusForbidden)
-			return
-		}
+	isPublicFunc := slices.Contains(pluginCfg.Public.Func, funcName)
+	if !enforceScope(w, r, config.CheckScope, isPublicFunc, funcName+"-write") {
+		return
 	}
 
 	// Using parseRequest to handle different formats of incoming data
@@ -89,52 +52,28 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pluginCtx := BuildPluginContext(r)
-
-	applied := strings.Builder{}
-	tx := pluginCtx["prefer"].(map[string]any)["tx"]
-	if tx != nil {
-		applied.WriteString("tx=")
-		applied.WriteString(tx.(string))
-		applied.WriteString(" ")
+	pluginCtx, mwOK := runPreRequestMiddlewares(w, dbKey, pluginCtx)
+	if !mwOK {
+		return
 	}
-	applied.WriteString("timezone=")
-	applied.WriteString(pluginCtx["timezone"].(string))
-	w.Header().Set("Preference-Applied", applied.String())
+	setPreferenceApplied(w, pluginCtx)
 
 	flatCtx, err := easyrest.FormatToContext(pluginCtx)
 	if err != nil {
-		http.Error(w, "Error formatting context: "+err.Error(), http.StatusInternalServerError)
+		middlewareHTTPError(w, dbKey, pluginCtx, "Error formatting context: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	data = substituteValue(data, flatCtx, pluginCtx).(map[string]any)
 	if err := validateBodyColumns(data); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		middlewareHTTPError(w, dbKey, pluginCtx, err.Error(), http.StatusBadRequest)
 		return
 	}
-	result, err := dbPlug.CallFunction(userID, funcName, data, pluginCtx)
+	result, returnedCtx, err := dbPlug.CallFunction(userID, funcName, data, pluginCtx)
+	pluginCtx = applyReturnedPluginContext(pluginCtx, returnedCtx)
 	if err != nil {
-		http.Error(w, "Error in CallFunction: "+err.Error(), http.StatusInternalServerError)
+		middlewareHTTPError(w, dbKey, pluginCtx, "Error in CallFunction: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// ETag Cache Invalidation Logic START
-	pluginCfg, cfgOk := config.PluginMap[dbKey]
-	// Check if config exists, EnableCache is true, AND FuncInvalidationMap is present
-	if cfgOk && pluginCfg.EnableCache && pluginCfg.FuncInvalidationMap != nil {
-		if tablesToInvalidate, mapOk := pluginCfg.FuncInvalidationMap[funcName]; mapOk && len(tablesToInvalidate) > 0 {
-			cachePlugin := getFirstCachePlugin(dbKey) // Assumes this helper is available
-			if cachePlugin != nil {
-				stdlog.Printf("Invalidating ETags for tables %v due to RPC call %s/%s", tablesToInvalidate, dbKey, funcName)
-				for _, tableName := range tablesToInvalidate {
-					etagKey := etagCacheKey(dbKey, tableName)
-					_ = updateETag(cachePlugin, etagKey) // Assumes this helper is available; ignore returned ETag
-				}
-			} else {
-				stdlog.Printf("Warning: Cache invalidation configured and enabled for %s/%s, but no cache plugin is loaded.", dbKey, funcName)
-			}
-		}
-	}
-	// ETag Cache Invalidation Logic END
-
-	makeResponse(w, r, http.StatusOK, result)
+	middlewareMakeResponse(w, r, dbKey, pluginCtx, http.StatusOK, result, nil)
 }

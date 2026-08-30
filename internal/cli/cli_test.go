@@ -68,6 +68,16 @@ func TestParseFlags(t *testing.T) {
 			wantError: true,
 			version:   true,
 		},
+		{
+			name:    "enable access log and auth flow",
+			args:    []string{"cmd", "--access-log", "--auth-flow=client_credentials"},
+			wantEnv: map[string]string{"ER_ACCESSLOG": "1", "ER_TOKEN_AUTHFLOW": "client_credentials"},
+		},
+		{
+			name:    "enable plugin log",
+			args:    []string{"cmd", "--enable-plugin-log"},
+			wantEnv: map[string]string{"ER_NO_PLUGIN_LOG": "0"},
+		},
 	}
 
 	for _, tt := range tests {

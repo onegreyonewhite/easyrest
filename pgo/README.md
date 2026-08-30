@@ -1,6 +1,6 @@
 # PGO load-test environment for `easyrest-server`
 
-This directory contains a self-contained Docker Compose stack and scripts to collect a representative CPU profile for Profile-Guided Optimization (PGO) of the universal `easyrest-server` binary (all DB, cache, and auth plugins embedded).
+This directory contains a self-contained Docker Compose stack and scripts to collect a representative CPU profile for Profile-Guided Optimization (PGO) of the universal `easyrest-server` binary (all DB, cache-middleware, and auth plugins embedded).
 
 ## Prerequisites
 
@@ -26,15 +26,15 @@ make pgo-down      # tear down containers and volumes
 |---------|---------|
 | `mysql` | MySQL 8 with `schemas/mysql.sql` + seed data |
 | `postgres` | PostgreSQL 15 with `schemas/postgres.sql` + seed data |
-| `redis` | Valkey/Redis cache backend |
-| `memcached` | Memcached cache backend |
+| `redis` | Valkey/Redis store for `cache-redis` middleware |
+| `memcached` | Memcached store for `cache-memcached` middleware |
 | `mock-oidc` | Minimal OIDC discovery + userinfo mock |
 | `easyrest-server` | Built from repo `Dockerfile`; pprof on `:6060` when `ER_PPROF_ADDR` is set |
 
 Load generators use [oha](https://github.com/hatoo/oha) (`ghcr.io/hatoo/oha`) against:
 
 - `sqlite_crud`, `mysql_crud`, `postgres_crud` — CRUD reads/writes
-- `redis_cache_test`, `memcached_cache_test`, `lru_cache_test` — ETag cache paths
+- `redis_cache_test`, `memcached_cache_test`, `lru_cache_test` — ETag cache-middleware paths
 - Auth schemes: JWT, Basic, API key, OIDC (mock)
 
 **Not covered:** `awssigv4` auth (requires AWS-compatible SigV4 signing infrastructure).

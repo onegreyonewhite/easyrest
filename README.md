@@ -1,901 +1,527 @@
 # EasyREST
 
-EasyREST is a lightweight, extensible REST service that provides a unified API for performing CRUD and aggregating queries on relational databases. Its key innovation is the use of a plugin system that allows you to connect to virtually any database or data source simply by writing a plugin that conforms to the EasyREST interface.
+![CI](https://github.com/onegreyonewhite/easyrest/actions/workflows/tests.yml/badge.svg)
+![Release](https://github.com/onegreyonewhite/easyrest/actions/workflows/release.yml/badge.svg)
+![Go](https://img.shields.io/github/go-mod/go-version/onegreyonewhite/easyrest)
+![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
 
-EasyREST handles authentication via JWT, validates and sanitizes request parameters at the controller level, and then passes safe SQL expressions or commands to the plugins. The service supports complex queries including aggregations, aliasing, advanced WHERE conditions, and the use of context variables that allow you to influence query behavior dynamically.
+Turn a SQL database into a REST API. Authentication, request hooks, and every data backend are plugins: in-process in `easyrest-server`, or separate HashiCorp [go-plugin](https://github.com/hashicorp/go-plugin) processes in `easyrest-gateway`.
 
----
+## Table of contents
 
-## Table of Contents
-
+- [What it is](#what-it-is)
+- [Why it is different](#why-it-is-different)
+- [Quickstart](#quickstart)
 - [Architecture](#architecture)
-  - [Overall Architecture Diagram](#overall-architecture-diagram)
-  - [Plugin Communication and Loading](#plugin-communication-and-loading)
-  - [Authentication and Authorization](#authentication-and-authorization)
-- [EasyREST Distributions](#easyrest-distributions)
-  - [`easyrest-gateway`](#easyrest-gateway)
-  - [`easyrest-server`](#easyrest-server)
-  - [`easyrest-plugin-*`](#easyrest-plugin-)
-- [Query Capabilities](#query-capabilities)
-  - [Selecting Fields and Aliasing](#selecting-fields-and-aliasing)
-  - [Aggregating Queries](#aggregating-queries)
-  - [WHERE Conditions](#where-conditions)
-  - [Context Variables](#context-variables)
-  - [Data Insertion, Updates, and Deletion](#data-insertion-updates-and-deletion)
-  - [Raw SQL Queries (QUERY method)](#raw-sql-queries-query-method)
-- [Supported Databases and Caches](#supported-databases-and-caches)
-  - [SQLite](#sqlite)
-  - [MySQL](#mysql)
-    - [Key Features](#mysql-key-features)
-    - [Performance and Connection Parameters](#mysql-performance-and-connection-parameters)
-    - [Context Handling](#mysql-context-handling)
-    - [Schema and Stored Procedures](#mysql-schema-and-stored-procedures)
-    - [MySQL Setup using Docker](#mysql-setup-using-docker)
-  - [PostgreSQL](#postgresql)
-    - [Key Features](#postgresql-key-features)
-    - [Performance and Connection Parameters](#postgresql-performance-and-connection-parameters)
-    - [Context Handling](#postgresql-context-handling)
-    - [Schema and Functions](#postgresql-schema-and-functions)
-    - [PostgreSQL Setup using Docker](#postgresql-setup-using-docker)
-  - [Redis (Cache)](#redis-cache)
-    - [Key Features](#redis-key-features)
-    - [Configuration Parameters](#redis-configuration-parameters)
-    - [Redis Setup using Docker](#redis-setup-using-docker)
-  - [LRU (Cache)](#lru-cache)
-- [Configuration Parameters](#configuration-parameters)
-  - [Main Configuration](#main-configuration)
-- [Examples](#examples)
-  - [Multiple SQLite Databases with Different Structures](#multiple-sqlite-databases-with-different-structures)
-- [Developing External Plugins](#developing-external-plugins)
-- [API Documentation](#api-documentation)
+- [API](#api)
+- [Plugin model](#plugin-model)
+- [Configuration](#configuration)
+- [Distributions and deployment](#distributions-and-deployment)
+- [Writing a plugin](#writing-a-plugin)
+- [Development](#development)
 - [License](#license)
 
----
+
+
+## What it is
+
+EasyREST is a small HTTP server that maps URL paths to database connections. Each named connection in the config becomes `/api/<name>/`. Table CRUD, RPC functions, a read-only `QUERY` method, and a generated Swagger 2.0 schema all go through the same pipeline: authenticate, check scopes, build a plugin context, run middleware, then call a data plugin.
+
+The HTTP core never talks to a database driver itself. It sanitizes identifiers, parses query parameters into typed SQL fragments, and forwards those fragments to a plugin that owns the connection (in-process, or over go-plugin RPC).
+
+## Why it is different
+
+- **Several backends in one process.** SQLite, PostgreSQL, and MySQL can sit next to each other as `/api/app/`, `/api/analytics/`, `/api/legacy/`.
+- **Three extension points, not one.** Auth, middleware (`PreRequest` / `PostRequest`), and data (`DBPlugin` / `DBQueryPlugin`) are independent plugin families. A request hits all three.
+- **PostgREST-style context round-trip.** Claims, headers, and `Prefer` values are injected into the SQL session. Triggers and functions can set `response.headers`, `response.status`, and `cache.invalidate`; the plugin harvests them before `COMMIT`.
+- **Two distributions.** `easyrest-server` embeds the common plugins. `easyrest-gateway` is the same HTTP core with no built-ins — every plugin is an external binary.
+- **Cache and rate limiting as middleware.** ETag version tokens, 304/412, and a fixed-window limiter are first-class plugins, not a sidecar.
+
+
+
+## Quickstart
+
+Requires [Go 1.26](https://go.dev/dl/) and Python 3 (the seed script). No Docker, no extra databases.
+
+```bash
+make server
+./create_local.sh
+./bin/easyrest-server --config local_config.yaml
+```
+
+`[create_local.sh](create_local.sh)` writes `local.db` (10,000 users), `[local_config.yaml](local_config.yaml)`, and a JWT in `local_token.txt`.
+
+```bash
+export TOKEN=$(cat local_token.txt)
+
+# List
+curl -s "http://localhost:8080/api/crud/users/?select=id,name,email&ordering=id&limit=5" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Filter
+curl -s "http://localhost:8080/api/crud/users/?where.gt.age=40&where.eq.city=Berlin&limit=3" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Swagger 2.0 schema for this connection (no auth)
+curl -s "http://localhost:8080/api/crud/"
+```
+
+The same file also configures a read-only `QUERY` connection at `/api/query/`. See the curl examples printed by `create_local.sh`.
 
 ## Architecture
 
-EasyREST's design emphasizes simplicity, extensibility, and security. It follows a modular architecture where the core server is responsible for:
 
-- **Authentication & Authorization:** Validates JWT tokens and verifies scopes.
-- **Parameter Validation:** Ensures that all parameters (select, where, ordering, etc.) are safe before forwarding to the plugins.
-- **Plugin Orchestration:** Loads and manages DB and Cache plugins based on YAML configuration.
-- **Context Propagation:** Extracts contextual information (e.g., timezone, HTTP headers, JWT claims) from each request and passes them to plugins.
 
-### Overall Architecture Diagram
+### Where plugins plug in
+
+Auth plugins run once per request, before the handler builds context. Middleware wraps the handler (`PreRequest` after context is built, `PostRequest` immediately before the body is written). Data plugins own SQL. Cache stores are not HTTP plugins; they sit behind the `cache-*` middleware.
 
 ```mermaid
-flowchart TD
-    A[HTTP Request] -->|REST API| B[EasyREST Server]
-    B --> C{Authentication}
-    C -- Authenticated --> D[Process Request]
-    C -- Failed/No Auth --> E[401/403 Response]
-    E --> N[HTTP Response]
-    D -- Validate Scopes & Params --> D_VALID
-    D_VALID -- Valid --> X{Apply Context?}
-    D_VALID -- Invalid --> E2[400/403 Response]
-    E2 --> N
-    X -- Yes --> Y[Replace request.* and erctx.* values]
-    X -- No --> Z[Send as is]
-    Y --> J[Plugin Client RPC Call]
-    Z --> J[Plugin Client RPC Call]
-    J --> K["DB Plugin (e.g., SQLite, Postgres, MySQL, etc)"]
-    K --> F[Build SQL Query]
-    F --> L[Database]
-    L --> M[Return Results to DB Plugin]
-    M --> J2[Return Results to Plugin Client RPC Call]
-    J2 --> B2[Return to EasyREST Server]
-    B2 --> N[HTTP Response]
+flowchart LR
+    Client[HTTP client] --> Router[chi router]
+    Router --> Handlers[Handlers]
 
-    subgraph "Authentication Layer"
-        C
-        subgraph "Auth Plugins (Optional)"
-            P_Auth[Auth Plugin 1 e.g. JWT]
-            P_Auth2[Auth Plugin 2 e.g. OIDC]
-        end
-        C -->|Via Auth Plugins or Internal| P_Auth
-        C -->|Via Auth Plugins or Internal| P_Auth2
-        P_Auth ----> C
-        P_Auth2 ----> C
+    subgraph authLayer [Auth plugins]
+        AuthJWT[jwt]
+        AuthOther["oidc, basic, apikey, awssigv4"]
+    end
+
+    subgraph mwLayer [Middleware plugins]
+        MwPre[PreRequest]
+        MwPost[PostRequest]
+    end
+
+    subgraph dataLayer [Data plugins]
+        DBPlug[DBPlugin]
+        QueryPlug[DBQueryPlugin]
+        CacheStore[cache.Store]
+    end
+
+    Handlers -->|"Authenticate"| authLayer
+    Handlers -->|"PreRequest then PostRequest"| mwLayer
+    Handlers -->|"TableGet / CallFunction / QueryCall"| dataLayer
+    DBPlug --> SQL[(SQL database)]
+    QueryPlug --> SQL
+    CacheStore --> KV[("Redis, SQL, LRU, Memcached")]
+```
+
+
+
+HTTP routes live in `[internal/server/server.go](internal/server/server.go)` (`SetupRouter`). Plugin maps are filled by `[LoadPlugins](internal/server/plugin_lifecycle.go)`.
+
+### Request lifecycle
+
+Order is fixed. The sequence below is the table handler in `[internal/server/table.go](internal/server/table.go)`. RPC and `QUERY` share auth, context, and middleware; schema skips auth.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client
+    participant Server as EasyREST server
+    participant Auth as Auth plugin
+    participant MW as Middleware
+    participant DB as DB plugin
+    participant SQL as Database
+
+    Client->>Server: HTTP request
+    Server->>Server: Sanitize identifier, resolve connection
+    Server->>Auth: Authenticate(headers, method, path, query)
+    Auth-->>Server: claims
+    Server->>Server: CheckScope
+    Server->>Server: BuildPluginContext
+    Server->>MW: PreRequest(dbKey, ctx)
+    alt PreRequest returns an HTTP status
+        Server-->>Client: stop chain, write that status
+    else continue
+        MW-->>Server: updated ctx
+        Server->>Server: Parse select, where, body; substitute context
+        Server->>DB: TableGet / TableCreate / TableUpdate / TableDelete / CallFunction
+        DB->>SQL: Inject session context
+        DB->>SQL: db.pre-request hook
+        DB->>SQL: statement
+        DB->>SQL: db.post-request hook
+        DB->>SQL: Harvest response.* and cache.invalidate
+        SQL-->>DB: rows plus session settings
+        DB-->>Server: rows plus ctx
+        Server->>MW: PostRequest(dbKey, ctx)
+        MW-->>Server: extra headers
+        Server->>Server: Apply response.header.* and response.status
+        Server-->>Client: HTTP response
     end
 ```
 
-### Plugin Communication and Loading
 
-- **RPC Communication:** EasyREST uses Hashicorp's [go-plugin](https://github.com/hashicorp/go-plugin) system to load and communicate with plugins. The server launches plugin processes based on the configuration file and establishes an RPC connection.
-- **Plugin Loading:**
-  - **`easyrest-gateway`**: This binary does not bundle any plugins. It discovers and launches plugin executables (e.g., `easyrest-plugin-sqlite`, `easyrest-plugin-mysql`, `easyrest-auth-jwt`) based on the URI scheme (for DB/Cache) or plugin name (for Auth), and the `path` setting, or by searching standard system locations.
-  - **`easyrest-server`**: This binary comes with built-in support for SQLite, MySQL, PostgreSQL (DB plugins), and Redis, LRU (Cache plugins). If a configured DB/Cache plugin matches one of these built-in types, it's used directly. For other plugin types or if an explicit `path` is provided, it behaves like `easyrest-gateway` and attempts to load an external plugin executable. Auth plugins are typically loaded externally by `easyrest-server` as well.
-  - **`easyrest-plugin-*`**: These are standalone executables, each providing a specific DB or Cache implementation (e.g., `easyrest-plugin-mysql`).
-  - **`easyrest-auth-*`**: These are standalone executables, each providing a specific Authentication implementation (e.g., `easyrest-auth-jwt`).
-- **Plugin interfaces:** A single plugin binary may expose one or more of:
-  - `"db"` — `DBPlugin` (CRUD and schema)
-  - `"cache"` — `CachePlugin` (ETag cache storage)
-  - `"query"` — `DBQueryPlugin` (read-only raw SQL via the HTTP `QUERY` method)
-- **Data Exchange:** The server sends validated and sanitized SQL expressions (for DB plugins), commands (for Cache plugins), or authentication-related data (for Auth plugins) and additional context data to the plugin. Context variables are directly substituted into the query or made available to the plugin.
-- **Type Registration:** For secure and reliable encoding/decoding over RPC, custom types (e.g., `time.Time` and flattened JWT claims) are registered with the gob package on both the server and plugin sides.
 
-### Authentication and Authorization
+`PreRequest` that returns a non-nil status writes immediately and **does not** call the handler or `PostRequest`. `PostRequest` cannot change the body; it can only add headers. `response.status` in the context overrides the handler status after `PostRequest` returns.
 
-- **Pluggable Authentication:** Authentication can be handled by one or more configured `AuthPlugin` instances. Each `AuthPlugin` is responsible for validating credentials (e.g., a token from the `Authorization` header) and returning claims.
-- **Swagger Security Definitions:** `AuthPlugin` instances also provide Swagger 2.0 Security Definition Objects during their initialization. These are merged into the main API's Swagger schema, allowing API clients to understand the authentication methods.
-- **JWT Authentication (Legacy/Fallback):** If no `AuthPlugin` is configured or if they don't handle a request, the server can fall back to its legacy JWT verification (using `token_secret` from configuration) and extracts claims.
-- **Scope-based Authorization:** The service verifies that the claims (from an AuthPlugin or legacy JWT) include the required scope (e.g., `users-read` for GET operations, `users-write` for modifications or wide `read` and `write` for all table names). This is controlled by the `check_scope` setting.
-- **Token Claims:** The claims are flattened and passed to DB/Cache plugins (under the key `claims` in the context map) so that plugins can leverage user-specific information if needed.
+### How plugins are loaded
 
----
+`easyrest-server` tries an in-process factory first (the "preserved" map registered in `[cmd/server/main.go](cmd/server/main.go)`). `easyrest-gateway` has an empty preserved map, so every plugin is an executable.
 
-## EasyREST Distributions
-
-EasyREST is available in different binary forms to suit various deployment needs:
-
-### `easyrest-gateway`
-
-- A lean, minimal server binary that **contains no built-in plugins**.
-- It relies entirely on external `easyrest-plugin-*` (for DB/Cache) and `easyrest-auth-*` (for authentication) executables.
-- For each plugin defined in the configuration, `easyrest-gateway` will search for the corresponding plugin binary (e.g., `easyrest-plugin-mysql` for a `mysql://` URI, or `easyrest-auth-jwt` for an auth plugin named `jwt`) in standard system `PATH` directories or at the explicit `path` specified in the plugin's configuration.
-- Ideal for environments where you want to manage plugin binaries separately or use custom-built plugins.
-
-### `easyrest-server`
-
-- A comprehensive server binary that **includes built-in support for common DB and Cache plugins**:
-  - **Database Plugins:** MySQL, SQLite, PostgreSQL.
-  - **Cache Plugins:** Redis, LRU (in-memory).
-- If a DB/Cache plugin configured in `plugins` matches one of these built-in types (e.g., `uri: "sqlite://..."`), the embedded plugin is used by default.
-- For DB/Cache plugin types not among the built-ins, or if an explicit `path` is provided in its configuration, `easyrest-server` will attempt to load it as an external plugin executable, similar to `easyrest-gateway`.
-- **Authentication plugins (`AuthPlugin`) are typically loaded as external `easyrest-auth-*` executables by `easyrest-server`**.
-- Suitable for most common use cases, providing out-of-the-box support for popular databases and caches, with flexible external authentication.
-
-### `easyrest-plugin-*`
-
-- These are individual, standalone plugin executables (e.g., `easyrest-plugin-mysql`, `easyrest-plugin-postgres`, `easyrest-plugin-redis`).
-- They implement the `DBPlugin` or `CachePlugin` interface.
-- They are used by `easyrest-gateway` for all DB/Cache plugin needs and by `easyrest-server` for DB/Cache plugins not built into it or when an external version is preferred.
-- You can build these plugins from their respective source code or use pre-compiled versions if available.
-
-### `easyrest-auth-*`
-
-- These are individual, standalone plugin executables (e.g., `easyrest-auth-jwt`, `easyrest-auth-oidc`).
-- They implement the `AuthPlugin` interface.
-- They are used by both `easyrest-gateway` and `easyrest-server` to provide authentication mechanisms.
-- The server loads these based on the `auth_plugins` section in the configuration.
-- You build these plugins from their source code.
-
----
-
-## Query Capabilities
-
-EasyREST supports a wide range of SQL query features by converting URL query parameters into SQL expressions after performing strict validation.
-
-### Selecting Fields and Aliasing
-
-- **Basic Selection:**
-  Use the `select` parameter to specify one or more columns. For example:
-  ```
-  /api/test/users/?select=id,name
-  ```
-- **Field Aliasing:**
-  To alias a column, use the syntax `alias:field`.
-  For example,
-  ```
-  /api/test/users/?select=username:name
-  ```
-  becomes
-  ```sql
-  SELECT name AS username FROM users
-  ```
-- **SQL Functions:**
-  Aggregation functions are supported. For instance,
-  ```
-  /api/test/users/?select=count()
-  ```
-  results in:
-  ```sql
-  SELECT COUNT(*) AS count FROM users
-  ```
-  You can also use functions with aliasing:
-  ```
-  /api/test/orders/?select=total:amount.sum(),order_date
-  ```
-  which translates to:
-  ```sql
-  SELECT SUM(amount) AS total, order_date FROM orders GROUP BY order_date
-  ```
-
-### Aggregating Queries
-
-- EasyREST supports common SQL aggregate functions such as `COUNT()`, `SUM()`, `AVG()`, `MIN()`, and `MAX()`.
-- Aggregated fields are automatically excluded from the GROUP BY clause.
-- Non-aggregated fields that appear in the `select` parameter are added to a GROUP BY clause automatically.
-
-### WHERE Conditions
-
-- **Syntax:**
-  Conditions are specified using parameters prefixed with `where.`. For example:
-  ```
-  /api/test/users/?where.eq.name=Alice
-  ```
-  This generates:
-  ```sql
-  WHERE name = 'Alice'
-  ```
-- **Operators:**  
-  Supported operators include:
-  - `eq` (equals)
-  - `neq` (not equals)
-  - `lt` (less than)
-  - `lte` (less than or equals)
-  - `gt` (greater than)
-  - `gte` (greater than or equals)
-  - `like` (LIKE)
-  - `ilike` (ILIKE)
-  - `is` (IS)
-  - `in` (IN)
-
-### Context Variables
-
-EasyREST provides two ways to access context variables in queries:
-
-1. **`erctx` Format:** Uses underscore notation: `erctx.claims_sub`
-2. **`request` Format:** Uses JSON path notation: `request.claims.sub`
-
-Available context variables: `timezone`, `headers`, `claims`, `method`, `path`, `query`, `prefer`.
-The `Prefer` header can pass plugin-specific context or influence server behavior (e.g., `Prefer: timezone=UTC tx=rollback`). Standard keys `timezone` and `tx` are recognized. Plugins can access other `Prefer` key-value pairs via `ctx["prefer"]`.
-
-Database plugins handle these context variables differently:
-
-- **MySQL Plugin:** Sets session variables (e.g., `@erctx_claims_sub`, `@request_claims_sub`) for the current connection.
-- **PostgreSQL Plugin:** Uses `set_config()` to set session-local configuration parameters (e.g., `current_setting(\'erctx.claims_sub\', true)`).
-
-### Data Insertion, Updates, and Deletion
-
-- **Insertion (POST):** JSON body. Context variables can be used in values.
-- **Update (PATCH):** JSON body and optional `where` conditions. Context variables can be used in data and conditions.
-- **Deletion (DELETE):** Based on `where` parameters. Context variables can be used in conditions.
-
-### Raw SQL Queries (QUERY method)
-
-EasyREST supports the HTTP **`QUERY`** method for sending a raw SQL query in the request body and receiving tabular results. This is useful when a query is too large for URL query parameters.
-
-- **Endpoint:** `QUERY /api/{connection}/`
-- **Body:** The SQL query text (plain text).
-- **Response:** JSON array of row objects (`[]map[string]any`), formatted via the same `Accept` / `format` handling as table GET responses.
-- **Authentication:** Required (unless anonymous claims are configured).
-- **Scope:** Requires the `read` scope (or a scope ending in `-read`).
-- **Plugin type:** Requires a configured **`DBQueryPlugin`** for the connection. Query plugins open read-only database connections and reject write operations.
-
-Example:
-
-```http
-QUERY /api/reports/
-Authorization: Bearer <token>
-Content-Type: text/plain
-
-SELECT id, name FROM users WHERE status = 'active' ORDER BY name LIMIT 100
+```mermaid
+flowchart TD
+    Start[LoadPlugins] --> Kind{Plugin family}
+    Kind -->|data| DataKey["URI scheme, e.g. sqlite"]
+    Kind -->|auth| AuthKey["config key, e.g. jwt"]
+    Kind -->|middleware| MwKey["config key, e.g. ratelimit"]
+    DataKey --> PathSet{path set in YAML?}
+    AuthKey --> PathSet
+    MwKey --> PathSet
+    PathSet -->|yes| External[Start subprocess]
+    PathSet -->|no| Preserved{Preserved factory?}
+    Preserved -->|yes, server only| InProcess[Construct in-process]
+    Preserved -->|no| Search[Search PATH, cwd, executable dir]
+    Search --> OsArch["Also try name-GOOS-GOARCH"]
+    OsArch --> External
+    External --> Handshake[go-plugin handshake]
+    Handshake --> Dispense["Dispense db, query, auth, or middleware"]
+    Dispense --> InitCall["InitConnection or Init"]
+    InProcess --> InitCall
+    InitCall --> PluginMap[Atomic plugin map]
 ```
 
-The server adds a `Server-Timing: db;dur=...` header with query execution time.
 
----
 
-## Supported Databases and Caches
+Search and handshake: `[internal/server/plugin_load.go](internal/server/plugin_load.go)`. Default executable names:
 
-EasyREST can connect to various data stores through its plugin system.
 
-### SQLite
+| Family     | Config source            | Binary name                 |
+| ---------- | ------------------------ | --------------------------- |
+| Data       | URI scheme               | `easyrest-plugin-<scheme>`  |
+| Auth       | `auth_plugins` key       | `easyrest-auth-<key>`       |
+| Middleware | `middleware_plugins` key | `easyrest-middleware-<key>` |
 
-- **Plugin Type:** `sqlite` (e.g., `uri: "sqlite://./test.db"`)
-- Built-in with `easyrest-server`. Can be used as `easyrest-plugin-sqlite` with `easyrest-gateway`.
-- A simple, file-based relational database. Good for development, testing, or small applications.
-- Schema is introspected from the database file.
-- **Query plugin:** The SQLite query plugin (`DBQueryPlugin`) opens connections in read-only mode (`mode=ro` in the driver DSN) and enables `PRAGMA query_only`. Write queries are rejected. For best results, use a database file that is not exclusively locked by a WAL-mode writer connection.
 
-Set `use_query: true` on the connection to use the Query plugin instead of the DB plugin (see [Plugin Attributes](#plugin-attributes)).
+A non-empty `path` always forces the subprocess path, even when a preserved factory exists. RPC service keys are `"db"`, `"query"`, `"auth"`, and `"middleware"`.
 
-### MySQL
+### Context round-trip
 
-- **Plugin Type:** `mysql` (e.g., `uri: "mysql://user:pass@host:port/dbname"`)
-- Built-in with `easyrest-server`. Can be used as `easyrest-plugin-mysql` with `easyrest-gateway`.
+This is the distinctive part of EasyREST. The server builds a `map[string]any`, middleware may add hook names or headers, the server substitutes `erctx.*` / `request.*` into SQL fragments, and SQL plugins push that map into the session so triggers can write response metadata back.
 
-#### MySQL Key Features
-
-- **Context Injection:** Injects `erctx.` and `request.` context variables as MySQL session variables (e.g., `@erctx_claims_sub`).
-- **Stored Procedure Calls:** Executes stored procedures within a transaction.
-- **Connection Pooling:** Uses a MySQL connection pool for performance.
-- **UTF8MB4 Support:** Operates with `utf8mb4` and `utf8mb4_general_ci`.
-- **Query plugin:** With `use_query: true`, the MySQL query plugin (`DBQueryPlugin`) runs each `QUERY` request inside `START TRANSACTION READ ONLY`; write statements fail with a database error.
-
-#### MySQL Performance and Connection Parameters
-
-These parameters can be appended to the MySQL URI query string (e.g., `?maxOpenConns=50&parseTime=true`):
-
-- `maxOpenConns`: Max open connections (default: 100).
-- `maxIdleConns`: Max idle connections (default: 20).
-- `connMaxLifetime`: Connection reuse time in minutes (default: 5).
-- `connMaxIdleTime`: Connection idle time in minutes (default: 10).
-- `timeout`: Query timeout in seconds (default: 30).
-- `parseTime`: Parse MySQL TIME/TIMESTAMP/DATETIME as `time.Time` (recommended: `true`).
-
-Example URI: `mysql://root:root@localhost:3307/easyrestdb?maxOpenConns=100&maxIdleConns=20&connMaxLifetime=5&connMaxIdleTime=10&timeout=30&parseTime=true`
-
-#### MySQL Context Handling
-
-The plugin sets session variables before executing SQL. For a context variable like `claims.sub` (value `user123`), it would be:
-
-```sql
-SET @erctx_claims_sub = \'user123\', @request_claims_sub = \'user123\';
+```mermaid
+flowchart TD
+    Req[HTTP request] --> Build[BuildPluginContext]
+    Build --> Ctx["claims, headers, prefer, timezone, db.type, table, cookies, client_ip"]
+    Ctx --> Pre[Middleware PreRequest]
+    Pre --> Subst["Substitute erctx.* and request.* in select, where, body"]
+    Subst --> Inject{Session injection}
+    Inject -->|Postgres| Pg["set_config request.* and erctx.*"]
+    Inject -->|MySQL| My["SET @request_* and @erctx_*"]
+    Inject -->|SQLite| Sq["No session variables"]
+    Pg --> SQL["SQL, triggers, functions"]
+    My --> SQL
+    Sq --> SQL
+    SQL --> Harvest{Harvest before COMMIT}
+    Harvest -->|Postgres and MySQL| Back["Merge response.* and cache.invalidate into ctx"]
+    Harvest -->|SQLite and QUERY| Skip[ctx unchanged]
+    Back --> Post[PostRequest reads handler.status]
+    Skip --> Post
+    Post --> Apply[Apply headers and response.status]
+    Apply --> Resp[HTTP response]
 ```
 
-These can be used in triggers, stored procedures, or queries:
 
-```sql
--- In a trigger or stored procedure
-IF OLD.created_by != @request_claims_sub AND @request_claims_role != \'admin\' THEN ...
+
+`erctx.claims_sub` is the flattened form (dots and dashes become underscores). `request.claims.sub` walks the nested map. Flattening drops values that contain `;` or `--`.
+
+Postgres and MySQL harvest `response.header.*`, `response.headers` (PostgREST JSON array), `response.status`, and `cache.invalidate`. SQLite does not. `QUERY` never returns context, so it cannot harvest either. Example SQL: `[schemas/postgres.sql](schemas/postgres.sql)`, `[schemas/mysql.sql](schemas/mysql.sql)`.
+
+## API
+
+
+| Method                        | Path                    | Plugin                                      | Auth                                   |
+| ----------------------------- | ----------------------- | ------------------------------------------- | -------------------------------------- |
+| `GET`                         | `/api/{db}/`            | `DBPlugin.GetSchema`                        | none                                   |
+| `QUERY`                       | `/api/{db}/`            | `DBQueryPlugin.QueryCall`                   | yes, scope `read`                      |
+| `POST`                        | `/api/{db}/rpc/{func}/` | `DBPlugin.CallFunction`                     | yes, scope `{func}-write`              |
+| `GET` `POST` `PATCH` `DELETE` | `/api/{db}/{table}/`    | `TableGet` / `Create` / `Update` / `Delete` | yes, `{table}-read` or `{table}-write` |
+| `GET`                         | `/health`               | —                                           | none                                   |
+
+
+`{db}` is the key under `plugins:` (lowercased). A connection with `use_query: true` only serves `QUERY`; table CRUD and schema are unavailable for that name.
+
+`QUERY` is experimental. Give it a dedicated connection and a database user that can only `SELECT`. The plugin opens a read-only transaction, but the body is still raw SQL.
+
+Schema responses are cached per connection. A cache hit returns immediately and skips middleware.
+
+### Select, aliases, aggregates
+
+```
+GET /api/app/users/?select=id,name
+GET /api/app/users/?select=username:name
+GET /api/app/orders/?select=total:amount.sum(),order_date
+GET /api/app/users/?select=count()
 ```
 
-```sql
--- In a query via API
-/api/mydb/products/?where.eq.created_by=erctx.claims_sub
+Allowed functions: `count`, `sum`, `avg`, `min`, `max`. Non-aggregated select fields become `GROUP BY`. Identifiers must match `[A-Za-z_][A-Za-z0-9_]*`.
+
+### Filters and ordering
+
+`where.<op>.<field>=value`, optional `not`:
+
+
+| Operator                         | SQL                        |
+| -------------------------------- | -------------------------- |
+| `eq` `neq` `lt` `lte` `gt` `gte` | `=` `!=` `<` `<=` `>` `>=` |
+| `like` `ilike` `is` `in`         | `LIKE` `ILIKE` `IS` `IN`   |
+
+
+```
+GET /api/app/users/?where.eq.city=Berlin
+GET /api/app/users/?where.gt.age=40
+GET /api/app/users/?where.not.eq.name=Alice
+GET /api/app/users/?where.in.id=1,2,3
+GET /api/app/users/?where.eq.name=request.claims.sub
 ```
 
-#### MySQL Schema and Stored Procedures
+`ordering` is a comma-separated list of **plain identifiers**. There is no `ASC`/`DESC` token; direction is not part of the query language.
 
-- The plugin introspects table and view schemas.
-- An example schema, including tables and a stored function (`doSomething`), is available in `schemas/mysql.sql`. This file demonstrates table creation and how to define functions that can be called via the RPC endpoint. It also shows how to use session variables (set from context) in triggers (`before_product_update`) and functions (`getMyProducts`).
-- **Note on Functions vs. Views for Row-Level Security:** MySQL does not allow session variables directly in `CREATE VIEW`. Use stored functions for dynamic, user-context-aware data filtering, as they *can* access session variables.
+### Pagination
 
-#### MySQL Setup using Docker
+Default page size is `default_limit` (100 unless overridden per connection).
 
-To run MySQL in Docker for development (e.g., on port 3307):
+- Query: `limit` and `offset`.
+- Headers: `Range-Unit: items` plus `Range: 0-9` (inclusive). This wins over query parameters.
 
-```bash
-docker run --name mysql-easyrest -p 3307:3306 \
-  -e MYSQL_ROOT_PASSWORD=root \
-  -e MYSQL_DATABASE=easyrestdb \
-  -d mysql:8
+Responses include `Content-Range`, `Range-Unit: items`, and `Accept-Ranges: items`. An unsatisfiable range is **416** with an empty JSON array.
+
+### Formats
+
+JSON is the default. Choose CSV, XML, or form encoding with `Accept` or `?format=json|xml|csv`. Request bodies accept the same `Content-Type` set. `Server-Timing: db;dur=...` reports plugin time.
+
+### Prefer
+
+`Prefer: timezone=UTC tx=rollback`
+
+- `timezone` — used when formatting timestamps and stored on the context.
+- `tx` — `commit` or `rollback`, honored only when the connection's `db_tx_end` ends in `-allow-override`.
+
+The applied values are echoed in `Preference-Applied`. Other `Prefer` tokens are passed through as `ctx["prefer"]`.
+
+YAML `db_tx_end` defaults to `commit` (env-defined `ER_DB_*` connections default to `commit-allow-override`). Valid values: `commit`, `commit-allow-override`, `rollback`, `rollback-allow-override`.
+
+### Auth and scopes
+
+Plugins are tried in a fixed order: `jwt`, `basic`, `apikey`, `oidc`, `awssigv4`, then any other names alphabetically. The first success wins. Claims are cached when `token_cache_ttl` is positive (keyed on the `Authorization` header).
+
+If every plugin fails and `anon_claims` is set, the request continues with those claims and an empty user id. Without `anon_claims`, the response is 401.
+
+`check_scope` (default on) requires a `scope` claim. A claim of `read` or `write` satisfies any required scope that ends with that word (`users-read`, `orders-write`). Per-table `public` lists skip the scope check — they do **not** skip `Authenticate`. Unauthenticated public access still needs `anon_claims`.
+
+`exclude` hides objects from the API. `allow` is an allow-list: when non-empty, only those tables or functions exist.
+
+## Plugin model
+
+Contracts live in `[plugin/plugin.go](plugin/plugin.go)`. A binary may register any subset of the four RPC keys.
+
+```go
+type DBPlugin interface {
+    InitConnection(uri string) error
+    TableGet(userID, table string, selectFields []string, where map[string]any,
+        ordering, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, map[string]any, error)
+    TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, map[string]any, error)
+    TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, map[string]any, error)
+    TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, map[string]any, error)
+    CallFunction(userID, funcName string, data map[string]any, ctx map[string]any) (any, map[string]any, error)
+    GetSchema(ctx map[string]any) (any, map[string]any, error)
+}
+
+type DBQueryPlugin interface {
+    InitConnection(uri string) error
+    QueryCall(query string, ctx map[string]any) ([]map[string]any, error)
+}
+
+type AuthPlugin interface {
+    Init(settings map[string]any) (map[string]any, error) // Swagger 2.0 security definition
+    Authenticate(headers map[string]string, method, path, query string) (map[string]any, error)
+}
+
+type MiddlewarePlugin interface {
+    Init(settings map[string]any) error
+    PreRequest(dbKey string, ctx map[string]any) (map[string]any, *int, error)
+    PostRequest(dbKey string, ctx map[string]any) (map[string]string, error)
+}
 ```
 
-Apply your schema (e.g., contents of `schemas/mysql.sql`):
+A nil returned context map means "keep the caller's map". A non-nil map replaces it.
 
-```bash
-docker exec -i mysql-easyrest mysql -uroot -proot easyrestdb < schemas/mysql.sql
-```
-
-### PostgreSQL
-
-- **Plugin Type:** `postgres` (e.g., `uri: "postgres://user:pass@host:port/dbname"`)
-- Built-in with `easyrest-server`. Can be used as `easyrest-plugin-postgres` with `easyrest-gateway`.
-
-#### PostgreSQL Key Features
-
-- **Context Injection:** Uses `set_config()` to make `erctx.` and `request.` context variables available via `current_setting()`.
-- **Function Calls:** Executes PostgreSQL functions within a transaction.
-- **Connection Pooling:** Efficient connection management.
-- **COPY Support:** Uses `COPY FROM` for bulk inserts (threshold configurable).
-- **Query plugin:** With `use_query: true`, the PostgreSQL query plugin (`DBQueryPlugin`) runs each `QUERY` request in a read-only transaction (`SET TRANSACTION READ ONLY`); write statements fail with a database error.
-
-#### PostgreSQL Performance and Connection Parameters
-
-Append to the PostgreSQL URI query string (e.g., `?maxOpenConns=50&sslmode=disable`):
-
-- `maxOpenConns`: Max open connections (default by pgx driver, typically ~100). `maxConns` is an alias used by the plugin.
-- `minConns`: Minimum connections in pool (default by pgx driver). `maxIdleConns` is an alias.
-- `connMaxLifetime`: Connection lifetime (e.g., `5m`).
-- `connMaxIdleTime`: Connection idle time (e.g., `10m`).
-- `timeout`: Query timeout (e.g., `30s`).
-- `bulkThreshold`: Row count to trigger `COPY` for inserts (default: 100).
-- `autoCleanup`: For the cache feature if pg is used as cache; enables periodic cleanup of expired items (`true` or `1`).
-- Standard PostgreSQL parameters like `sslmode`, `search_path` are also supported.
-
-Example URI: `postgres://user:pass@host:5433/dbname?sslmode=disable&maxConns=100&minConns=25&connMaxLifetime=5m&timeout=30s&bulkThreshold=100`
-
-#### PostgreSQL Context Handling
-
-The plugin uses `SELECT set_config('request.claims_sub', 'user123', true);` for context variables.
-Access them in SQL:
-
-```sql
--- In a function or query
-WHERE created_by = current_setting(\'request.claims_sub\', TRUE);
-```
-
-```sql
--- In a query via API
-/api/pgdb/products/?where.eq.created_by=request.claims.sub
-```
-
-#### PostgreSQL Schema and Functions
-
-- The plugin introspects schemas for tables, views, and functions/procedures from `information_schema` and `pg_catalog`.
-- It determines column types, nullability, defaults, function parameters, and return types to build the API schema.
-- The logic for schema discovery is implemented in the plugin itself (see `GetSchema` and related functions in `plugins/postgres/postgres.go`). It maps PostgreSQL types (e.g., `INTEGER`, `VARCHAR`, `TIMESTAMP`) to JSON schema types (`integer`, `string`).
-- Example SQL for defining tables, functions (like `doSomething`, `getMyProducts`), and triggers (like `before_product_update`) that can leverage context variables via `current_setting()` can be found by inspecting the test schemas used with the plugin or adapting generic PostgreSQL examples.
-
-#### PostgreSQL Setup using Docker
-
-To run PostgreSQL in Docker (e.g., on port 5433):
-
-```bash
-docker run --name pg-easyrest -p 5433:5432 \
-  -e POSTGRES_PASSWORD=root \
-  -e POSTGRES_DB=easyrestdb \
-  -d postgres:15
-```
-
-Apply your schema:
-
-```bash
-docker exec -i pg-easyrest psql -U postgres -d easyrestdb < your_schema.sql
-```
-
-### Redis (Cache)
-
-- **Plugin Type:** `redis` (e.g., `uri: "redis://host:port/0"`)
-- Built-in with `easyrest-server` (as a cache plugin). Can be used as `easyrest-plugin-redis` with `easyrest-gateway`.
-
-#### Redis Key Features
-
-- **Cache Operations:** Supports `SET` (with TTL) and `GET`.
-- **Connection Pooling:** Uses `go-redis/redis` library's pooling.
-- **Flexible Configuration:** Via Redis URI.
-
-#### Redis Configuration Parameters
-
-The URI can include standard Redis parameters and `go-redis` specific options:
-
-- Scheme: `redis://` or `rediss://` (for TLS)
-- User/Password: `user:password@`
-- Host and Port: `host:port`
-- Database Number: `/db_number`
-- Query Parameters: `protocol`, `client_name`, `max_retries`, `min_retry_backoff`, `max_retry_backoff`, `dial_timeout`, `read_timeout`, `write_timeout`, `pool_fifo`, `pool_size`, `pool_timeout`, `min_idle_conns`, `max_idle_conns`, `conn_max_idle_time`, `conn_max_lifetime`, `skip_verify` (for TLS).
-
-Example URI: `redis://user:password@myredishost:6379/1?dialTimeout=5s&readTimeout=2s&poolSize=100&minIdleConns=10`
-
-#### Redis Setup using Docker
-
-To run Redis in Docker:
-
-```bash
-docker run --name redis-easyrest -p 6379:6379 -d valkey/valkey:8
-```
-
-### LRU (Cache)
-
-- **Plugin Type:** `lru` (e.g., `uri: "lru://?size=1000&ttl=5m"`)
-- Built-in with `easyrest-server` (as a cache plugin).
-- A simple in-memory Least Recently Used (LRU) cache.
-- **Configuration via URI query parameters:**
-  - `size`: Maximum number of items in the cache (default: 1000).
-  - `ttl`: Default time-to-live for cache entries (e.g., `5m`, `1h`, default: 0 - no TTL).
-
----
-
-## Configuration Parameters
-
-EasyREST is configured via a YAML file or environment variables.
-Command-line: `./easyrest-server -config /path/to/custom-config.yaml`
-Environment: `ER_CONFIG_FILE`
-
-### Main Configuration
-
-```yaml
-# Server settings
-port: 8080 # Default: 8080
-default_timezone: "GMT" # Default: "GMT" or system timezone
-access_log: false # Enable access logging (default: false)
-
-# Authentication & Authorization
-check_scope: true # Enable JWT scope checking (default: true)
-token_user_search: "sub" # JWT claim for user ID (default: "sub")
-
-# CORS settings (optional)
-cors:
-  enabled: true # Enable CORS headers (default: false)
-  origins: ["*"] # List of allowed origins
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"] # Allowed HTTP methods
-  headers: ["Content-Type", "Authorization", "X-Requested-With"] # Allowed headers
-  max_age: 86400 # Cache duration for preflight requests
-
-# TLS settings (optional)
-tls_enabled: false
-tls_cert_file: "/path/to/cert.pem"
-tls_key_file: "/path/to/key.pem"
-
-# Plugin settings
-plugin_log: true # Enable logging from plugins (default: false). Set to false to disable.
-
-# --- Plugin Definitions (DB & Cache) ---
-
-# Option 1: Include external YAML files containing DB/Cache plugin definitions
-plugin_configs:
-  - ./plugins/database1.yaml
-  - /etc/easyrest/shared_plugins.yaml
-
-# Option 2: Define DB/Cache plugins directly in the main config file
-plugins:
-  # The key ('test', 'orders', 'inventory') becomes the API path segment (/api/test/, /api/orders/, /api/inventory)
-  test:
-    # URI format: <plugin_type>://<connection_details>
-    # The plugin_type (e.g., 'sqlite') determines the executable name (easyrest-plugin-sqlite)
-    uri: "sqlite://./test.db"
-    path: "" # Optional: Explicit path to plugin binary. If empty, server searches.
-    title: "Main Test Database API" # Optional: Custom title for this API in Swagger
-    enable_cache: true # Enable ETag caching for this connection
-    cache_name: "redis_cache" # Specify which cache plugin to use for ETags for this DB plugin
-    db_tx_end: commit-allow-override # Explicitly set default behavior
-    # Define tables/functions accessible without authentication
-    public:
-      table:
-        - public_info
-      func:
-        - get_server_status
-    # Define tables/functions to hide completely from the API schema
-    exclude:
-      table:
-        - internal_metadata
-        - migration_history
-      func:
-        - internal_cleanup_job
-    cache_invalidation_map:
-      process_order:
-        - orders
-        - order_items
-  orders:
-    uri: "sqlite:///data/orders.db"
-    enable_cache: true
-    cache_name: "redis_cache"
-    cache_invalidation_map:
-      process_order:
-        - orders
-        - order_items
-  inventory:
-    uri: "sqlite:///data/inventory.db"
-
-  # Example for a postgres plugin:
-  postgres_db:
-    uri: "postgres://user:password@host:port/database?sslmode=disable"
-    enable_cache: true
-    cache_name: "redis_cache" # Assuming a redis cache plugin named "redis_cache" is defined
-  # Example for an external Redis Cache Plugin
-  redis_cache:
-    uri: "redis://localhost:6379/0"
-    # path: "/opt/plugins/easyrest-plugin-redis" # Optional if in PATH
-
-# --- Authentication Plugin Definitions ---
-auth_plugins:
-  # The key (e.g., 'jwt_main', 'oidc_provider') is an identifier for the auth plugin instance.
-  # It's also used to find the plugin binary if 'path' is not specified (e.g., 'easyrest-auth-jwt_main').
-  jwt:
-    path: "" # Optional: Explicit path to the 'easyrest-auth-jwt' binary.
-             # If empty, server searches for 'easyrest-auth-jwt' in standard locations.
-    settings: # This map[string]any is passed directly to the AuthPlugin's Init method.
-      jwt_secret: "a-very-secure-secret-for-jwt"
-      token_type: "Bearer"
-      # other JWT specific settings like userinfo_endpoint etc.
-  
-  # Example for another auth plugin, perhaps OpenID Connect
-  # oidc:
-  #   path: "/opt/custom_plugins/easyrest-auth-myoidc" # Path to a custom OIDC auth plugin
-  #   settings:
-  #     discovery_url: "https://example.com/.well-known/openid-configuration"
-  #     client_id: "my-client-id"
-  #     scopes_supported: ["openid", "profile", "email"]
+### Built-in vs external
 
 
-# --- Example External Plugin File (e.g., ./plugins/database1.yaml) --- Structure for DB/Cache plugins:
-# - name: plugin_name # Name used in API path
-#   uri: "plugin_type://connection_string"
-#   path: "/path/to/plugin/binary" # Optional: Explicit path to plugin binary
-#   title: "Custom API Title" # Optional: Override the default API title in Swagger
-#   enable_cache: true # Optional: Enable ETag caching (default: false)
-#   cache_name: "specific_cache_plugin_name" # Optional
-#   public: # Optional: Define tables/functions accessible without JWT authentication
-#     table:
-#       - public_table1
-#       - public_table2
-#     func:
-#       - public_rpc1
-#   exclude: # Optional: Define tables/functions to hide from the API schema
-#     table:
-#       - hidden_table1
-#     func:
-#       - hidden_rpc1
-#   cache_invalidation_map: # Optional: Map RPC function names to tables whose ETags should be invalidated
-#     rpc_function_name:
-#       - table1_to_invalidate
-#       - table2_to_invalidate
-#   db_tx_end: "commit" # Optional
-```
+|            | `easyrest-server`                                                         | `easyrest-gateway`               |
+| ---------- | ------------------------------------------------------------------------- | -------------------------------- |
+| Data       | sqlite, postgres, mysql (DB + Query)                                      | external `easyrest-plugin-*`     |
+| Auth       | jwt, oidc, basic, apikey, awssigv4                                        | external `easyrest-auth-*`       |
+| Middleware | ratelimit, dbqueryhook, cache-{redis,postgres,mysql,sqlite,memcached,lru} | external `easyrest-middleware-*` |
 
-**Key Configuration Sections:**
 
-- **Server Settings**: Basic server parameters like `port`, `default_timezone`.
-- **Authentication & Authorization**: JWT settings (`token_secret` is mandatory), scope checking.
-- **CORS**: Cross-Origin Resource Sharing settings.
-- **TLS**: Enable HTTPS by providing certificate and key files.
-- **Plugin Settings**:
-  - `plugin_log`: Controls whether plugin logs are captured by the server.
-  - `plugin_configs`: A list of paths to external YAML files. Each file can define one or more plugins using the structure shown in the example.
-  - `plugins`: A map for defining plugins directly. The map key (e.g., `test`) is used as the database identifier in API requests (`/api/test/`).
-  - **Plugin Definition Attributes**:
-    - `name`: (Required in external files, derived from map key in inline definitions) The identifier used in the API path (`/api/<name>/`).
-    - `uri`: (Required) Specifies the plugin type and connection details. The type (e.g., `sqlite`) maps to the executable name (`easyrest-plugin-sqlite`).
-    - `path`: (Optional) Explicit path to the plugin executable. If omitted, EasyREST searches standard locations.
-    - `title`: (Optional) A custom title for this specific plugin's API documentation (Swagger schema). If omitted, the default title "EasyRest API" is used.
-    - `enable_cache`: (Optional, defaults to `false`) If `true`, enables ETag generation and checking (`If-Match`, `If-None-Match`) for **requests to this DB plugin's tables**. Requires at least one Cache plugin to be configured and loaded. This setting itself **does not affect** Cache plugins directly but enables the caching mechanism for operations related to this specific DB plugin.
-    - `use_query`: (Optional, defaults to `false`) If `true`, the connection is served by a read-only **Query plugin** (`DBQueryPlugin`) via the HTTP `QUERY` method instead of the regular CRUD **DB plugin**. When enabled, table CRUD endpoints (`GET`/`POST`/`PATCH`/`DELETE` on `/api/<name>/{table}/`) and schema introspection are unavailable for this connection; only `QUERY /api/<name>/` is supported. DB and Query plugins are mutually exclusive per connection.
-    - `cache_name`: (Optional) Specifies the name (key from `plugins` map or `name` from an external file) of the **Cache plugin** that should be used for ETag caching for **this DB plugin**. If omitted, EasyREST first looks for a Cache plugin with the same name as this DB plugin (e.g., if the DB plugin name is `test`, it looks for Cache plugin `test`). If not found, it falls back to the first available Cache plugin. This setting allows flexible linking between DB and Cache plugins.
-    - `cache_invalidation_map`: (Optional) A map where keys are RPC function names (used via `/api/<name>/rpc/<function_name>`) and values are lists of table names. When a listed RPC function is successfully executed for **this DB plugin** (`<name>`), the ETags for the specified tables associated with **this same DB plugin** are invalidated in the **corresponding Cache plugin**. This is useful if an RPC call modifies data in related tables.
-    - `db_tx_end`: (Optional, defaults to `commit-allow-override`) Defines the default transaction handling behavior for write operations (POST, PATCH, DELETE) and RPC calls handled by this DB plugin, and whether the `Prefer: tx=` header can override it.
-            - `commit`: Always commit the transaction upon successful completion of the operation. Ignore `Prefer: tx=rollback`.
-            - `commit-allow-override`: Commit by default, but allow `Prefer: tx=rollback` to force a rollback even on success. **(Default behavior)**
-            - `rollback`: Always roll back the transaction, even upon successful completion. Ignore `Prefer: tx=commit`. Useful for read-only simulations or dry runs.
-            - `rollback-allow-override`: Roll back by default, but allow `Prefer: tx=commit` to force a commit on success.
-    - `public`: (Optional) Defines tables and RPC functions within this plugin that are accessible **without any authentication** (no JWT required).
-            - `table`: A list of table names that can be accessed publicly.
-            - `func`: A list of RPC function names that can be called publicly.
-    - `exclude`: (Optional) Defines tables and RPC functions within this plugin that should be completely **hidden** from the API. They will not appear in the generated Swagger schema.
-            - `table`: A list of table names to exclude.
-            - `func`: A list of RPC function names to exclude.
+`basic` and `apikey` have no `cmd/` binary — they exist only as preserved plugins inside `easyrest-server`.
 
-- **Auth Plugin Definitions (`auth_plugins` section)**:
-  - This is a map where each key is a unique name for an authentication plugin instance (e.g., `jwt_main`, `oidc_internal`).
-  - **Auth Plugin Attributes**:
-    - `path`: (Optional) Explicit path to the authentication plugin executable (e.g., `/usr/local/bin/easyrest-auth-myjwt`). If omitted, the server searches for an executable named `easyrest-auth-<key_name>` (e.g., if config has `auth_plugins: { myjwt: { ... } }`, the binary should be `easyrest-auth-myjwt`).
-    - `settings`: (Required) A `map[string]any` that is passed directly to the `AuthPlugin`'s `Init(settings map[string]any)` method. This allows passing arbitrary configuration to the authentication plugin (e.g., JWT secrets, OIDC discovery URLs, API keys, etc.). The structure of this map is defined by the specific auth plugin.
+### First-party plugins
 
-- The server merges plugin definitions from `plugin_configs` files and the inline `plugins` map. Definitions in the inline map take precedence if names conflict. Auth plugins are defined separately in `auth_plugins`.
+Settings are the `settings:` map in YAML (auth and middleware) or URI query parameters (data). Read `Init` / `InitConnection` in the package for the full table.
 
----
 
-## Examples
+| Plugin                    | Package                                                                                                          | Role                                                                                                                                            |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| sqlite / postgres / mysql | `[plugins/data/sqlite](plugins/data/sqlite)`, `[postgres](plugins/data/postgres)`, `[mysql](plugins/data/mysql)` | CRUD, schema, optional `QUERY`. Postgres URI scheme is `postgres://` (not `postgresql://`).                                                     |
+| jwt / oidc                | `[plugins/auth/jwt](plugins/auth/jwt)`                                                                           | HMAC JWT, or OIDC userinfo. Empty `jwt_secret` decodes without verifying the signature.                                                         |
+| basic / apikey / awssigv4 | `[plugins/auth/basic](plugins/auth/basic)`, `[apikey](plugins/auth/apikey)`, `[awssigv4](plugins/auth/awssigv4)` | Header auth. basic and apikey always set `scope: "read write"`.                                                                                 |
+| ratelimit                 | `[plugins/middleware/ratelimit](plugins/middleware/ratelimit)`                                                   | Fixed window. Keys: `global`, `ip`, `cookie`. Exceeded → 429 with `Retry-After`.                                                                |
+| dbqueryhook               | `[plugins/middleware/dbqueryhook](plugins/middleware/dbqueryhook)`                                               | Sets `db.pre-request` / `db.post-request` from `by_type` and `by_key`. Postgres runs `SELECT name()`, MySQL `CALL name()`, SQLite ignores them. |
+| cache-*                   | `[plugins/middleware/cache](plugins/middleware/cache)`                                                           | ETag tokens at `etag:<dbKey>:<table>`. `If-None-Match` → 304 on GET/HEAD, `If-Match` → 412 on writes. Schema and `QUERY` are not cached.        |
 
-### Multiple SQLite Databases with Different Structures
 
-Imagine you have two SQLite databases:
+Cache backends implement `cache.Store` (`InitConnection`, `Set`, `Get`). SQL-backed stores share `[plugins/data/sqlcache](plugins/data/sqlcache)` and create an `easyrest_cache` table.
 
-1. **Test Database (`ER_DB_TEST`):**  
-   - **Path:** `./test.db`
-   - **Table:** `users`  
-     Structure: `id` (auto-increment), `name` (text), `update_field` (text)
+## Configuration
 
-2. **Orders Database (`ER_DB_ORDERS`):**  
-   - **Path:** `./orders.db`
-   - **Table:** `orders`  
-     Structure: `id` (auto-increment), `items` (integer), `order_date` (date), `amount` (real)
-
-Create a `config.yaml` file (or specify a different one with `-config`):
+Flags write `ER_*` environment variables, then `[config.Load](internal/config/config.go)` builds defaults from the environment and overlays the YAML file (`--config` / `ER_CONFIG_FILE`). Fields present in YAML win.
 
 ```yaml
 port: 8080
-token_secret: "your-secret"
-token_user_search: "sub"
-default_timezone: "America/Los_Angeles"
+access_log: true
+check_scope: true
+token_user_search: sub          # claim used as user id
+default_limit: 100
+default_timezone: GMT
+token_cache_ttl: 0              # seconds; <=0 disables the claims cache
+anon_claims:                    # used when every auth plugin fails
+  role: anonymous
+  sub: 0
+
+auth_plugins:
+  jwt:
+    settings:
+      jwt_secret: "change-me"
+
+global_request_middlewares:
+  - ratelimit
+
+middleware_plugins:
+  ratelimit:
+    settings:
+      limit: 100
+      period: 1m
+      key: ip
+  cache-redis:
+    settings:
+      uri: redis://localhost:6379/0
+      ttl: 24h
+
 plugins:
-  test:
-    uri: "sqlite://./test.db"
-  orders:
-    uri: "sqlite://./orders.db"
+  app:
+    uri: postgres://user:pass@localhost:5432/app?sslmode=disable
+    title: App API
+    db_tx_end: commit-allow-override
+    request_middlewares: [cache-redis]
+    public:
+      table: [status]
+    exclude:
+      table: [schema_migrations]
+
+cors:
+  enabled: true
+  origins: ["*"]
+  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"]
+  headers: ["Content-Type", "Authorization"]
+  max_age: 86400
+
+# server: timeouts, HTTP/2, max_body_size, trusted_proxy_mode — see Config.Server
+
+otel:
+  enabled: false
+  endpoint: localhost:4317
+  protocol: otlp                # otlp | otlphttp | zipkin (deprecated)
+  service_name: easyrest-server
 ```
 
-**Query Examples:**
+If `auth_plugins` is omitted, Load synthesizes a `jwt` plugin from `ER_TOKEN_SECRET`. There is no top-level `token_secret` YAML key.
 
-- **Using Context Variables:**
-  ```
-  GET /api/test/users/?select=id,name&where.eq.name=request.claims.sub
-  ```
-  or
-  ```
-  GET /api/test/users/?select=id,name&where.eq.name=erctx.claims_sub
-  ```
+Additional connection files: `plugin_configs: [./more.yaml]` (YAML documents with a `name:` field) and `ER_DB_<NAME>=sqlite://./file.db`. `ER_USE_QUERY_<NAME>=1` marks that connection as `QUERY`-only.
 
-- **Aggregating Queries:**
-  ```
-  GET /api/orders/?select=total:amount.sum(),order_date
-  ```
-  →  
-  ```sql
-  SELECT SUM(amount) AS total, order_date FROM orders GROUP BY order_date;
-  ```
+The complete struct, including the `server:` HTTP/2 and trusted-proxy fields, is `[internal/config/config.go](internal/config/config.go)`. Environment variables use the `ER_` prefix (`ER_PORT`, `ER_CHECK_SCOPE=1`, `ER_ACCESSLOG=1`, `ER_ANON_CLAIMS`, `ER_TLS_CERT_FILE`, …).
 
-- **Data Insertion with Context:**
-  ```
-  POST /api/test/users/
-  Body: [{"name": "request.claims.sub", "update_field": "new"}]
-  ```
+Useful flags: `--config`, `--port`, `--version`, `--access-log`, `--enable-plugin-log`, `--timezone`, `--tls-cert-file`, `--tls-key-file`, `--cors-enabled`. Full list: `[internal/cli/cli.go](internal/cli/cli.go)`.
 
-## API Documentation
+## Distributions and deployment
 
-Each plugin endpoint (`/api/<plugin-name>/`) provides a Swagger 2.0 JSON schema describing available tables and their structure. This documentation can be used to understand the database schema and build client applications.
 
-For example:
-```
-GET /api/test/
+| Binary             | What you get                                                                                                                                                                                                    |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `easyrest-server`  | HTTP core + built-in sqlite/postgres/mysql, all five auth plugins, ratelimit, dbqueryhook, six cache middlewares. PGO profile at `[cmd/server/default.pgo](cmd/server/default.pgo)` is picked up automatically. |
+| `easyrest-gateway` | HTTP core only. Put plugin binaries on `PATH` or set `path:`.                                                                                                                                                   |
+
+
+Release tags publish `easyrest-server-{linux,darwin}-{amd64,arm64}` and `easyrest-gateway-…`, plus a multi-arch image:
+
+```bash
+docker pull ghcr.io/onegreyonewhite/easyrest:latest
+docker run --rm -p 8080:8080 -v $PWD/config.yaml:/config.yaml \
+  ghcr.io/onegreyonewhite/easyrest:latest --config /config.yaml
 ```
 
-Returns a Swagger 2.0 JSON schema for all tables in the test database.
+The image is distroless, runs as non-root, and contains only `easyrest-server` (`[Dockerfile](Dockerfile)`).
 
----
+TLS (`tls_enabled` / cert and key files) serves HTTP/2. Without TLS the server speaks h2c. `SIGHUP` reloads YAML and restarts plugins; `SIGINT`/`SIGTERM` shut down gracefully.
 
-## Developing External Plugins
+Optional pprof on `easyrest-server` only: `ER_PPROF_ADDR=:6060`.
 
-External plugins allow you to extend EasyREST with support for different database backends, caching systems, or authentication mechanisms. A single plugin binary can provide implementations for the `DBPlugin` interface, the `CachePlugin` interface, the `AuthPlugin` interface, or any combination of them.
+A full MySQL + Postgres + Redis + Memcached stack for load tests lives in `[pgo/docker-compose.yml](pgo/docker-compose.yml)`.
 
-To create an external plugin:
+## Writing a plugin
 
-1.  **Create a New Repository:**
-    For instance, create a repository named `easyrest-my-custom-plugin`.
+Build a binary, register one RPC key, serve with `easyrest.Handshake`.
 
-2.  **Import Required Modules:**
-    In your plugin's `go.mod`, add the necessary EasyREST and go-plugin dependencies:
-    ```go
-    require (
-        github.com/onegreyonewhite/easyrest v0.x.x // Use the appropriate version
-        github.com/hashicorp/go-plugin v1.x.x   // Use the appropriate version
-    )
-    ```
-    Then, import the required packages in your Go files:
-    ```go
-    import (
-        "context" // Often needed for context handling in implementations
-        "time"    // Often needed for cache TTLs
+```go
+package main
 
-        easyrest "github.com/onegreyonewhite/easyrest/plugin"
-        hplugin "github.com/hashicorp/go-plugin"
+import (
+    hplugin "github.com/hashicorp/go-plugin"
+    easyrest "github.com/onegreyonewhite/easyrest/plugin"
+)
 
-        // Your specific DB/Cache/Auth driver or library imports, e.g.:
-        // _ "github.com/go-sql-driver/mysql"
-        // "github.com/redis/go-redis/v9"
-        // "github.com/golang-jwt/jwt/v5"
-    )
-    ```
+type Guard struct{}
 
-3.  **Implement the Interface(s):**
-    Create a struct (or structs) that implements the methods defined in `easyrest.DBPlugin`, `easyrest.CachePlugin`, and/or `easyrest.AuthPlugin` interfaces from `github.com/onegreyonewhite/easyrest/plugin`.
+func (Guard) Init(map[string]any) error { return nil }
 
-    ```go
-    // Example structure implementing all three interfaces
-    type MyCustomPlugin struct {
-        // Add fields for DB connections, cache clients, auth settings, etc.
-    }
+func (Guard) PreRequest(dbKey string, ctx map[string]any) (map[string]any, *int, error) {
+    return ctx, nil, nil
+}
 
-    // --- DBPlugin Implementation (Example) ---
-    func (p *MyCustomPlugin) InitConnection(uri string) error { /* ... */ return nil }
-    func (p *MyCustomPlugin) TableGet(userID string, table string, selectFields []string, where map[string]any, ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, error) { /* ... */ return nil, nil }
-    func (p *MyCustomPlugin) TableCreate(userID string, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, error) { /* ... */ return nil, nil }
-    func (p *MyCustomPlugin) TableUpdate(userID string, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, error) { /* ... */ return 0, nil }
-    func (p *MyCustomPlugin) TableDelete(userID string, table string, where map[string]any, ctx map[string]any) (int, error) { /* ... */ return 0, nil }
-    func (p *MyCustomPlugin) CallFunction(userID string, funcName string, data map[string]any, ctx map[string]any) (any, error) { /* ... */ return nil, nil }
-    func (p *MyCustomPlugin) GetSchema(ctx map[string]any) (any, error) { /* ... */ return nil, nil }
+func (Guard) PostRequest(dbKey string, ctx map[string]any) (map[string]string, error) {
+    return nil, nil
+}
 
-    // --- DBQueryPlugin Implementation (Example) ---
-    // InitConnection can be shared with DBPlugin when the URI supports both modes.
-    func (p *MyCustomPlugin) QueryCall(query string, ctx map[string]any) ([]map[string]any, error) { /* ... */ return nil, nil }
+func main() {
+    hplugin.Serve(&hplugin.ServeConfig{
+        HandshakeConfig: easyrest.Handshake,
+        Plugins: map[string]hplugin.Plugin{
+            "middleware": &easyrest.MiddlewarePluginPlugin{Impl: Guard{}},
+        },
+    })
+}
+```
 
-    // --- CachePlugin Implementation (Example) ---
-    // InitConnection can be shared if URI contains info for both DB and Cache, or distinct if plugin handles them separately.
-    // For simplicity, assuming it's called if "cache" is in pluginMap.
-    // func (p *MyCustomPlugin) InitConnection(uri string) error { /* Cache specific init if needed */ return nil }
-    func (p *MyCustomPlugin) Get(key string) (string, error) { /* ... */ return "", nil }
-    func (p *MyCustomPlugin) Set(key string, value string, ttl time.Duration) error { /* ... */ return nil }
-    // Delete method signature might have changed, refer to the interface in plugin/plugin.go
-    // func (p *MyCustomPlugin) Delete(keys []string) error { /* ... */ return nil }
+Auth plugins register `"auth"` with `AuthPluginPlugin` and implement `Init` + `Authenticate(headers, method, path, query)`. Data plugins register `"db"` and/or `"query"`. A custom ETag backend implements `cache.Store` and is wrapped with `cache.New(store)` as a middleware plugin — see `[cmd/middleware-cache-redis/main.go](cmd/middleware-cache-redis/main.go)`.
 
+Name the binary for auto-discovery (`easyrest-middleware-guard` for `middleware_plugins.guard`) or set `path:`.
 
-    // --- AuthPlugin Implementation (Example) ---
-    func (p *MyCustomPlugin) Init(settings map[string]any) (map[string]any, error) {
-        // Initialize authentication mechanism with provided settings.
-        // 'settings' comes from the `auth_plugins.<plugin_name>.settings` in server config.
-        // Example: read a JWT secret or OIDC discovery URL from settings.
+## Development
 
-        // Return a Swagger 2.0 Security Definition Object as map[string]any
-        // For example, for an API Key:
-        // return map[string]any{
-        //  "type": "apiKey",
-        //  "name": "X-API-KEY",
-        //  "in":   "header",
-        // }, nil
-        // Or for OAuth2:
-        // return map[string]any{
-        //  "type": "oauth2",
-        //  "flow": "implicit",
-        //  "authorizationUrl": "https://example.com/oauth/authorize",
-        //  "scopes": map[string]string{
-        //      "read:stuff": "read your stuff",
-        //      "write:stuff": "write your stuff",
-        //  },
-        // }, nil
-        // If no security definition is provided by this plugin, return nil for the schema.
-        return nil, nil
-    }
+```bash
+make            # all cmd/ binaries -> bin/easyrest-<dirname>
+make server     # bin/easyrest-server (PGO auto if default.pgo exists)
+make test       # go test ./... with coverage; needs plugin-sqlite + auth-jwt on PATH
+make bench
+```
 
-    func (p *MyCustomPlugin) Authenticate(authHeader string) (map[string]any, error) {
-        // Authenticate the request based on the authHeader (e.g., "Bearer <token>").
-        // Parse the token, validate it, etc.
-        // Return claims as map[string]any or an error.
-        // Example:
-        // if authHeader == "Bearer valid_token" {
-        //  return map[string]any{"sub": "user123", "scope": "read write"}, nil
-        // }
-        // return nil, errors.New("invalid token")
-        return nil, nil
-    }
+Integration tests under `[tests/](tests)` use in-process SQLite. They do not need Docker.
 
-    // Note: A plugin doesn't *have* to implement all interfaces.
-    // If it only implements DBPlugin, only register "db".
-    // If it only implements CachePlugin, only register "cache".
-    // If it only implements AuthPlugin, only register "auth".
-    ```
-
-4.  **Register and Serve the Plugin:**
-    In your plugin's `main` package (`main.go`), register your implementation(s) and start the plugin server. Use the `easyrest.Handshake` configuration.
-
-    ```go
-    func main() {
-        // Create an instance of your plugin implementation
-        impl := &MyCustomPlugin{} // Assuming MyCustomPlugin implements one or more interfaces
-
-        // Define the plugins provided by this binary
-        pluginMap := map[string]hplugin.Plugin{}
-
-        // Conditionally register implementations based on what MyCustomPlugin provides:
-
-        // If MyCustomPlugin implements easyrest.DBPlugin
-        // pluginMap["db"] = &easyrest.DBPluginPlugin{Impl: impl}
-
-        // If MyCustomPlugin implements easyrest.CachePlugin
-        // pluginMap["cache"] = &easyrest.CachePluginPlugin{Impl: impl}
-
-        // If MyCustomPlugin implements easyrest.DBQueryPlugin
-        // pluginMap["query"] = &easyrest.DBQueryPluginPlugin{Impl: impl}
-
-        // If MyCustomPlugin implements easyrest.AuthPlugin
-        pluginMap["auth"] = &easyrest.AuthPluginPlugin{Impl: impl}
-
-
-        // Serve the plugin(s)
-        hplugin.Serve(&hplugin.ServeConfig{
-            HandshakeConfig: easyrest.Handshake,
-            Plugins:         pluginMap, // Only include the services this plugin binary actually provides
-        })
-    }
-    ```
-    *Important:* Ensure your struct `impl` actually implements the methods for the interfaces you are registering. The keys `"db"`, `"cache"`, `"query"`, and `"auth"` are fixed and tell the EasyREST server which interface to expect.
-
-5.  **Build and Deploy:**
-    Build the plugin binary. The naming convention is important for auto-discovery if a `path` is not specified in the server configuration:
-    *   For DB or Cache plugins, the name typically relates to the `uri` scheme (e.g., `easyrest-plugin-mysql` for `mysql://`).
-    *   For Auth plugins, the name should be `easyrest-auth-<key_name_in_config>` (e.g., if config has `auth_plugins: { myjwt: { ... } }`, the binary should be `easyrest-auth-myjwt`).
-    *   The server searches in `PATH`, current working directory, and the server's executable directory. OS/Arch specific names are also checked (e.g., `easyrest-auth-myjwt-linux-amd64`).
-
-    Alternatively, specify the exact path to the plugin binary in the EasyREST configuration file.
-
-6.  **Configure EasyREST:**
-    Update your EasyREST YAML configuration:
-    *   For DB/Cache plugins, use the `plugins` section.
-    *   For Auth plugins, use the new `auth_plugins` section, providing the necessary `settings` for your plugin's `Init` method.
-    ```yaml
-    # In your server's config.yaml
-
-    plugins:
-      # ... your DB/Cache plugin configurations ...
-      # my_database:
-      #   uri: "customdb://..." # Assuming your plugin handles 'customdb'
-      #   path: "/path/to/your/easyrest-my-custom-plugin" # If it also serves DB
-
-    auth_plugins:
-      my_auth_instance_name: # This name is used for auto-discovery if path is empty (easyrest-auth-my_auth_instance_name)
-        path: "/path/to/your/easyrest-my-custom-plugin" # Or specify path directly
-        settings:
-          # Settings specific to your MyCustomPlugin's Init method
-          api_key_secret: "some_secret_value_for_auth"
-          # ... other settings
-    ```
-
----
+Profile-guided optimization: `make pgo-up`, `make pgo-collect` (writes `cmd/server/default.pgo`), `make pgo-verify`, `make pgo-down`. Details in `[pgo/README.md](pgo/README.md)`.
 
 ## License
 
-EasyREST is licensed under the terms of the Apache License 2.0.
-See the file "LICENSE" for more information.
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 Copyright 2025 Sergei Kliuikov

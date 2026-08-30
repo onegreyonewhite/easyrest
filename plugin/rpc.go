@@ -26,7 +26,7 @@ func (g *DBPluginRPC) InitConnection(uri string) error {
 }
 
 func (g *DBPluginRPC) TableGet(userID, table string, selectFields []string, where map[string]any,
-	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, error) {
+	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, map[string]any, error) {
 	req := TableGetRequest{
 		UserID:       userID,
 		Table:        table,
@@ -43,17 +43,19 @@ func (g *DBPluginRPC) TableGet(userID, table string, selectFields []string, wher
 	err := g.client.Call("Plugin.TableGet", req, &resp)
 
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	outCtx := resp.Ctx
+	resp.Ctx = nil
 	if resp.Error != "" {
-		return nil, errors.New(resp.Error)
+		return nil, outCtx, errors.New(resp.Error)
 	}
 	result := resp.Rows
 	resp.Rows = nil
-	return result, nil
+	return result, outCtx, nil
 }
 
-func (g *DBPluginRPC) TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, error) {
+func (g *DBPluginRPC) TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, map[string]any, error) {
 	req := TableCreateRequest{
 		UserID: userID,
 		Table:  table,
@@ -63,15 +65,19 @@ func (g *DBPluginRPC) TableCreate(userID, table string, data []map[string]any, c
 	var resp TableCreateResponse
 	err := g.client.Call("Plugin.TableCreate", req, &resp)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	outCtx := resp.Ctx
+	resp.Ctx = nil
 	if resp.Error != "" {
-		return nil, errors.New(resp.Error)
+		return nil, outCtx, errors.New(resp.Error)
 	}
-	return resp.Rows, nil
+	rows := resp.Rows
+	resp.Rows = nil
+	return rows, outCtx, nil
 }
 
-func (g *DBPluginRPC) TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, error) {
+func (g *DBPluginRPC) TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, map[string]any, error) {
 	req := TableUpdateRequest{
 		UserID: userID,
 		Table:  table,
@@ -82,15 +88,17 @@ func (g *DBPluginRPC) TableUpdate(userID, table string, data map[string]any, whe
 	var resp TableUpdateResponse
 	err := g.client.Call("Plugin.TableUpdate", req, &resp)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
+	outCtx := resp.Ctx
+	resp.Ctx = nil
 	if resp.Error != "" {
-		return 0, errors.New(resp.Error)
+		return 0, outCtx, errors.New(resp.Error)
 	}
-	return resp.Updated, nil
+	return resp.Updated, outCtx, nil
 }
 
-func (g *DBPluginRPC) TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, error) {
+func (g *DBPluginRPC) TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, map[string]any, error) {
 	req := TableDeleteRequest{
 		UserID: userID,
 		Table:  table,
@@ -100,15 +108,17 @@ func (g *DBPluginRPC) TableDelete(userID, table string, where map[string]any, ct
 	var resp TableDeleteResponse
 	err := g.client.Call("Plugin.TableDelete", req, &resp)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
+	outCtx := resp.Ctx
+	resp.Ctx = nil
 	if resp.Error != "" {
-		return 0, errors.New(resp.Error)
+		return 0, outCtx, errors.New(resp.Error)
 	}
-	return resp.Deleted, nil
+	return resp.Deleted, outCtx, nil
 }
 
-func (g *DBPluginRPC) CallFunction(userID, funcName string, data map[string]any, ctx map[string]any) (any, error) {
+func (g *DBPluginRPC) CallFunction(userID, funcName string, data map[string]any, ctx map[string]any) (any, map[string]any, error) {
 	req := CallFunctionRequest{
 		UserID:   userID,
 		FuncName: funcName,
@@ -118,26 +128,30 @@ func (g *DBPluginRPC) CallFunction(userID, funcName string, data map[string]any,
 	var resp CallFunctionResponse
 	err := g.client.Call("Plugin.CallFunction", req, &resp)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	outCtx := resp.Ctx
+	resp.Ctx = nil
 	if resp.Error != "" {
-		return nil, errors.New(resp.Error)
+		return nil, outCtx, errors.New(resp.Error)
 	}
-	return resp.Result, nil
+	return resp.Result, outCtx, nil
 }
 
 // New GetSchema method.
-func (g *DBPluginRPC) GetSchema(ctx map[string]any) (any, error) {
+func (g *DBPluginRPC) GetSchema(ctx map[string]any) (any, map[string]any, error) {
 	req := GetSchemaRequest{Ctx: ctx}
 	var resp GetSchemaResponse
 	err := g.client.Call("Plugin.GetSchema", req, &resp)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	outCtx := resp.Ctx
+	resp.Ctx = nil
 	if resp.Error != "" {
-		return nil, errors.New(resp.Error)
+		return nil, outCtx, errors.New(resp.Error)
 	}
-	return resp.Schema, nil
+	return resp.Schema, outCtx, nil
 }
 
 // DBPluginRPCServer is the server-side RPC implementation.
@@ -154,7 +168,8 @@ func (s *DBPluginRPCServer) InitConnection(req InitConnectionRequest, resp *Init
 }
 
 func (s *DBPluginRPCServer) TableGet(req TableGetRequest, resp *TableGetResponse) error {
-	rows, err := s.Impl.TableGet(req.UserID, req.Table, req.SelectFields, req.Where, req.Ordering, req.GroupBy, req.Limit, req.Offset, req.Ctx)
+	rows, outCtx, err := s.Impl.TableGet(req.UserID, req.Table, req.SelectFields, req.Where, req.Ordering, req.GroupBy, req.Limit, req.Offset, req.Ctx)
+	resp.Ctx = outCtx
 	if err != nil {
 		resp.Error = err.Error()
 		return nil
@@ -164,7 +179,8 @@ func (s *DBPluginRPCServer) TableGet(req TableGetRequest, resp *TableGetResponse
 }
 
 func (s *DBPluginRPCServer) TableCreate(req TableCreateRequest, resp *TableCreateResponse) error {
-	rows, err := s.Impl.TableCreate(req.UserID, req.Table, req.Data, req.Ctx)
+	rows, outCtx, err := s.Impl.TableCreate(req.UserID, req.Table, req.Data, req.Ctx)
+	resp.Ctx = outCtx
 	if err != nil {
 		resp.Error = err.Error()
 		return nil
@@ -174,7 +190,8 @@ func (s *DBPluginRPCServer) TableCreate(req TableCreateRequest, resp *TableCreat
 }
 
 func (s *DBPluginRPCServer) TableUpdate(req TableUpdateRequest, resp *TableUpdateResponse) error {
-	updated, err := s.Impl.TableUpdate(req.UserID, req.Table, req.Data, req.Where, req.Ctx)
+	updated, outCtx, err := s.Impl.TableUpdate(req.UserID, req.Table, req.Data, req.Where, req.Ctx)
+	resp.Ctx = outCtx
 	if err != nil {
 		resp.Error = err.Error()
 		return nil
@@ -184,7 +201,8 @@ func (s *DBPluginRPCServer) TableUpdate(req TableUpdateRequest, resp *TableUpdat
 }
 
 func (s *DBPluginRPCServer) TableDelete(req TableDeleteRequest, resp *TableDeleteResponse) error {
-	deleted, err := s.Impl.TableDelete(req.UserID, req.Table, req.Where, req.Ctx)
+	deleted, outCtx, err := s.Impl.TableDelete(req.UserID, req.Table, req.Where, req.Ctx)
+	resp.Ctx = outCtx
 	if err != nil {
 		resp.Error = err.Error()
 		return nil
@@ -194,7 +212,8 @@ func (s *DBPluginRPCServer) TableDelete(req TableDeleteRequest, resp *TableDelet
 }
 
 func (s *DBPluginRPCServer) CallFunction(req CallFunctionRequest, resp *CallFunctionResponse) error {
-	result, err := s.Impl.CallFunction(req.UserID, req.FuncName, req.Data, req.Ctx)
+	result, outCtx, err := s.Impl.CallFunction(req.UserID, req.FuncName, req.Data, req.Ctx)
+	resp.Ctx = outCtx
 	if err != nil {
 		resp.Error = err.Error()
 		return nil
@@ -205,7 +224,8 @@ func (s *DBPluginRPCServer) CallFunction(req CallFunctionRequest, resp *CallFunc
 
 // New GetSchema server method.
 func (s *DBPluginRPCServer) GetSchema(req GetSchemaRequest, resp *GetSchemaResponse) error {
-	schema, err := s.Impl.GetSchema(req.Ctx)
+	schema, outCtx, err := s.Impl.GetSchema(req.Ctx)
+	resp.Ctx = outCtx
 	if err != nil {
 		resp.Error = err.Error()
 		return nil
@@ -225,92 +245,6 @@ func (p *DBPluginPlugin) Server(broker *plugin.MuxBroker) (any, error) {
 
 func (p *DBPluginPlugin) Client(broker *plugin.MuxBroker, c *rpc.Client) (any, error) {
 	return &DBPluginRPC{client: c}, nil
-}
-
-// CachePluginRPC is the client wrapper for CachePlugin.
-type CachePluginRPC struct{ client *rpc.Client }
-
-func (c *CachePluginRPC) InitConnection(uri string) error {
-	req := CacheInitConnectionRequest{URI: uri}
-	var resp CacheInitConnectionResponse
-	err := c.client.Call("Plugin.InitConnection", req, &resp)
-	if err != nil {
-		return err
-	}
-	if resp.Error != "" {
-		return errors.New(resp.Error)
-	}
-	return nil
-}
-
-func (c *CachePluginRPC) Set(key string, value string, ttl time.Duration) error {
-	req := CacheSetRequest{Key: key, Value: value, TTL: ttl}
-	var resp CacheSetResponse
-	err := c.client.Call("Plugin.Set", req, &resp)
-	if err != nil {
-		return err
-	}
-	if resp.Error != "" {
-		return errors.New(resp.Error)
-	}
-	return nil
-}
-
-func (c *CachePluginRPC) Get(key string) (string, error) {
-	req := CacheGetRequest{Key: key}
-	var resp CacheGetResponse
-	err := c.client.Call("Plugin.Get", req, &resp)
-	if err != nil {
-		return "", err
-	}
-	if resp.Error != "" {
-		return "", errors.New(resp.Error)
-	}
-	return resp.Value, nil
-}
-
-// CachePluginRPCServer is the server-side RPC implementation for CachePlugin.
-type CachePluginRPCServer struct {
-	Impl CachePlugin
-}
-
-func (s *CachePluginRPCServer) InitConnection(req CacheInitConnectionRequest, resp *CacheInitConnectionResponse) error {
-	err := s.Impl.InitConnection(req.URI)
-	if err != nil {
-		resp.Error = err.Error()
-	}
-	return nil
-}
-
-func (s *CachePluginRPCServer) Set(req CacheSetRequest, resp *CacheSetResponse) error {
-	err := s.Impl.Set(req.Key, req.Value, req.TTL)
-	if err != nil {
-		resp.Error = err.Error()
-	}
-	return nil
-}
-
-func (s *CachePluginRPCServer) Get(req CacheGetRequest, resp *CacheGetResponse) error {
-	value, err := s.Impl.Get(req.Key)
-	if err != nil {
-		resp.Error = err.Error()
-		return nil
-	}
-	resp.Value = value
-	return nil
-}
-
-// CachePluginPlugin wraps the CachePlugin implementation for go-plugin.
-type CachePluginPlugin struct {
-	Impl CachePlugin
-}
-
-func (p *CachePluginPlugin) Server(broker *plugin.MuxBroker) (any, error) {
-	return &CachePluginRPCServer{Impl: p.Impl}, nil
-}
-
-func (p *CachePluginPlugin) Client(broker *plugin.MuxBroker, c *rpc.Client) (any, error) {
-	return &CachePluginRPC{client: c}, nil
 }
 
 // --- DBQueryPlugin ---
@@ -451,6 +385,98 @@ func (p *AuthPluginPlugin) Client(broker *plugin.MuxBroker, c *rpc.Client) (any,
 }
 
 // --- End AuthPlugin ---
+
+// MiddlewarePluginRPC is the client wrapper for MiddlewarePlugin.
+type MiddlewarePluginRPC struct{ client *rpc.Client }
+
+func (m *MiddlewarePluginRPC) Init(settings map[string]any) error {
+	req := MiddlewareInitRequest{Settings: settings}
+	var resp MiddlewareInitResponse
+	err := m.client.Call("Plugin.Init", req, &resp)
+	if err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		return errors.New(resp.Error)
+	}
+	return nil
+}
+
+func (m *MiddlewarePluginRPC) PreRequest(dbKey string, ctx map[string]any) (map[string]any, *int, error) {
+	req := MiddlewarePreRequestRequest{DbKey: dbKey, Ctx: ctx}
+	var resp MiddlewarePreRequestResponse
+	err := m.client.Call("Plugin.PreRequest", req, &resp)
+	if err != nil {
+		return nil, nil, err
+	}
+	if resp.Error != "" {
+		if resp.Status != nil {
+			return resp.Ctx, resp.Status, errors.New(resp.Error)
+		}
+		return resp.Ctx, nil, errors.New(resp.Error)
+	}
+	return resp.Ctx, resp.Status, nil
+}
+
+func (m *MiddlewarePluginRPC) PostRequest(dbKey string, ctx map[string]any) (map[string]string, error) {
+	req := MiddlewarePostRequestRequest{DbKey: dbKey, Ctx: ctx}
+	var resp MiddlewarePostRequestResponse
+	err := m.client.Call("Plugin.PostRequest", req, &resp)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Error != "" {
+		return resp.Headers, errors.New(resp.Error)
+	}
+	return resp.Headers, nil
+}
+
+// MiddlewarePluginRPCServer is the server-side RPC implementation for MiddlewarePlugin.
+type MiddlewarePluginRPCServer struct {
+	Impl MiddlewarePlugin
+}
+
+func (s *MiddlewarePluginRPCServer) Init(req MiddlewareInitRequest, resp *MiddlewareInitResponse) error {
+	err := s.Impl.Init(req.Settings)
+	if err != nil {
+		resp.Error = err.Error()
+	}
+	return nil
+}
+
+func (s *MiddlewarePluginRPCServer) PreRequest(req MiddlewarePreRequestRequest, resp *MiddlewarePreRequestResponse) error {
+	ctx, status, err := s.Impl.PreRequest(req.DbKey, req.Ctx)
+	resp.Ctx = ctx
+	resp.Status = status
+	if err != nil {
+		resp.Error = err.Error()
+	}
+	return nil
+}
+
+func (s *MiddlewarePluginRPCServer) PostRequest(req MiddlewarePostRequestRequest, resp *MiddlewarePostRequestResponse) error {
+	headers, err := s.Impl.PostRequest(req.DbKey, req.Ctx)
+	resp.Headers = headers
+	if err != nil {
+		resp.Error = err.Error()
+	}
+	return nil
+}
+
+// MiddlewarePluginPlugin wraps the MiddlewarePlugin implementation for go-plugin.
+type MiddlewarePluginPlugin struct {
+	Impl MiddlewarePlugin
+}
+
+func (p *MiddlewarePluginPlugin) Server(broker *plugin.MuxBroker) (any, error) {
+	return &MiddlewarePluginRPCServer{Impl: p.Impl}, nil
+}
+
+func (p *MiddlewarePluginPlugin) Client(broker *plugin.MuxBroker, c *rpc.Client) (any, error) {
+	return &MiddlewarePluginRPC{client: c}, nil
+}
+
+// --- End MiddlewarePlugin ---
 
 func init() {
 	gob.Register(map[string]any(nil))

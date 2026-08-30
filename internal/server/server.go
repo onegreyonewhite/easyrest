@@ -22,6 +22,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/onegreyonewhite/easyrest/internal/config"
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 	cachepkg "github.com/patrickmn/go-cache"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
@@ -42,13 +43,15 @@ const TokenClaimsKey contextKey = "tokenClaims"
 // BuildPluginContext extracts context variables from the HTTP request.
 func BuildPluginContext(r *http.Request) map[string]any {
 	cfg := currentConfig()
-	dbKey := chi.URLParam(r, "db")
+	dbKey := strings.ToLower(chi.URLParam(r, "db"))
 	dbConfig := cfg.PluginMap[dbKey]
 	headers := make(map[string]any, len(r.Header))
 	for k, vals := range r.Header {
 		lk := strings.ToLower(k)
 		if len(vals) == 1 {
 			headers[lk] = vals[0]
+		} else if lk == "cookie" {
+			headers[lk] = strings.Join(vals, "; ")
 		} else {
 			headers[lk] = strings.Join(vals, " ")
 		}
@@ -87,7 +90,7 @@ func BuildPluginContext(r *http.Request) map[string]any {
 
 	prefer["tx"] = tx
 
-	pluginCtx := make(map[string]any, 12)
+	pluginCtx := make(map[string]any, 14+len(r.Cookies()))
 	pluginCtx["timezone"] = timezone
 	pluginCtx["headers"] = headers
 	pluginCtx["claims"] = plainClaims
@@ -96,6 +99,17 @@ func BuildPluginContext(r *http.Request) map[string]any {
 	pluginCtx["path"] = r.URL.Path
 	pluginCtx["query"] = r.URL.RawQuery
 	pluginCtx["prefer"] = prefer
+	if table := chi.URLParam(r, "table"); table != "" {
+		pluginCtx[easyrest.CtxTable] = table
+	}
+	if fn := chi.URLParam(r, "func"); fn != "" {
+		pluginCtx[easyrest.CtxFunction] = fn
+	}
+	// Add cookies as individual keys "cookie.[name]"
+	for _, c := range r.Cookies() {
+		pluginCtx["cookie."+c.Name] = c.Value
+	}
+
 	if cfg.Otel.Enabled {
 		carrier := propagation.HeaderCarrier(r.Header)
 		traceparent := carrier.Get("traceparent")
@@ -109,6 +123,17 @@ func BuildPluginContext(r *http.Request) map[string]any {
 	if role, ok := plainClaims["role"].(string); ok && role != "" {
 		pluginCtx["role"] = role
 	}
+	clientIP := middleware.GetClientIP(r.Context())
+	if clientIP == "" {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err == nil {
+			clientIP = host
+		} else {
+			clientIP = r.RemoteAddr
+		}
+	}
+	pluginCtx["client_ip"] = clientIP
+	pluginCtx[easyrest.CtxDBType] = easyrest.DBTypeFromURI(dbConfig.Uri)
 	return pluginCtx
 }
 
@@ -128,7 +153,7 @@ func AccessLogMiddleware(next http.Handler) http.Handler {
 // Authenticate extracts and validates the JWT token.
 func Authenticate(r *http.Request) (string, *http.Request, error) {
 	if existingClaims, ok := r.Context().Value(TokenClaimsKey).(jwt.MapClaims); ok && len(existingClaims) > 0 {
-		return extractUserIDFromClaims(existingClaims), r, nil
+		return extractUserIDFromClaims(existingClaims, currentConfig().TokenUserSearch), r, nil
 	}
 
 	authHeaderValue := r.Header.Get("Authorization")
@@ -184,7 +209,7 @@ func Authenticate(r *http.Request) (string, *http.Request, error) {
 	}
 
 	r = r.WithContext(context.WithValue(r.Context(), TokenClaimsKey, claims))
-	userID := extractUserIDFromClaims(claims)
+	userID := extractUserIDFromClaims(claims, cfg.TokenUserSearch)
 	// Store in cache using the raw Authorization header value as key
 	if claimsCache != nil {
 		claimsCache.SetDefault(authHeaderValue, claimsCacheEntry{Claims: claims, UserID: userID})
@@ -347,6 +372,7 @@ func InitOtel(otelCfg config.OtelConfig) (shutdown func(context.Context) error, 
 	case "otlphttp":
 		exp, err = otlptracehttp.New(context.Background(), otlptracehttp.WithEndpoint(otelCfg.Endpoint))
 	case "zipkin":
+		stdlog.Printf("Initializing Zipkin tracer deprecated, use otlp instead")
 		exp, err = zipkin.New(otelCfg.Endpoint)
 	default:
 		return nil, fmt.Errorf("unsupported otel protocol: %s", otelCfg.Protocol)

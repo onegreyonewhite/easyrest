@@ -36,9 +36,6 @@ func TestSanitizeIdentifier(t *testing.T) {
 	server.PreservedDbPlugins["sqlite"] = func() easyrest.DBPlugin {
 		return sqlitePlugin.NewSqlitePlugin()
 	}
-	server.PreservedCachePlugins["sqlite"] = func() easyrest.CachePlugin {
-		return sqlitePlugin.NewSqliteCachePlugin()
-	}
 	server.LoadPlugins()
 
 	tokenStr := generateToken(t)
@@ -160,9 +157,6 @@ func TestSanitizeBodyColumns(t *testing.T) {
 	server.SetConfig(cfg)
 	server.PreservedDbPlugins["sqlite"] = func() easyrest.DBPlugin {
 		return sqlitePlugin.NewSqlitePlugin()
-	}
-	server.PreservedCachePlugins["sqlite"] = func() easyrest.CachePlugin {
-		return sqlitePlugin.NewSqliteCachePlugin()
 	}
 	server.LoadPlugins()
 

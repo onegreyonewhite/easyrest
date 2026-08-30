@@ -8,13 +8,15 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 	lru "github.com/hashicorp/golang-lru/v2"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 	pgxmock "github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -30,6 +32,34 @@ func newTestPlugin(t *testing.T) (*pgPlugin, pgxmock.PgxPoolIface) {
 	// Use mockPool which implements DBPool interface
 	plugin := &pgPlugin{db: mockPool}
 	return plugin, mockPool
+}
+
+func expectEmptyResponseHarvest(mock pgxmock.PgxPoolIface) {
+	mock.ExpectQuery(harvestResponseSettingsSQL).
+		WillReturnRows(pgxmock.NewRows([]string{"name", "nullif"}))
+}
+
+func expectContextRoutine(mock pgxmock.PgxPoolIface, name string) {
+	mock.ExpectQuery("SELECT " + name + "()").
+		WillReturnRows(pgxmock.NewRows([]string{"?column?"}))
+}
+
+func expectMissingContextRoutine(mock pgxmock.PgxPoolIface, name string) {
+	mock.ExpectQuery("SELECT " + name + "()").
+		WillReturnError(&pgconn.PgError{Code: "42883", Message: "function " + name + "() does not exist"})
+}
+
+func expectResponseHarvest(mock pgxmock.PgxPoolIface, settings map[string]string) {
+	rows := pgxmock.NewRows([]string{"name", "nullif"})
+	keys := make([]string, 0, len(settings))
+	for k := range settings {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		rows.AddRow(k, settings[k])
+	}
+	mock.ExpectQuery(harvestResponseSettingsSQL).WillReturnRows(rows)
 }
 
 func TestConvertPlaceholders(t *testing.T) {
@@ -52,10 +82,14 @@ func TestTableGet(t *testing.T) {
 	mock.ExpectQuery(`SELECT id, name FROM users WHERE status = $1`).
 		WithArgs("active").
 		WillReturnRows(pgxmock.NewRows([]string{"id", "name"}).AddRow(1, "John Doe"))
+	expectEmptyResponseHarvest(mock)
 	mock.ExpectCommit()
-	result, err := plugin.TableGet("user1", "users", selectFields, where, nil, nil, 0, 0, nil)
+	result, outCtx, err := plugin.TableGet("user1", "users", selectFields, where, nil, nil, 0, 0, nil)
 	if err != nil {
 		t.Fatalf("TableGet error: %s", err)
+	}
+	if outCtx != nil {
+		t.Fatalf("empty harvest must return nil ctx, got %#v", outCtx)
 	}
 	if len(result) != 1 {
 		t.Errorf("expected 1 row, got %d", len(result))
@@ -85,8 +119,9 @@ func TestTableGetSelectFieldSubstitution(t *testing.T) {
 	mock.ExpectQuery(`SELECT id, erctx.claims_sub FROM users`).
 		WithArgs().
 		WillReturnRows(pgxmock.NewRows([]string{"id", "erctx.claims_sub"}).AddRow(10, "sub_value"))
+	expectEmptyResponseHarvest(mock)
 	mock.ExpectCommit()
-	result, err := plugin.TableGet("user1", "users", selectFields, where, nil, nil, 0, 0, ctx)
+	result, _, err := plugin.TableGet("user1", "users", selectFields, where, nil, nil, 0, 0, ctx)
 	if err != nil {
 		t.Fatalf("TableGet error: %s", err)
 	}
@@ -119,11 +154,12 @@ func TestTableGetTimeWithTimezone(t *testing.T) {
 		WithArgs("erctx.timezone", "America/New_York").
 		WillReturnResult(pgxmock.NewResult("SELECT", 1))
 	mock.ExpectQuery(expQ).WithArgs("val").WillReturnRows(rows)
+	expectEmptyResponseHarvest(mock)
 	mock.ExpectCommit()
 	ctxData := map[string]any{
 		"timezone": "America/New_York",
 	}
-	results, err := plugin.TableGet("u", "dummy", selectFields, where, nil, nil, 0, 0, ctxData)
+	results, _, err := plugin.TableGet("u", "dummy", selectFields, where, nil, nil, 0, 0, ctxData)
 	if err != nil {
 		t.Fatalf("TableGet error: %v", err)
 	}
@@ -151,9 +187,10 @@ func TestTableCreate(t *testing.T) {
 	mock.ExpectExec("INSERT INTO users (id, name) VALUES ($1,$2),($3,$4),($5,$6)").
 		WithArgs(1, "Test1", 2, "Test2", 3, "Test3").
 		WillReturnResult(pgxmock.NewResult("INSERT", 3))
+	expectEmptyResponseHarvest(mock)
 	mock.ExpectCommit()
 
-	result, err := plugin.TableCreate("test_user", "users", data, nil)
+	result, _, err := plugin.TableCreate("test_user", "users", data, nil)
 	if err != nil {
 		t.Errorf("TableCreate error: %v", err)
 	}
@@ -172,7 +209,7 @@ func TestTableCreate_RejectsMaliciousColumn(t *testing.T) {
 	data := []map[string]any{
 		{"name) VALUES ('boom'); --": "x"},
 	}
-	_, err := plugin.TableCreate("test_user", "users", data, nil)
+	_, _, err := plugin.TableCreate("test_user", "users", data, nil)
 	if err == nil {
 		t.Fatal("expected error for malicious column name")
 	}
@@ -193,8 +230,9 @@ func TestTableUpdate(t *testing.T) {
 	mock.ExpectExec(`UPDATE users SET name = $1 WHERE id = $2`).
 		WithArgs("Bob", 1).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	expectEmptyResponseHarvest(mock)
 	mock.ExpectCommit()
-	affected, err := plugin.TableUpdate("user1", "users", data, where, nil)
+	affected, _, err := plugin.TableUpdate("user1", "users", data, where, nil)
 	if err != nil {
 		t.Fatalf("TableUpdate error: %s", err)
 	}
@@ -211,7 +249,7 @@ func TestTableUpdate_RejectsMaliciousColumn(t *testing.T) {
 
 	data := map[string]any{"name = 'pwned', update_field": "x"}
 	where := map[string]any{"id": map[string]any{"=": 1}}
-	_, err := plugin.TableUpdate("user1", "users", data, where, nil)
+	_, _, err := plugin.TableUpdate("user1", "users", data, where, nil)
 	if err == nil {
 		t.Fatal("expected error for malicious column name")
 	}
@@ -231,8 +269,9 @@ func TestTableDelete(t *testing.T) {
 	mock.ExpectExec(`DELETE FROM users WHERE status = $1`).
 		WithArgs("inactive").
 		WillReturnResult(pgxmock.NewResult("DELETE", 1))
+	expectEmptyResponseHarvest(mock)
 	mock.ExpectCommit()
-	affected, err := plugin.TableDelete("user1", "users", where, nil)
+	affected, _, err := plugin.TableDelete("user1", "users", where, nil)
 	if err != nil {
 		t.Fatalf("TableDelete error: %s", err)
 	}
@@ -254,8 +293,9 @@ func TestCallFunction(t *testing.T) {
 	query := fmt.Sprintf(`SELECT * FROM %s($1)`, funcName)
 	rows := pgxmock.NewRows([]string{"doSomething"}).AddRow(expectedResult)
 	mock.ExpectQuery(query).WithArgs("value").WillReturnRows(rows)
+	expectEmptyResponseHarvest(mock)
 	mock.ExpectCommit()
-	result, err := plugin.CallFunction("user1", funcName, data, nil)
+	result, _, err := plugin.CallFunction("user1", funcName, data, nil)
 	if err != nil {
 		t.Fatalf("CallFunction error: %s", err)
 	}
@@ -342,8 +382,9 @@ func TestGetSchema(t *testing.T) {
 	mock.ExpectQuery(`SELECT parameter_name, data_type, parameter_mode, ordinal_position FROM information_schema.parameters WHERE specific_schema = $1 AND specific_name = $2 ORDER BY ordinal_position`).
 		WithArgs("public", "fnTest").
 		WillReturnRows(paramRows)
+	expectEmptyResponseHarvest(mock)
 	mock.ExpectCommit()
-	schema, err := plugin.GetSchema(ctxData)
+	schema, _, err := plugin.GetSchema(ctxData)
 	if err != nil {
 		t.Fatalf("GetSchema error: %v", err)
 	}
@@ -406,9 +447,10 @@ func TestTableCreateWithBulkOperations(t *testing.T) {
 					WillReturnResult(pgxmock.NewResult("INSERT", 1))
 			}
 
+			expectEmptyResponseHarvest(mock)
 			mock.ExpectCommit()
 
-			result, err := plugin.TableCreate("test_user", "test_table", tt.data, nil)
+			result, _, err := plugin.TableCreate("test_user", "test_table", tt.data, nil)
 			if tt.expectError {
 				if err == nil {
 					t.Error("Expected error but got none")
@@ -474,8 +516,9 @@ func TestGetSchemaComprehensive(t *testing.T) {
 	paramRows := pgxmock.NewRows([]string{"parameter_name", "data_type", "parameter_mode", "ordinal_position"}).AddRow("user_id", "integer", "IN", 1).AddRow("start_date", "date", "IN", 2)
 	// Expect exact SQL string with parameterized schema
 	mock.ExpectQuery(`SELECT parameter_name, data_type, parameter_mode, ordinal_position FROM information_schema.parameters WHERE specific_schema = $1 AND specific_name = $2 ORDER BY ordinal_position`).WithArgs("public", "calculate_total_123").WillReturnRows(paramRows)
+	expectEmptyResponseHarvest(mock)
 	mock.ExpectCommit()
-	schema, err := plugin.GetSchema(map[string]any{"user": "test_user"})
+	schema, _, err := plugin.GetSchema(map[string]any{"user": "test_user"})
 	if err != nil {
 		t.Fatalf("GetSchema failed: %v", err)
 	}
@@ -586,9 +629,10 @@ func TestTableDeleteComprehensive(t *testing.T) {
 			expectedSQL := convertPlaceholders("DELETE FROM " + tt.table + whereClause)
 			mock.ExpectExec(expectedSQL).WithArgs(args...).
 				WillReturnResult(pgxmock.NewResult("DELETE", tt.affected))
+			expectEmptyResponseHarvest(mock)
 			mock.ExpectCommit()
 
-			affected, err := plugin.TableDelete("test_user", tt.table, tt.where, tt.ctx)
+			affected, _, err := plugin.TableDelete("test_user", tt.table, tt.where, tt.ctx)
 			if tt.expectError {
 				if err == nil {
 					t.Error("Expected error but got none")
@@ -934,8 +978,9 @@ func TestGetSchemaWithCustomSearchPath(t *testing.T) {
 	mock.ExpectQuery(`SELECT parameter_name, data_type, parameter_mode, ordinal_position FROM information_schema.parameters WHERE specific_schema = $1 AND specific_name = $2 ORDER BY ordinal_position`).
 		WithArgs("my_schema", "fnTest").
 		WillReturnRows(paramRows)
+	expectEmptyResponseHarvest(mock)
 	mock.ExpectCommit()
-	schema, err := plugin.GetSchema(ctxData)
+	schema, _, err := plugin.GetSchema(ctxData)
 	if err != nil {
 		t.Fatalf("GetSchema error: %v", err)
 	}
@@ -1080,4 +1125,541 @@ func TestNewPgCachePlugin(t *testing.T) {
 func TestPgQueryPluginCloseNilSafe(t *testing.T) {
 	p := NewPgQueryPlugin()
 	p.Close()
+}
+
+func TestHarvestSQL_FiltersRequestAndErctx(t *testing.T) {
+	if !strings.Contains(harvestResponseSettingsSQL, "LIKE 'response.%'") {
+		t.Fatal("harvest SQL must filter response.% names")
+	}
+	if !strings.Contains(harvestResponseSettingsSQL, "response.headers") || !strings.Contains(harvestResponseSettingsSQL, "response.status") {
+		t.Fatal("harvest SQL must union known PostgREST keys")
+	}
+	if !strings.Contains(harvestResponseSettingsSQL, "cache.invalidate") {
+		t.Fatal("harvest SQL must union cache.invalidate")
+	}
+	if strings.Contains(harvestResponseSettingsSQL, "request.") || strings.Contains(harvestResponseSettingsSQL, "erctx.") {
+		t.Fatal("harvest SQL must not read request./erctx. settings")
+	}
+}
+
+func TestTableGet_HarvestHeadersAndStatus(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	ctx := map[string]any{"claims": map[string]any{"sub": "u1"}}
+	claimsJSON, err := json.Marshal(ctx["claims"])
+	require.NoError(t, err)
+
+	mock.ExpectBegin()
+	mock.ExpectExec(`SELECT set_config($1, $2, true)`).
+		WithArgs("request.claims", string(claimsJSON)).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectExec(`SELECT set_config($1, $2, true)`).
+		WithArgs("erctx.claims", string(claimsJSON)).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectQuery(`SELECT id FROM users`).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(1))
+	expectResponseHarvest(mock, map[string]string{
+		"response.headers": `[{"X-From-Sql":"1"}]`,
+		"response.status":  "418",
+	})
+	mock.ExpectCommit()
+
+	_, outCtx, err := plugin.TableGet("user1", "users", []string{"id"}, nil, nil, nil, 0, 0, ctx)
+	require.NoError(t, err)
+	require.NotNil(t, outCtx)
+	assert.Equal(t, `[{"X-From-Sql":"1"}]`, outCtx["response.headers"])
+	assert.Equal(t, "418", outCtx["response.status"])
+	assert.Equal(t, ctx["claims"], outCtx["claims"])
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestTableGet_HarvestCacheInvalidate(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT id FROM users`).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(1))
+	expectResponseHarvest(mock, map[string]string{
+		easyrest.CtxCacheInvalidate: "users,orders",
+	})
+	mock.ExpectCommit()
+
+	_, outCtx, err := plugin.TableGet("user1", "users", []string{"id"}, nil, nil, nil, 0, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, outCtx)
+	assert.Equal(t, "users,orders", outCtx[easyrest.CtxCacheInvalidate])
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestTableUpdate_HarvestBeforeRollbackPrefer(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	preferJSON, err := json.Marshal(map[string]any{"tx": "rollback"})
+	require.NoError(t, err)
+	ctx := map[string]any{"prefer": map[string]any{"tx": "rollback"}}
+
+	mock.ExpectBegin()
+	mock.ExpectExec(`SELECT set_config($1, $2, true)`).
+		WithArgs("request.prefer", string(preferJSON)).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectExec(`SELECT set_config($1, $2, true)`).
+		WithArgs("erctx.prefer", string(preferJSON)).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectExec(`UPDATE users SET name = $1 WHERE id = $2`).
+		WithArgs("Bob", 1).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	expectResponseHarvest(mock, map[string]string{"response.headers": `[{"X-From-Sql":"1"}]`})
+	mock.ExpectRollback()
+
+	affected, outCtx, err := plugin.TableUpdate("user1", "users", map[string]any{"name": "Bob"}, map[string]any{"id": map[string]any{"=": 1}}, ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, affected)
+	require.NotNil(t, outCtx)
+	assert.Equal(t, `[{"X-From-Sql":"1"}]`, outCtx["response.headers"])
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestCallFunction_HarvestStatus(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT * FROM teapot()`).
+		WillReturnRows(pgxmock.NewRows([]string{"teapot"}).AddRow("ok"))
+	expectResponseHarvest(mock, map[string]string{"response.status": "418"})
+	mock.ExpectCommit()
+
+	result, outCtx, err := plugin.CallFunction("user1", "teapot", nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "ok", result)
+	require.NotNil(t, outCtx)
+	assert.Equal(t, "418", outCtx["response.status"])
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestTableCreate_HarvestHeaders(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	plugin.bulkThreshold = 1000
+	data := []map[string]any{{"id": 1, "name": "Test1"}}
+	mock.ExpectBegin()
+	mock.ExpectExec("INSERT INTO users (id, name) VALUES ($1,$2)").
+		WithArgs(1, "Test1").
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	expectResponseHarvest(mock, map[string]string{"response.headers": `[{"X-Inserted":"1"}]`})
+	mock.ExpectCommit()
+
+	_, outCtx, err := plugin.TableCreate("test_user", "users", data, nil)
+	require.NoError(t, err)
+	require.NotNil(t, outCtx)
+	assert.Equal(t, `[{"X-Inserted":"1"}]`, outCtx["response.headers"])
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestTableGet_HarvestQueryError(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT id FROM users`).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(1))
+	mock.ExpectQuery(harvestResponseSettingsSQL).
+		WillReturnError(errors.New("harvest failed"))
+	mock.ExpectRollback()
+
+	_, _, err := plugin.TableGet("user1", "users", []string{"id"}, nil, nil, nil, 0, 0, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "harvest")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestBulkCreate_HarvestAndApplyContext(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	plugin.bulkThreshold = 2
+	ctx := map[string]any{"claims": "token"}
+	data := []map[string]any{
+		{"id": 1, "name": "Test1"},
+		{"id": 2, "name": "Test2"},
+	}
+	mock.ExpectBegin()
+	mock.ExpectExec(`SELECT set_config($1, $2, true)`).
+		WithArgs("request.claims", "token").
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectExec(`SELECT set_config($1, $2, true)`).
+		WithArgs("erctx.claims", "token").
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectCopyFrom(pgx.Identifier{"test_table"}, []string{"id", "name"}).
+		WillReturnResult(2)
+	expectResponseHarvest(mock, map[string]string{"response.headers": `[{"X-Bulk":"1"}]`})
+	mock.ExpectCommit()
+
+	_, outCtx, err := plugin.TableCreate("test_user", "test_table", data, ctx)
+	require.NoError(t, err)
+	require.NotNil(t, outCtx)
+	assert.Equal(t, `[{"X-Bulk":"1"}]`, outCtx["response.headers"])
+	assert.Equal(t, "token", outCtx["claims"])
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestApplyPluginContext_SkipsHookKeys(t *testing.T) {
+	mock, err := pgxmock.NewPool(pgxmock.QueryMatcherOption(pgxmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer mock.Close()
+	mock.ExpectBegin()
+	tx, err := mock.Begin(context.Background())
+	require.NoError(t, err)
+	mock.ExpectExec("SELECT set_config($1, $2, true)").
+		WithArgs("request.timezone", "UTC").
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectExec("SELECT set_config($1, $2, true)").
+		WithArgs("erctx.timezone", "UTC").
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	require.NoError(t, ApplyPluginContext(context.Background(), tx, map[string]any{
+		"timezone":                "UTC",
+		easyrest.CtxDBPreRequest:  "custom_headers",
+		easyrest.CtxDBPostRequest: "after_hook",
+	}))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestTableGet_ContextHooksOrder(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	ctx := map[string]any{
+		easyrest.CtxDBPreRequest:  "pre_hook",
+		easyrest.CtxDBPostRequest: "post_hook",
+	}
+	mock.ExpectBegin()
+	expectContextRoutine(mock, "pre_hook")
+	mock.ExpectQuery(`SELECT id FROM users`).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(1))
+	expectContextRoutine(mock, "post_hook")
+	expectEmptyResponseHarvest(mock)
+	mock.ExpectCommit()
+
+	_, outCtx, err := plugin.TableGet("user1", "users", []string{"id"}, nil, nil, nil, 0, 0, ctx)
+	require.NoError(t, err)
+	if outCtx != nil {
+		t.Fatalf("empty harvest: %#v", outCtx)
+	}
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestTableGet_MissingPreHookSkipped(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	ctx := map[string]any{easyrest.CtxDBPreRequest: "missing_pre"}
+	mock.ExpectBegin()
+	expectMissingContextRoutine(mock, "missing_pre")
+	mock.ExpectQuery(`SELECT id FROM users`).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(1))
+	expectEmptyResponseHarvest(mock)
+	mock.ExpectCommit()
+
+	_, _, err := plugin.TableGet("user1", "users", []string{"id"}, nil, nil, nil, 0, 0, ctx)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestTableGet_MissingPostHookSkipped(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	ctx := map[string]any{easyrest.CtxDBPostRequest: "missing_post"}
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT id FROM users`).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(1))
+	expectMissingContextRoutine(mock, "missing_post")
+	expectEmptyResponseHarvest(mock)
+	mock.ExpectCommit()
+
+	_, _, err := plugin.TableGet("user1", "users", []string{"id"}, nil, nil, nil, 0, 0, ctx)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestTableGet_PreHookRaiseRollsBack(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	ctx := map[string]any{easyrest.CtxDBPreRequest: "pre_hook"}
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT pre_hook()`).
+		WillReturnError(&pgconn.PgError{Code: "P0001", Message: "blocked"})
+	mock.ExpectRollback()
+
+	_, _, err := plugin.TableGet("user1", "users", []string{"id"}, nil, nil, nil, 0, 0, ctx)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "db.pre-request")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestTableCreate_ContextPreHook(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	plugin.bulkThreshold = 1000
+	ctx := map[string]any{easyrest.CtxDBPreRequest: "pre_hook"}
+	mock.ExpectBegin()
+	expectContextRoutine(mock, "pre_hook")
+	mock.ExpectExec("INSERT INTO users (id, name) VALUES ($1,$2)").
+		WithArgs(1, "Test1").
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	expectEmptyResponseHarvest(mock)
+	mock.ExpectCommit()
+
+	_, _, err := plugin.TableCreate("test_user", "users", []map[string]any{{"id": 1, "name": "Test1"}}, ctx)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestTableUpdate_ContextPostHook(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	ctx := map[string]any{easyrest.CtxDBPostRequest: "post_hook"}
+	mock.ExpectBegin()
+	mock.ExpectExec(`UPDATE users SET name = $1 WHERE id = $2`).
+		WithArgs("Bob", 1).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	expectContextRoutine(mock, "post_hook")
+	expectEmptyResponseHarvest(mock)
+	mock.ExpectCommit()
+
+	_, _, err := plugin.TableUpdate("user1", "users", map[string]any{"name": "Bob"}, map[string]any{"id": map[string]any{"=": 1}}, ctx)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestCallFunction_ContextPostHook(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	ctx := map[string]any{easyrest.CtxDBPostRequest: "post_hook"}
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT * FROM teapot()`).
+		WillReturnRows(pgxmock.NewRows([]string{"teapot"}).AddRow("ok"))
+	expectContextRoutine(mock, "post_hook")
+	expectEmptyResponseHarvest(mock)
+	mock.ExpectCommit()
+
+	_, _, err := plugin.CallFunction("user1", "teapot", nil, ctx)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestBulkCreate_ContextHooks(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	plugin.bulkThreshold = 2
+	ctx := map[string]any{
+		"claims":                  "token",
+		easyrest.CtxDBPreRequest:  "pre_hook",
+		easyrest.CtxDBPostRequest: "post_hook",
+	}
+	data := []map[string]any{
+		{"id": 1, "name": "Test1"},
+		{"id": 2, "name": "Test2"},
+	}
+	mock.ExpectBegin()
+	mock.ExpectExec(`SELECT set_config($1, $2, true)`).
+		WithArgs("request.claims", "token").
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectExec(`SELECT set_config($1, $2, true)`).
+		WithArgs("erctx.claims", "token").
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	expectContextRoutine(mock, "pre_hook")
+	mock.ExpectCopyFrom(pgx.Identifier{"test_table"}, []string{"id", "name"}).
+		WillReturnResult(2)
+	expectContextRoutine(mock, "post_hook")
+	expectEmptyResponseHarvest(mock)
+	mock.ExpectCommit()
+
+	_, _, err := plugin.TableCreate("test_user", "test_table", data, ctx)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestTableGetGroupBy(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT id, name FROM users GROUP BY name ORDER BY id LIMIT 10 OFFSET 5`).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "name"}).AddRow(1, "A").AddRow([]byte("2"), time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)))
+	expectEmptyResponseHarvest(mock)
+	mock.ExpectCommit()
+
+	result, _, err := plugin.TableGet("user1", "users", []string{"id", "name"}, nil, []string{"id"}, []string{"name"}, 10, 5, nil)
+	require.NoError(t, err)
+	require.Len(t, result, 2)
+	require.Equal(t, "2", result[1]["id"])
+	require.Equal(t, "2024-01-02", result[1]["name"])
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestCallFunctionJSONBytesAndEmpty(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT * FROM fn($1)`).
+		WithArgs("x").
+		WillReturnRows(pgxmock.NewRows([]string{"fn"}).AddRow([]byte(`{"ok":true}`)))
+	expectEmptyResponseHarvest(mock)
+	mock.ExpectCommit()
+
+	result, _, err := plugin.CallFunction("u", "fn", map[string]any{"a": "x"}, nil)
+	require.NoError(t, err)
+	asMap, ok := result.(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, true, asMap["ok"])
+	require.NoError(t, mock.ExpectationsWereMet())
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT * FROM emptyfn()`).
+		WillReturnRows(pgxmock.NewRows([]string{"emptyfn"}))
+	expectEmptyResponseHarvest(mock)
+	mock.ExpectCommit()
+	result, _, err = plugin.CallFunction("u", "emptyfn", nil, nil)
+	require.NoError(t, err)
+	require.Nil(t, result)
+	require.NoError(t, mock.ExpectationsWereMet())
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT * FROM setof()`).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "name"}).AddRow(1, "a").AddRow(2, "b"))
+	expectEmptyResponseHarvest(mock)
+	mock.ExpectCommit()
+	result, _, err = plugin.CallFunction("u", "setof", nil, nil)
+	require.NoError(t, err)
+	rows, ok := result.([]map[string]any)
+	require.True(t, ok)
+	require.Len(t, rows, 2)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestGetSchemaViewsFailure(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	plugin.searchPath = "public"
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE'`).
+		WithArgs("public").
+		WillReturnRows(pgxmock.NewRows([]string{"table_name"}))
+	mock.ExpectQuery(`SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'VIEW'`).
+		WithArgs("public").
+		WillReturnError(errors.New("views failed"))
+	mock.ExpectRollback()
+
+	_, _, err := plugin.GetSchema(nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "views failed")
+}
+
+func TestResolveLocationFallback(t *testing.T) {
+	plugin, _ := newTestPlugin(t)
+	if plugin.resolveLocation(nil) != time.UTC {
+		t.Fatal("nil ctx")
+	}
+	if plugin.resolveLocation(map[string]any{"timezone": "Not/AZone"}) != time.UTC {
+		t.Fatal("invalid tz")
+	}
+	if plugin.resolveLocation(map[string]any{"timezone": ""}) != time.UTC {
+		t.Fatal("empty tz")
+	}
+}
+
+func TestPgPluginClose(t *testing.T) {
+	plugin, _ := newTestPlugin(t)
+	cache, err := lru.New[string, *time.Location](4)
+	require.NoError(t, err)
+	plugin.timezoneCache = cache
+	plugin.Close()
+	if plugin.db != nil || plugin.timezoneCache != nil {
+		t.Fatal("expected close to clear pool pointer and timezone cache")
+	}
+	plugin.Close()
+}
+
+func TestGetSchemaErrorPaths(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	plugin.searchPath = "public"
+	mock.ExpectBegin().WillReturnError(errors.New("begin fail"))
+	_, _, err := plugin.GetSchema(nil)
+	require.Error(t, err)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE'`).
+		WithArgs("public").
+		WillReturnError(errors.New("tables fail"))
+	mock.ExpectRollback()
+	_, _, err = plugin.GetSchema(nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "tables fail")
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE'`).
+		WithArgs("public").
+		WillReturnRows(pgxmock.NewRows([]string{"table_name"}))
+	mock.ExpectQuery(`SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'VIEW'`).
+		WithArgs("public").
+		WillReturnRows(pgxmock.NewRows([]string{"table_name"}))
+	mock.ExpectQuery(`
+	SELECT r.routine_name, r.specific_name, r.data_type
+	FROM information_schema.routines r
+	JOIN pg_catalog.pg_proc p ON r.routine_name = p.proname
+	JOIN pg_catalog.pg_namespace n ON p.pronamespace = n.oid
+	LEFT JOIN pg_catalog.pg_depend dep ON dep.objid = p.oid AND dep.classid = 'pg_catalog.pg_proc'::regclass AND dep.deptype = 'e'
+	WHERE r.specific_schema = $1
+	  AND n.nspname = $2 -- Ensure the schema matches in both catalogs
+	  AND r.routine_type = 'FUNCTION'
+	  AND dep.objid IS NULL -- Only include functions NOT dependent on an extension
+	`).WithArgs("public", "public").WillReturnError(errors.New("rpc fail"))
+	mock.ExpectRollback()
+	_, _, err = plugin.GetSchema(nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "rpc fail")
+}
+
+func TestCallFunctionInvalidPrefer(t *testing.T) {
+	plugin, _ := newTestPlugin(t)
+	_, _, err := plugin.CallFunction("u", "fn", nil, map[string]any{"prefer": map[string]any{"tx": "nope"}})
+	require.Error(t, err)
+}
+
+func TestWithTxErrorPaths(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	mock.ExpectBegin().WillReturnError(errors.New("begin fail"))
+	_, err := plugin.withTx(context.Background(), nil, "commit", func(tx pgx.Tx, loc *time.Location) error {
+		return nil
+	})
+	require.Error(t, err)
+
+	mock.ExpectBegin()
+	mock.ExpectRollback()
+	_, err = plugin.withTx(context.Background(), nil, "commit", func(tx pgx.Tx, loc *time.Location) error {
+		return errors.New("fn fail")
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "fn fail")
+
+	mock.ExpectBegin()
+	expectEmptyResponseHarvest(mock)
+	mock.ExpectRollback()
+	_, err = plugin.withTx(context.Background(), nil, "rollback", func(tx pgx.Tx, loc *time.Location) error {
+		return nil
+	})
+	require.NoError(t, err)
+
+	mock.ExpectBegin()
+	expectEmptyResponseHarvest(mock)
+	mock.ExpectCommit().WillReturnError(errors.New("commit fail"))
+	_, err = plugin.withTx(context.Background(), nil, "commit", func(tx pgx.Tx, loc *time.Location) error {
+		return nil
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to commit")
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(harvestResponseSettingsSQL).WillReturnError(errors.New("harvest fail"))
+	_, err = plugin.withTx(context.Background(), nil, "commit", func(tx pgx.Tx, loc *time.Location) error {
+		return nil
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "harvest")
+}
+
+func TestPgCachePluginSetGetNoDB(t *testing.T) {
+	cachePlugin := &pgCachePlugin{dbPluginPointer: &pgPlugin{}}
+	if err := cachePlugin.Set("k", "v", time.Minute); err == nil {
+		t.Fatal("expected set without db to fail")
+	}
+	if _, err := cachePlugin.Get("k"); err == nil {
+		t.Fatal("expected get without db to fail")
+	}
+}
+
+func TestDeleteExpiredCacheEntriesError(t *testing.T) {
+	_, cachePlugin, mock := newTestPluginWithCache(t)
+	mock.ExpectExec(`DELETE FROM easyrest_cache WHERE expires_at <= NOW()`).
+		WillReturnError(errors.New("cleanup boom"))
+	err := cachePlugin.deleteExpiredEntries(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cleanup boom")
 }

@@ -13,11 +13,15 @@ import (
 	awssigv4 "github.com/onegreyonewhite/easyrest/plugins/auth/awssigv4"
 	basicplugin "github.com/onegreyonewhite/easyrest/plugins/auth/basic"
 	jwtplugin "github.com/onegreyonewhite/easyrest/plugins/auth/jwt"
+	lruPlugin "github.com/onegreyonewhite/easyrest/plugins/data/lru"
 	memcachedPlugin "github.com/onegreyonewhite/easyrest/plugins/data/memcached"
 	mysqlPlugin "github.com/onegreyonewhite/easyrest/plugins/data/mysql"
 	postgresPlugin "github.com/onegreyonewhite/easyrest/plugins/data/postgres"
 	redisPlugin "github.com/onegreyonewhite/easyrest/plugins/data/redis"
 	sqlitePlugin "github.com/onegreyonewhite/easyrest/plugins/data/sqlite"
+	cachemw "github.com/onegreyonewhite/easyrest/plugins/middleware/cache"
+	dbqueryhook "github.com/onegreyonewhite/easyrest/plugins/middleware/dbqueryhook"
+	ratelimit "github.com/onegreyonewhite/easyrest/plugins/middleware/ratelimit"
 )
 
 func main() {
@@ -33,17 +37,11 @@ func main() {
 		server.PreservedDbPlugins["sqlite"] = func() easyrest.DBPlugin {
 			return sqlitePlugin.NewSqlitePlugin()
 		}
-		server.PreservedCachePlugins["sqlite"] = func() easyrest.CachePlugin {
-			return sqlitePlugin.NewSqliteCachePlugin()
-		}
 		server.PreservedQueryPlugins["sqlite"] = func() easyrest.DBQueryPlugin {
 			return sqlitePlugin.NewSqliteQueryPlugin()
 		}
 		server.PreservedDbPlugins["postgres"] = func() easyrest.DBPlugin {
 			return postgresPlugin.NewPgPlugin()
-		}
-		server.PreservedCachePlugins["postgres"] = func() easyrest.CachePlugin {
-			return postgresPlugin.NewPgCachePlugin()
 		}
 		server.PreservedQueryPlugins["postgres"] = func() easyrest.DBQueryPlugin {
 			return postgresPlugin.NewPgQueryPlugin()
@@ -51,20 +49,8 @@ func main() {
 		server.PreservedDbPlugins["mysql"] = func() easyrest.DBPlugin {
 			return mysqlPlugin.NewMysqlPlugin()
 		}
-		server.PreservedCachePlugins["mysql"] = func() easyrest.CachePlugin {
-			return mysqlPlugin.NewMysqlCachePlugin()
-		}
 		server.PreservedQueryPlugins["mysql"] = func() easyrest.DBQueryPlugin {
 			return mysqlPlugin.NewMysqlQueryPlugin()
-		}
-		server.PreservedCachePlugins["redis"] = func() easyrest.CachePlugin {
-			return redisPlugin.NewRedisCachePlugin()
-		}
-		server.PreservedCachePlugins["rediss"] = func() easyrest.CachePlugin {
-			return redisPlugin.NewRedisCachePlugin()
-		}
-		server.PreservedCachePlugins["memcached"] = func() easyrest.CachePlugin {
-			return memcachedPlugin.NewMemcachedCachePlugin()
 		}
 		server.PreservedAuthPlugins["jwt"] = func() easyrest.AuthPlugin {
 			return &jwtplugin.JWTAuthPlugin{}
@@ -80,6 +66,30 @@ func main() {
 		}
 		server.PreservedAuthPlugins["apikey"] = func() easyrest.AuthPlugin {
 			return &apikeyplugin.APIKeyAuthPlugin{}
+		}
+		server.PreservedMiddlewarePlugins["ratelimit"] = func() easyrest.MiddlewarePlugin {
+			return ratelimit.New()
+		}
+		server.PreservedMiddlewarePlugins["dbqueryhook"] = func() easyrest.MiddlewarePlugin {
+			return dbqueryhook.New()
+		}
+		server.PreservedMiddlewarePlugins["cache-redis"] = func() easyrest.MiddlewarePlugin {
+			return cachemw.New(redisPlugin.NewRedisCachePlugin())
+		}
+		server.PreservedMiddlewarePlugins["cache-postgres"] = func() easyrest.MiddlewarePlugin {
+			return cachemw.New(postgresPlugin.NewPgCachePlugin())
+		}
+		server.PreservedMiddlewarePlugins["cache-mysql"] = func() easyrest.MiddlewarePlugin {
+			return cachemw.New(mysqlPlugin.NewMysqlCachePlugin())
+		}
+		server.PreservedMiddlewarePlugins["cache-sqlite"] = func() easyrest.MiddlewarePlugin {
+			return cachemw.New(sqlitePlugin.NewSqliteCachePlugin())
+		}
+		server.PreservedMiddlewarePlugins["cache-memcached"] = func() easyrest.MiddlewarePlugin {
+			return cachemw.New(memcachedPlugin.NewMemcachedCachePlugin())
+		}
+		server.PreservedMiddlewarePlugins["cache-lru"] = func() easyrest.MiddlewarePlugin {
+			return cachemw.New(lruPlugin.NewSimpleCachePlugin())
 		}
 		server.Run(cfg)
 	}

@@ -26,25 +26,19 @@ func TestSelectBasic(t *testing.T) {
 
 	// Insert a single user.
 	insertUser(t, dbPath, "Alice", "")
-	os.Setenv("ER_CACHE_TEST", "sqlite://"+dbPath)
-	os.Setenv("ER_CACHE_ENABLE_TEST", "1")
 	os.Setenv("ER_CORS_ENABLED", "1")
 
 	router := setupServerWithDB(t, dbPath)
 	cfg := server.GetConfig()
 	cfg.PluginMap["test"] = config.PluginConfig{
-		Name:        "test",
-		Uri:         "sqlite://" + dbPath,
-		EnableCache: true,
-		DbTxEnd:     "commit-allow-override",
+		Name:    "test",
+		Uri:     "sqlite://" + dbPath,
+		DbTxEnd: "commit-allow-override",
 	}
 	cfg.CORS.Enabled = true
 	server.SetConfig(cfg)
 	server.PreservedDbPlugins["sqlite"] = func() easyrest.DBPlugin {
 		return sqlitePlugin.NewSqlitePlugin()
-	}
-	server.PreservedCachePlugins["sqlite"] = func() easyrest.CachePlugin {
-		return sqlitePlugin.NewSqliteCachePlugin()
 	}
 	server.LoadPlugins()
 	tokenStr := generateToken(t)
@@ -53,7 +47,6 @@ func TestSelectBasic(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.Header.Set("Authorization", "Bearer "+tokenStr)
-	req.Header.Set("If-None-Match", "0000")
 	req.Header.Set("Prefer", "tx=rollback")
 	rr := httptest.NewRecorder()
 	router.ServeHTTP(rr, req)
@@ -70,26 +63,9 @@ func TestSelectBasic(t *testing.T) {
 	if result[0]["name"] != "Alice" {
 		t.Errorf("Expected name 'Alice', got %v", result[0]["name"])
 	}
-	// Assert that ETag header is present
-	etag := rr.Header().Get("ETag")
-	if etag == "" {
-		t.Errorf("Expected ETag header to be set, but it was empty. Headers: %v", rr.Header())
-	}
 	prefer := rr.Header().Get("Preference-Applied")
 	if prefer != fmt.Sprintf("tx=rollback timezone=%s", cfg.DefaultTimezone) {
 		t.Errorf("Expected Preference-Applied header to be '%s', got %s", fmt.Sprintf("tx=rollback timezone=%s", cfg.DefaultTimezone), prefer)
-	}
-
-	req, err = http.NewRequest("GET", "/api/test/users/?select=id,name", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Authorization", "Bearer "+tokenStr)
-	req.Header.Set("If-None-Match", etag)
-	rr = httptest.NewRecorder()
-	router.ServeHTTP(rr, req)
-	if rr.Code != http.StatusNotModified {
-		t.Fatalf("Expected status 304, got %d. Response: %s", rr.Code, rr.Body.String())
 	}
 }
 
@@ -419,18 +395,15 @@ func TestAnonymousScopeAccess(t *testing.T) {
 	}
 	db.Close()
 
-	os.Setenv("ER_CACHE_TEST", "sqlite://"+dbPath)
-	os.Setenv("ER_CACHE_ENABLE_TEST", "1")
 	os.Setenv("ER_CORS_ENABLED", "1")
 	os.Setenv("ER_ANON_CLAIMS", `{"scope": "product-read"}`)
 
 	router := setupServerWithDB(t, dbPath)
 	cfg := server.GetConfig()
 	cfg.PluginMap["test"] = config.PluginConfig{
-		Name:        "test",
-		Uri:         "sqlite://" + dbPath,
-		EnableCache: true,
-		DbTxEnd:     "commit-allow-override",
+		Name:    "test",
+		Uri:     "sqlite://" + dbPath,
+		DbTxEnd: "commit-allow-override",
 		Exclude: config.AccessConfig{
 			Table: []string{"hidden_users"},
 		},
@@ -627,17 +600,14 @@ func TestSelectAllowList(t *testing.T) {
 	}
 	db.Close()
 
-	os.Setenv("ER_CACHE_TEST", "sqlite://"+dbPath)
-	os.Setenv("ER_CACHE_ENABLE_TEST", "1")
 	os.Setenv("ER_CORS_ENABLED", "1")
 
 	router := setupServerWithDB(t, dbPath)
 	cfg := server.GetConfig()
 	cfg.PluginMap["test"] = config.PluginConfig{
-		Name:        "test",
-		Uri:         "sqlite://" + dbPath,
-		EnableCache: true,
-		DbTxEnd:     "commit-allow-override",
+		Name:    "test",
+		Uri:     "sqlite://" + dbPath,
+		DbTxEnd: "commit-allow-override",
 		AllowList: config.AccessConfig{
 			Table: []string{"users"},
 		},

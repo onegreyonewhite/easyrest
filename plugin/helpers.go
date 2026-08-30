@@ -50,6 +50,109 @@ func IsValidIdentifier(id string) bool {
 	return true
 }
 
+// Context keys for optional zero-argument DB routines run inside the data transaction.
+const (
+	CtxDBType          = "db.type"
+	CtxDBPreRequest    = "db.pre-request"
+	CtxDBPostRequest   = "db.post-request"
+	CtxTable           = "table"
+	CtxFunction        = "function"
+	CtxHandlerStatus   = "handler.status"
+	CtxCacheInvalidate = "cache.invalidate"
+)
+
+// dbTypeAliases maps URI schemes to a stable type name. Unknown schemes stay as-is.
+var dbTypeAliases = map[string]string{
+	"postgresql": "postgres",
+}
+
+// URIScheme returns the lowercase scheme before "://", or "" if the URI has no scheme.
+func URIScheme(uri string) string {
+	scheme, _, ok := strings.Cut(uri, "://")
+	if !ok {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(scheme))
+}
+
+// CanonicalDBType maps a URI scheme to a stable DB type name.
+func CanonicalDBType(scheme string) string {
+	s := strings.ToLower(strings.TrimSpace(scheme))
+	if s == "" {
+		return ""
+	}
+	if alias, ok := dbTypeAliases[s]; ok {
+		return alias
+	}
+	return s
+}
+
+// DBTypeFromURI returns the canonical DB type for a connection URI.
+func DBTypeFromURI(uri string) string {
+	return CanonicalDBType(URIScheme(uri))
+}
+
+// IsContextRoutineKey reports whether key is a plugin-only hook name that must
+// not be written as a session GUC (hyphens are invalid in PostgreSQL GUC names).
+func IsContextRoutineKey(key string) bool {
+	return key == CtxDBPreRequest || key == CtxDBPostRequest
+}
+
+// isSafeRoutineName allows ident or schema.ident.
+func isSafeRoutineName(name string) bool {
+	schema, ident, ok := strings.Cut(name, ".")
+	if !ok {
+		return IsValidIdentifier(name)
+	}
+	if schema == "" || ident == "" || strings.Contains(ident, ".") {
+		return false
+	}
+	return IsValidIdentifier(schema) && IsValidIdentifier(ident)
+}
+
+// ContextRoutineName returns a safe zero-argument routine name from ctx[key].
+// Missing, blank, non-string, or unsafe names return "" (caller skips the hook).
+func ContextRoutineName(ctx map[string]any, key string) string {
+	if ctx == nil {
+		return ""
+	}
+	raw, ok := ctx[key]
+	if !ok {
+		return ""
+	}
+	s, ok := raw.(string)
+	if !ok {
+		return ""
+	}
+	s = strings.TrimSpace(s)
+	if s == "" || !isSafeRoutineName(s) {
+		return ""
+	}
+	return s
+}
+
+// CacheInvalidateNames returns comma-separated table/view names from ctx[cache.invalidate].
+// Missing, non-string, blank, and unsafe tokens are skipped.
+func CacheInvalidateNames(ctx map[string]any) []string {
+	s, ok := CtxString(ctx, CtxCacheInvalidate)
+	if !ok {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		name := strings.TrimSpace(part)
+		if name == "" || !isSafeRoutineName(name) {
+			continue
+		}
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // internal helper for building condition entries from the where map.
 type whereCondEntry struct {
 	cond    string
@@ -286,6 +389,31 @@ func FormatToContext(input map[string]any) (map[string]string, error) {
 		}
 	}
 	return output, nil
+}
+
+// MergeResponseSettings copies non-empty response settings into ctx and returns
+// that map. An empty settings map (or only blank keys/values) returns nil so the
+// caller can keep its existing context. When ctx is non-nil it is mutated in place.
+func MergeResponseSettings(ctx map[string]any, settings map[string]string) map[string]any {
+	if len(settings) == 0 {
+		return nil
+	}
+	out := ctx
+	if out == nil {
+		out = make(map[string]any, len(settings))
+	}
+	wrote := false
+	for k, v := range settings {
+		if k == "" || v == "" {
+			continue
+		}
+		out[k] = v
+		wrote = true
+	}
+	if !wrote {
+		return nil
+	}
+	return out
 }
 
 // GetTxPreference extracts the transaction preference ('commit' or 'rollback') from the context.

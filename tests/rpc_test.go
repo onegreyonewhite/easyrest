@@ -16,28 +16,38 @@ import (
 )
 
 type mockDBPlugin struct {
-	callFunction func(userID, funcName string, data map[string]any, ctx map[string]any) (any, error)
+	callFunction    func(userID, funcName string, data map[string]any, ctx map[string]any) (any, error)
+	callFunctionCtx map[string]any
+	tableGet        func(userID, table string, selectFields []string, where map[string]any,
+		ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, map[string]any, error)
 }
 
 func (m *mockDBPlugin) InitConnection(uri string) error { return nil }
 func (m *mockDBPlugin) TableGet(userID, table string, selectFields []string, where map[string]any,
-	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, error) {
-	return nil, nil
+	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, map[string]any, error) {
+	if m.tableGet != nil {
+		return m.tableGet(userID, table, selectFields, where, ordering, groupBy, limit, offset, ctx)
+	}
+	return nil, nil, nil
 }
-func (m *mockDBPlugin) TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, error) {
-	return nil, nil
+func (m *mockDBPlugin) TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, map[string]any, error) {
+	return nil, nil, nil
 }
-func (m *mockDBPlugin) TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, error) {
-	return 0, nil
+func (m *mockDBPlugin) TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, map[string]any, error) {
+	return 0, nil, nil
 }
-func (m *mockDBPlugin) TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, error) {
-	return 0, nil
+func (m *mockDBPlugin) TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, map[string]any, error) {
+	return 0, nil, nil
 }
-func (m *mockDBPlugin) CallFunction(userID, funcName string, data map[string]any, ctx map[string]any) (any, error) {
-	return m.callFunction(userID, funcName, data, ctx)
+func (m *mockDBPlugin) CallFunction(userID, funcName string, data map[string]any, ctx map[string]any) (any, map[string]any, error) {
+	if m.callFunction == nil {
+		return nil, m.callFunctionCtx, nil
+	}
+	result, err := m.callFunction(userID, funcName, data, ctx)
+	return result, m.callFunctionCtx, err
 }
-func (m *mockDBPlugin) GetSchema(ctx map[string]any) (any, error) {
-	return nil, nil
+func (m *mockDBPlugin) GetSchema(ctx map[string]any) (any, map[string]any, error) {
+	return nil, nil, nil
 }
 
 func TestRPCWithoutClaims(t *testing.T) {

@@ -428,29 +428,30 @@ func schemaHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get current plugins map
-	currentDbPlugins := *DbPlugins.Load()
-	// Get the specific plugin
-	dbPlug, ok := currentDbPlugins[dbKey]
+	dbPlug, ok := loadDBPlugin(w, dbKey)
 	if !ok {
-		http.Error(w, "DB plugin not found", http.StatusNotFound)
 		return
 	}
 
 	pluginCtx := BuildPluginContext(r)
-	schemaRaw, err := dbPlug.GetSchema(pluginCtx)
+	pluginCtx, mwOK := runPreRequestMiddlewares(w, dbKey, pluginCtx)
+	if !mwOK {
+		return
+	}
+	schemaRaw, returnedCtx, err := dbPlug.GetSchema(pluginCtx)
+	pluginCtx = applyReturnedPluginContext(pluginCtx, returnedCtx)
 	if err != nil {
-		http.Error(w, "GetSchema not implemented", http.StatusNotImplemented)
+		middlewareHTTPError(w, dbKey, pluginCtx, "GetSchema not implemented", http.StatusNotImplemented)
 		return
 	}
 	schemaMap, ok := schemaRaw.(map[string]any)
 	if !ok {
-		http.Error(w, "Invalid schema format", http.StatusInternalServerError)
+		middlewareHTTPError(w, dbKey, pluginCtx, "Invalid schema format", http.StatusInternalServerError)
 		return
 	}
 	tableDefs, ok := schemaMap["tables"].(map[string]any)
 	if !ok {
-		http.Error(w, "Invalid tables schema", http.StatusInternalServerError)
+		middlewareHTTPError(w, dbKey, pluginCtx, "Invalid tables schema", http.StatusInternalServerError)
 		return
 	}
 	delete(tableDefs, "easyrest_cache")
@@ -476,5 +477,5 @@ func schemaHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	schemaCacheMutex.Unlock()
 
-	respondJSON(w, http.StatusOK, swaggerSpec)
+	middlewareRespondJSON(w, dbKey, pluginCtx, http.StatusOK, swaggerSpec)
 }

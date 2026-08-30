@@ -22,8 +22,7 @@ func TestDeleteAll(t *testing.T) {
 	insertUser(t, dbPath, "Alice", "test1")
 	insertUser(t, dbPath, "Bob", "test2")
 	insertUser(t, dbPath, "Charlie", "test3")
-	
-	os.Setenv("ER_CACHE_ENABLE_TEST", "1")
+
 	router := setupServerWithDB(t, dbPath)
 	tokenStr := generateToken(t)
 

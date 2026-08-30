@@ -67,7 +67,6 @@ func insertUser(t *testing.T, dbPath, name, updateField string) int {
 func setupServerWithDB(t *testing.T, dbPath string) chi.Router {
 	t.Helper()
 	os.Setenv("ER_DB_TEST", "sqlite://"+dbPath)
-	os.Setenv("ER_CACHE_ENABLE_TEST", "1")
 	os.Setenv("ER_CHECK_SCOPE", "0")
 	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
 	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
@@ -168,9 +167,9 @@ func TestBuildWhereCondEntries(t *testing.T) {
 
 	t.Run("various operators", func(t *testing.T) {
 		ops := []struct {
-			op   string
-			sql  string
-			val  string
+			op  string
+			sql string
+			val string
 		}{
 			{"=", "age = ?", "30"},
 			{"!=", "age != ?", "0"},

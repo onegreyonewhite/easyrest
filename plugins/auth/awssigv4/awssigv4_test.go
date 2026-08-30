@@ -506,5 +506,27 @@ func TestAWSSigV4AuthPlugin_Authenticate(t *testing.T) {
 	}
 }
 
-// Placeholder for awsSigV4Prefix if needed by adapted old tests, ensure it matches the one in awssigv4.go
-// const awsSigV4Prefix = "AWS4-HMAC-SHA256" // This is already available from awssigv4.go in the same package
+func TestBuildCanonicalRequestQueryCanonicalization(t *testing.T) {
+	p := &AWSSigV4AuthPlugin{}
+	got, err := p.buildCanonicalRequest(
+		"GET",
+		"/foo bar",
+		"b=2&a=1&a=0",
+		map[string]string{"Host": "ex.com"},
+		[]string{"host"},
+		emptyPayloadHash,
+	)
+	require.NoError(t, err)
+	lines := strings.Split(got, "\n")
+	require.GreaterOrEqual(t, len(lines), 3)
+	assert.Equal(t, "/foo%20bar", lines[1])
+	assert.Equal(t, "a=0&a=1&b=2", lines[2])
+
+	got, err = p.buildCanonicalRequest("GET", "", "", map[string]string{"host": "ex.com"}, []string{"host"}, emptyPayloadHash)
+	require.NoError(t, err)
+	assert.Equal(t, "/", strings.Split(got, "\n")[1])
+
+	_, err = p.buildCanonicalRequest("GET", "/", "", map[string]string{}, []string{"host"}, emptyPayloadHash)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "signed header 'host' not found")
+}

@@ -207,43 +207,14 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get global config
-	config := currentConfig()
-
-	// Get plugin config
-	pluginCfg, hasPluginCfg := config.PluginMap[dbKey]
-
-	// Check if table restricted for this dbKey
-	if hasPluginCfg {
-		if table == "easyrest_cache" || slices.Contains(pluginCfg.Exclude.Table, table) {
-			http.Error(w, "Not found", http.StatusNotFound)
-			return
-		}
-		// Check AllowList if it's defined and not empty
-		if len(pluginCfg.AllowList.Table) > 0 {
-			if !slices.Contains(pluginCfg.AllowList.Table, table) {
-				http.Error(w, "Not found", http.StatusNotFound)
-				return
-			}
-		}
-	}
-
-	// Get current plugins map
-	currentDbPlugins := *DbPlugins.Load()
-	// Get the specific plugin
-	dbPlug, ok := currentDbPlugins[dbKey]
+	preCfg := currentConfig()
+	prePluginCfg := preCfg.PluginMap[dbKey]
+	dbPlug, config, pluginCfg, ok := resolveDBPlugin(w, dbKey, table, prePluginCfg.Exclude.Table, prePluginCfg.AllowList.Table, []string{"easyrest_cache"})
 	if !ok {
-		http.Error(w, "DB plugin not found", http.StatusNotFound)
 		return
 	}
 
-	// Check if table is public for this dbKey
-	isPublicTable := false
-	if hasPluginCfg {
-		if slices.Contains(pluginCfg.Public.Table, table) {
-			isPublicTable = true
-		}
-	}
+	isPublicTable := slices.Contains(pluginCfg.Public.Table, table)
 
 	userID, r, err := Authenticate(r)
 	if err != nil {
@@ -257,63 +228,19 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		requiredScope = tableScope(table, "-write")
 	}
-	if config.CheckScope && !isPublicTable {
-		w.Header().Add("Vary", "Authorization")
-		claims := getTokenClaims(r)
-		if !CheckScope(claims, requiredScope) {
-			http.Error(w, "Forbidden: insufficient scope", http.StatusForbidden)
-			return
-		}
+	if !enforceScope(w, r, config.CheckScope, isPublicTable, requiredScope) {
+		return
 	}
-
-	// ETag handling START - Only if EnableCache is true for this plugin
-	var currentETag string
-	var cachePlugin easyrest.CachePlugin = getFirstCachePlugin(dbKey)
-	var etagKey string
-
-	if cachePlugin != nil {
-		etagKey = etagCacheKey(dbKey, table)
-		ifMatch := r.Header.Get("If-Match")
-		ifNoneMatch := r.Header.Get("If-None-Match")
-
-		// Only get cache plugin and ETag if cache is enabled AND relevant headers are present/needed
-		if ifMatch != "" || ifNoneMatch != "" || r.Method == http.MethodGet || r.Method == http.MethodHead {
-			currentETag = getOrGenerateETag(cachePlugin, etagKey)
-		}
-
-		// Check If-None-Match for GET/HEAD requests (only if cache is enabled)
-		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && ifNoneMatch != "" {
-			if ifNoneMatch == currentETag {
-				w.Header().Set("ETag", currentETag)
-				w.WriteHeader(http.StatusNotModified)
-				return
-			}
-		}
-
-		// Check If-Match for write operations (POST, PATCH, DELETE) (only if cache is enabled)
-		if (r.Method == http.MethodPost || r.Method == http.MethodPatch || r.Method == http.MethodDelete) && ifMatch != "" {
-			if ifMatch != currentETag {
-				w.WriteHeader(http.StatusPreconditionFailed)
-				return
-			}
-		}
-	} // End of if pluginCfg.EnableCache
-	// ETag handling END
 
 	pluginCtx := BuildPluginContext(r)
-	applied := strings.Builder{}
-	tx := pluginCtx["prefer"].(map[string]any)["tx"]
-	if tx != nil {
-		applied.WriteString("tx=")
-		applied.WriteString(tx.(string))
-		applied.WriteString(" ")
+	pluginCtx, mwOK := runPreRequestMiddlewares(w, dbKey, pluginCtx)
+	if !mwOK {
+		return
 	}
-	applied.WriteString("timezone=")
-	applied.WriteString(pluginCtx["timezone"].(string))
-	w.Header().Set("Preference-Applied", applied.String())
+	setPreferenceApplied(w, pluginCtx)
 	flatCtx, err := easyrest.FormatToContext(pluginCtx)
 	if err != nil {
-		http.Error(w, "Error formatting context: "+err.Error(), http.StatusInternalServerError)
+		middlewareHTTPError(w, dbKey, pluginCtx, "Error formatting context: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -321,11 +248,6 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		// Set ETag header before sending response (only if cache was enabled and plugin found)
-		if cachePlugin != nil {
-			w.Header().Set("ETag", currentETag)
-		}
-
 		// --- Range header parsing for pagination ---
 		limit := 0
 		offset := 0
@@ -360,30 +282,31 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 
 		selectFields, groupBy, err := processSelectParam(selectParam, flatCtx, pluginCtx)
 		if err != nil {
-			http.Error(w, "Error processing select parameter: "+err.Error(), http.StatusBadRequest)
+			middlewareHTTPError(w, dbKey, pluginCtx, "Error processing select parameter: "+err.Error(), http.StatusBadRequest)
 			return
 		}
 
 		where, err := ParseWhereClause(queryValues, flatCtx, pluginCtx)
 		if err != nil {
-			http.Error(w, "Error processing where clause: "+err.Error(), http.StatusBadRequest)
+			middlewareHTTPError(w, dbKey, pluginCtx, "Error processing where clause: "+err.Error(), http.StatusBadRequest)
 			return
 		}
 
 		ordering := ParseCSV(queryValues.Get("ordering"))
 		if err := sanitizeIdentifierList(ordering); err != nil {
-			http.Error(w, "Error processing ordering parameter: "+err.Error(), http.StatusBadRequest)
+			middlewareHTTPError(w, dbKey, pluginCtx, "Error processing ordering parameter: "+err.Error(), http.StatusBadRequest)
 			return
 		}
 
 		startTime := time.Now()
-		rows, err := dbPlug.TableGet(userID, table, selectFields, where, ordering, groupBy, limit, offset, pluginCtx)
+		rows, returnedCtx, err := dbPlug.TableGet(userID, table, selectFields, where, ordering, groupBy, limit, offset, pluginCtx)
+		pluginCtx = applyReturnedPluginContext(pluginCtx, returnedCtx)
 		queryTime := time.Since(startTime)
 
-		w.Header().Set("Server-Timing", "db;dur="+strconv.FormatFloat(float64(queryTime.Milliseconds()), 'f', 3, 64))
+		setDBServerTiming(w, queryTime)
 
 		if err != nil {
-			http.Error(w, "Error in TableGet: "+err.Error(), http.StatusInternalServerError)
+			middlewareHTTPError(w, dbKey, pluginCtx, "Error in TableGet: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
@@ -416,18 +339,18 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Range-Unit", "items")
 		w.Header().Set("Accept-Ranges", "items")
 
-		makeResponseWithQuery(w, r, status, rows, queryValues)
+		middlewareMakeResponse(w, r, dbKey, pluginCtx, status, rows, queryValues)
 
 	case http.MethodPost:
 		parsedData, err := parseRequest(w, r, true)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			middlewareHTTPError(w, dbKey, pluginCtx, err.Error(), http.StatusBadRequest)
 			return
 		}
 
 		data, ok := parsedData.([]map[string]any)
 		if !ok {
-			http.Error(w, "Invalid data format", http.StatusBadRequest)
+			middlewareHTTPError(w, dbKey, pluginCtx, "Invalid data format", http.StatusBadRequest)
 			return
 		}
 
@@ -435,89 +358,74 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 			data[i] = substituteValue(row, flatCtx, pluginCtx).(map[string]any)
 		}
 		if err := validateBodyColumns(data); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			middlewareHTTPError(w, dbKey, pluginCtx, err.Error(), http.StatusBadRequest)
 			return
 		}
 		startTime := time.Now()
-		rows, err := dbPlug.TableCreate(userID, table, data, pluginCtx)
+		rows, returnedCtx, err := dbPlug.TableCreate(userID, table, data, pluginCtx)
+		pluginCtx = applyReturnedPluginContext(pluginCtx, returnedCtx)
 		queryTime := time.Since(startTime)
-		w.Header().Set("Server-Timing", "db;dur="+strconv.FormatFloat(float64(queryTime.Milliseconds()), 'f', 3, 64))
+		setDBServerTiming(w, queryTime)
 		if err != nil {
-			http.Error(w, "Error in TableCreate: "+err.Error(), http.StatusInternalServerError)
+			middlewareHTTPError(w, dbKey, pluginCtx, "Error in TableCreate: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		// Update ETag after successful write operation (only if cache was enabled and plugin found)
-		if cachePlugin != nil {
-			newETag := updateETag(cachePlugin, etagKey)
-			w.Header().Set("ETag", newETag)
-		}
-
-		makeResponseWithQuery(w, r, http.StatusCreated, rows, queryValues)
+		middlewareMakeResponse(w, r, dbKey, pluginCtx, http.StatusCreated, rows, queryValues)
 	case http.MethodPatch:
 		parsedData, err := parseRequest(w, r, false)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			middlewareHTTPError(w, dbKey, pluginCtx, err.Error(), http.StatusBadRequest)
 			return
 		}
 
 		data, ok := parsedData.(map[string]any)
 		if !ok {
-			http.Error(w, "Invalid data format", http.StatusBadRequest)
+			middlewareHTTPError(w, dbKey, pluginCtx, "Invalid data format", http.StatusBadRequest)
 			return
 		}
 
 		data = substituteValue(data, flatCtx, pluginCtx).(map[string]any)
 		if err := validateBodyColumns(data); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			middlewareHTTPError(w, dbKey, pluginCtx, err.Error(), http.StatusBadRequest)
 			return
 		}
 		where, err := ParseWhereClause(queryValues, flatCtx, pluginCtx)
 		if err != nil {
-			http.Error(w, "Error processing where clause: "+err.Error(), http.StatusBadRequest)
+			middlewareHTTPError(w, dbKey, pluginCtx, "Error processing where clause: "+err.Error(), http.StatusBadRequest)
 			return
 		}
 		startTime := time.Now()
-		updated, err := dbPlug.TableUpdate(userID, table, data, where, pluginCtx)
+		updated, returnedCtx, err := dbPlug.TableUpdate(userID, table, data, where, pluginCtx)
+		pluginCtx = applyReturnedPluginContext(pluginCtx, returnedCtx)
 		queryTime := time.Since(startTime)
-		w.Header().Set("Server-Timing", "db;dur="+strconv.FormatFloat(float64(queryTime.Milliseconds()), 'f', 3, 64))
+		setDBServerTiming(w, queryTime)
 		if err != nil {
-			http.Error(w, "Error in TableUpdate: "+err.Error(), http.StatusInternalServerError)
+			middlewareHTTPError(w, dbKey, pluginCtx, "Error in TableUpdate: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		// Update ETag after successful write operation (only if cache was enabled and plugin found)
-		if cachePlugin != nil {
-			newETag := updateETag(cachePlugin, etagKey)
-			w.Header().Set("ETag", newETag)
-		}
-
-		makeResponseWithQuery(w, r, http.StatusOK, map[string]int{"updated": updated}, queryValues)
+		middlewareMakeResponse(w, r, dbKey, pluginCtx, http.StatusOK, map[string]int{"updated": updated}, queryValues)
 
 	case http.MethodDelete:
 		where, err := ParseWhereClause(queryValues, flatCtx, pluginCtx)
 		if err != nil {
-			http.Error(w, "Error processing where clause: "+err.Error(), http.StatusBadRequest)
+			middlewareHTTPError(w, dbKey, pluginCtx, "Error processing where clause: "+err.Error(), http.StatusBadRequest)
 			return
 		}
 		startTime := time.Now()
-		_, err = dbPlug.TableDelete(userID, table, where, pluginCtx)
+		_, returnedCtx, err := dbPlug.TableDelete(userID, table, where, pluginCtx)
+		pluginCtx = applyReturnedPluginContext(pluginCtx, returnedCtx)
 		queryTime := time.Since(startTime)
-		w.Header().Set("Server-Timing", "db;dur="+strconv.FormatFloat(float64(queryTime.Milliseconds()), 'f', 3, 64))
+		setDBServerTiming(w, queryTime)
 		if err != nil {
-			http.Error(w, "Error in TableDelete: "+err.Error(), http.StatusInternalServerError)
+			middlewareHTTPError(w, dbKey, pluginCtx, "Error in TableDelete: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		// Update ETag after successful write operation (only if cache was enabled and plugin found)
-		if cachePlugin != nil {
-			newETag := updateETag(cachePlugin, etagKey)
-			w.Header().Set("ETag", newETag) // Set ETag even for 204
-		}
-
-		w.WriteHeader(http.StatusNoContent)
+		middlewareWriteHeader(w, dbKey, pluginCtx, http.StatusNoContent)
 
 	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		middlewareHTTPError(w, dbKey, pluginCtx, "Method not allowed", http.StatusMethodNotAllowed)
 	}
 }

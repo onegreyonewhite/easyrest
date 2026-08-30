@@ -3,7 +3,6 @@ package server
 import (
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -29,18 +28,12 @@ func queryHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if config.CheckScope {
-		w.Header().Add("Vary", "Authorization")
-		claims := getTokenClaims(r)
-		if !CheckScope(claims, "read") {
-			http.Error(w, "Forbidden: insufficient scope", http.StatusForbidden)
-			return
-		}
+	if !enforceScope(w, r, config.CheckScope, false, "read") {
+		return
 	}
 
-	cfg := GetConfig()
-	if cfg.Server.MaxBodySize > 0 {
-		r.Body = http.MaxBytesReader(w, r.Body, cfg.Server.MaxBodySize)
+	if config.Server.MaxBodySize > 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, config.Server.MaxBodySize)
 	}
 	defer r.Body.Close()
 
@@ -56,25 +49,20 @@ func queryHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pluginCtx := BuildPluginContext(r)
-	applied := strings.Builder{}
-	tx := pluginCtx["prefer"].(map[string]any)["tx"]
-	if tx != nil {
-		applied.WriteString("tx=")
-		applied.WriteString(tx.(string))
-		applied.WriteString(" ")
+	pluginCtx, mwOK := runPreRequestMiddlewares(w, dbKey, pluginCtx)
+	if !mwOK {
+		return
 	}
-	applied.WriteString("timezone=")
-	applied.WriteString(pluginCtx["timezone"].(string))
-	w.Header().Set("Preference-Applied", applied.String())
+	setPreferenceApplied(w, pluginCtx)
 
 	startTime := time.Now()
 	rows, err := queryPlug.QueryCall(query, pluginCtx)
 	queryTime := time.Since(startTime)
 
-	w.Header().Set("Server-Timing", "db;dur="+strconv.FormatFloat(float64(queryTime.Milliseconds()), 'f', 3, 64))
+	setDBServerTiming(w, queryTime)
 
 	if err != nil {
-		http.Error(w, "Error in QueryCall: "+err.Error(), http.StatusInternalServerError)
+		middlewareHTTPError(w, dbKey, pluginCtx, "Error in QueryCall: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -82,5 +70,5 @@ func queryHandler(w http.ResponseWriter, r *http.Request) {
 		rows = []map[string]any{}
 	}
 
-	makeResponse(w, r, http.StatusOK, rows)
+	middlewareMakeResponse(w, r, dbKey, pluginCtx, http.StatusOK, rows, nil)
 }
