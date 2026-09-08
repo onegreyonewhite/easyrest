@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
-	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
 
 // rpcHandler processes RPC calls to plugin functions.
@@ -58,7 +57,7 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	setPreferenceApplied(w, pluginCtx)
 
-	flatCtx, err := easyrest.FormatToContext(pluginCtx)
+	flatCtx, err := formatContextForSubst(pluginCtx, nil, data)
 	if err != nil {
 		middlewareHTTPError(w, dbKey, pluginCtx, "Error formatting context: "+err.Error(), http.StatusInternalServerError)
 		return

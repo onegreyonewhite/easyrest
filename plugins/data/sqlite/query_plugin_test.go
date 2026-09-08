@@ -46,7 +46,7 @@ func TestBuildSQLiteDSN(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if dsn != "file:./test.db?_busy_timeout=5000" {
+		if dsn != "file:./test.db?_busy_timeout=5000&_pragma=cache_size(10000)" {
 			t.Fatalf("got dsn %q", dsn)
 		}
 	})
@@ -56,7 +56,7 @@ func TestBuildSQLiteDSN(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if dsn != "file:./test.db?mode=ro" {
+		if dsn != "file:./test.db?mode=ro&_pragma=cache_size(10000)" {
 			t.Fatalf("got dsn %q", dsn)
 		}
 	})
@@ -66,8 +66,34 @@ func TestBuildSQLiteDSN(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(dsn, "mode=ro") || !strings.Contains(dsn, "_pragma=busy_timeout(5000)") {
+		if !strings.Contains(dsn, "mode=ro") {
 			t.Fatalf("got dsn %q", dsn)
+		}
+		if !strings.Contains(dsn, "_pragma=busy_timeout(5000)") && !strings.Contains(dsn, "_pragma=busy_timeout%285000%29") {
+			t.Fatalf("expected busy_timeout pragma in DSN, got %q", dsn)
+		}
+	})
+
+	t.Run("cache_size and mmap_size become pragmas", func(t *testing.T) {
+		dsn, err := buildSQLiteDSN("sqlite://./test.db?cache_size=-65536&mmap_size=268435456", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(dsn, "_pragma=cache_size(-65536)") {
+			t.Fatalf("missing cache_size pragma in %q", dsn)
+		}
+		if !strings.Contains(dsn, "_pragma=mmap_size(268435456)") {
+			t.Fatalf("missing mmap_size pragma in %q", dsn)
+		}
+		if strings.Contains(dsn, "cache_size=-65536") || strings.Contains(dsn, "mmap_size=268435456") {
+			t.Fatalf("EasyREST keys leaked into DSN: %q", dsn)
+		}
+	})
+
+	t.Run("invalid cache_size", func(t *testing.T) {
+		_, err := buildSQLiteDSN("sqlite://./test.db?cache_size=abc", false)
+		if err == nil || !strings.Contains(err.Error(), "invalid cache_size") {
+			t.Fatalf("expected invalid cache_size error, got %v", err)
 		}
 	})
 

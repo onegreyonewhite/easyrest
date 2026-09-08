@@ -5,6 +5,7 @@ RUN apt update && apt install -y make
 ARG GOARCH="amd64"
 ENV CGO_ENABLED=0
 ENV GOOS=linux
+ENV GOAMD64=v2
 
 WORKDIR /app
 

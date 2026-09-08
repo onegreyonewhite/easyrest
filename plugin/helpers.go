@@ -273,8 +273,14 @@ func BuildWhereClause(where map[string]any) (string, []any, error) {
 	if len(entries) == 0 {
 		return "", nil, nil
 	}
+	clause, args := joinWhereEntries(entries)
+	return clause, args, nil
+}
+
+func joinWhereEntries(entries []whereCondEntry) (string, []any) {
 	var sb strings.Builder
 	args := make([]any, 0, len(entries))
+	sb.WriteString(" WHERE ")
 	for i, entry := range entries {
 		if i > 0 {
 			sb.WriteString(" AND ")
@@ -282,7 +288,7 @@ func BuildWhereClause(where map[string]any) (string, []any, error) {
 		sb.WriteString(entry.cond)
 		args = append(args, entry.args...)
 	}
-	return " WHERE " + sb.String(), args, nil
+	return sb.String(), args
 }
 
 // BuildWhereClauseSorted constructs a SQL WHERE clause from a given where map,
@@ -292,27 +298,14 @@ func BuildWhereClauseSorted(where map[string]any) (string, []any, error) {
 	if err != nil {
 		return "", nil, err
 	}
-	// Sort entries by sortKey (insertion sort for no extra imports)
-	for i := 1; i < len(entries); i++ {
-		j := i
-		for j > 0 && entries[j-1].sortKey > entries[j].sortKey {
-			entries[j-1], entries[j] = entries[j], entries[j-1]
-			j--
-		}
-	}
+	slices.SortFunc(entries, func(a, b whereCondEntry) int {
+		return strings.Compare(a.sortKey, b.sortKey)
+	})
 	if len(entries) == 0 {
 		return "", nil, nil
 	}
-	var sb strings.Builder
-	args := make([]any, 0, len(entries))
-	for i, entry := range entries {
-		if i > 0 {
-			sb.WriteString(" AND ")
-		}
-		sb.WriteString(entry.cond)
-		args = append(args, entry.args...)
-	}
-	return " WHERE " + sb.String(), args, nil
+	clause, args := joinWhereEntries(entries)
+	return clause, args, nil
 }
 
 // FormatToContext flattens an arbitrarily nested map into a flat map with keys joined by underscores.

@@ -76,6 +76,9 @@ type ServerConfig struct {
 	TrustedProxyMode   string `yaml:"trusted_proxy_mode"`   // "none", "xff_count", or "header"
 	TrustedProxyCount  int    `yaml:"trusted_proxy_count"`  // for xff_count: number of trusted proxies
 	TrustedProxyHeader string `yaml:"trusted_proxy_header"` // for header: e.g. CF-Connecting-IP, X-Real-IP
+
+	// DisableHTMLEscape turns off <>& escaping in JSON HTTP bodies (goccy SetEscapeHTML(false)).
+	DisableHTMLEscape bool `yaml:"disable_html_escape"`
 }
 
 type OtelConfig struct {
@@ -273,6 +276,11 @@ func loadEnvServerConfig() ServerConfig {
 		}
 	}
 	server.TrustedProxyHeader = os.Getenv("ER_SERVER_TRUSTED_PROXY_HEADER")
+	if v := os.Getenv("ER_SERVER_DISABLE_HTML_ESCAPE"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			server.DisableHTMLEscape = b
+		}
+	}
 	return server
 }
 

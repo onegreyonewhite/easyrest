@@ -70,5 +70,5 @@ func queryHandler(w http.ResponseWriter, r *http.Request) {
 		rows = []map[string]any{}
 	}
 
-	middlewareMakeResponse(w, r, dbKey, pluginCtx, http.StatusOK, rows, nil)
+	middlewareMakeResponse(w, r, dbKey, pluginCtx, http.StatusOK, rows, r.URL.Query())
 }

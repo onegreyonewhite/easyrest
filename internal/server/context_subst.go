@@ -2,10 +2,12 @@ package server
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/goccy/go-json"
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
 
 // getNestedValue traverses a nested map using dot-separated keys.
@@ -25,6 +27,53 @@ func getNestedValue(data map[string]any, path string) (any, bool) {
 		}
 	}
 	return current, true
+}
+
+func hasContextRef(s string) bool {
+	return strings.Contains(s, "erctx.") || strings.Contains(s, "request.")
+}
+
+func queryNeedsContextSubst(query map[string][]string) bool {
+	for _, vals := range query {
+		if slices.ContainsFunc(vals, hasContextRef) {
+			return true
+		}
+	}
+	return false
+}
+
+func valueNeedsContextSubst(val any) bool {
+	switch s := val.(type) {
+	case string:
+		return hasContextRef(s)
+	case map[string]any:
+		for _, v := range s {
+			if valueNeedsContextSubst(v) {
+				return true
+			}
+		}
+	case []any:
+		if slices.ContainsFunc(s, valueNeedsContextSubst) {
+			return true
+		}
+	case []map[string]any:
+		for _, row := range s {
+			if valueNeedsContextSubst(row) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func formatContextForSubst(pluginCtx map[string]any, existing map[string]string, data any) (map[string]string, error) {
+	if existing != nil {
+		return existing, nil
+	}
+	if !valueNeedsContextSubst(data) {
+		return nil, nil
+	}
+	return easyrest.FormatToContext(pluginCtx)
 }
 
 // substitutePluginContext replaces values starting with "erctx." or "request."

@@ -178,6 +178,9 @@ func TestLoad_EnvOverridesAndDefaults(t *testing.T) {
 	if cfg.Server.TrustedProxyCount != 2 {
 		t.Errorf("TrustedProxyCount: %d", cfg.Server.TrustedProxyCount)
 	}
+	if cfg.Server.DisableHTMLEscape {
+		t.Error("DisableHTMLEscape should default to false")
+	}
 	if cfg.TokenCacheTTL != 60 {
 		t.Errorf("TokenCacheTTL: %d", cfg.TokenCacheTTL)
 	}
@@ -382,6 +385,38 @@ func TestLoad_InvalidDurationAndSizeIgnored(t *testing.T) {
 	}
 	if cfg.Server.TrustedProxyCount != 1 {
 		t.Errorf("expected default TrustedProxyCount, got %d", cfg.Server.TrustedProxyCount)
+	}
+	if cfg.Server.DisableHTMLEscape {
+		t.Error("expected DisableHTMLEscape false by default")
+	}
+}
+
+func TestLoad_DisableHTMLEscapeEnvAndYAML(t *testing.T) {
+	clearEREnv(t)
+	t.Setenv("ER_DEFAULT_TIMEZONE", "UTC")
+	t.Setenv("ER_TOKEN_SECRET", "s")
+	t.Setenv("ER_SERVER_DISABLE_HTML_ESCAPE", "true")
+	cfg := Load()
+	if !cfg.Server.DisableHTMLEscape {
+		t.Fatal("expected env to enable DisableHTMLEscape")
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	content := `
+server:
+  disable_html_escape: true
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	clearEREnv(t)
+	t.Setenv("ER_DEFAULT_TIMEZONE", "UTC")
+	t.Setenv("ER_TOKEN_SECRET", "s")
+	t.Setenv("ER_CONFIG_FILE", path)
+	cfg = Load()
+	if !cfg.Server.DisableHTMLEscape {
+		t.Fatal("expected yaml to enable DisableHTMLEscape")
 	}
 }
 

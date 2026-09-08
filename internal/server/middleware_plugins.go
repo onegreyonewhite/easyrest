@@ -130,15 +130,19 @@ func applyContextResponseHeaders(w http.ResponseWriter, pluginCtx map[string]any
 		return
 	}
 
-	type pair struct{ name, value string }
-	pairs := make([]pair, 0)
-
 	prefixKeys := make([]string, 0)
 	for k := range pluginCtx {
 		if strings.HasPrefix(k, responseHeaderPrefix) {
 			prefixKeys = append(prefixKeys, k)
 		}
 	}
+	_, hasHeadersArray := pluginCtx["response.headers"]
+	if len(prefixKeys) == 0 && !hasHeadersArray {
+		return
+	}
+
+	type pair struct{ name, value string }
+	pairs := make([]pair, 0, len(prefixKeys))
 	sort.Strings(prefixKeys)
 	for _, k := range prefixKeys {
 		name := k[len(responseHeaderPrefix):]

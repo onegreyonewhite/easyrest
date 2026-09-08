@@ -20,12 +20,40 @@ var supportedTypes = [4]string{
 	"application/x-www-form-urlencoded",
 }
 
+const maxJSONBufferCap = 64 << 10
+
 var jsonBufferPool sync.Pool
 
 func init() {
 	jsonBufferPool.New = func() any {
 		return &bytes.Buffer{}
 	}
+}
+
+func putJSONBuffer(buf *bytes.Buffer) {
+	if buf.Cap() > maxJSONBufferCap {
+		return
+	}
+	jsonBufferPool.Put(buf)
+}
+
+func mediaType(s string) string {
+	if idx := strings.Index(s, ";"); idx != -1 {
+		s = s[:idx]
+	}
+	return strings.TrimSpace(s)
+}
+
+func firstSupportedAccept(acceptHeader string) string {
+	for t := range strings.SplitSeq(acceptHeader, ",") {
+		t = mediaType(t)
+		for _, supported := range supportedTypes {
+			if t == supported {
+				return t
+			}
+		}
+	}
+	return ""
 }
 
 // respondJSON serializes v to JSON and writes it to w with Content-Type header.
@@ -39,9 +67,12 @@ func respondJSON(w http.ResponseWriter, status int, v interface{}) {
 		buf = &bytes.Buffer{}
 	}
 	buf.Reset()
-	defer jsonBufferPool.Put(buf)
+	defer putJSONBuffer(buf)
 
 	enc := json.NewEncoder(buf)
+	if currentConfig().Server.DisableHTMLEscape {
+		enc.SetEscapeHTML(false)
+	}
 	if err := enc.Encode(v); err != nil {
 		stdlog.Printf("Error encoding JSON response: %v", err)
 		return
@@ -58,20 +89,23 @@ func makeResponse(w http.ResponseWriter, r *http.Request, status int, v any) {
 	makeResponseWithQuery(w, r, status, v, nil)
 }
 
+// makeResponseWithQuery picks the output format from query. A nil query falls
+// back to r.URL.Query(); a non-nil map (including empty url.Values{}) is used
+// as-is and does not merge with the URL.
 func makeResponseWithQuery(w http.ResponseWriter, r *http.Request, status int, v any, query url.Values) {
-	// Determine output format based on the Accept header
-	// First, check the "format" query parameter for explicit output format preference.
 	format := ""
 	if query != nil {
 		format = query.Get("format")
-	}
-	if format == "" {
+	} else {
 		format = r.URL.Query().Get("format")
 	}
+
 	acceptHeader := ""
 	switch strings.ToLower(format) {
 	case "json":
-		acceptHeader = "application/json"
+		w.Header().Add("Vary", "Accept")
+		respondJSON(w, status, v)
+		return
 	case "xml":
 		acceptHeader = "application/xml"
 	case "csv":
@@ -79,49 +113,42 @@ func makeResponseWithQuery(w http.ResponseWriter, r *http.Request, status int, v
 	case "":
 		// No format param, fall back to Accept and Content-Type headers below.
 	default:
-		// Unknown format, treat as unsupported (will be handled later).
 		acceptHeader = format
 	}
 
 	if acceptHeader == "" {
 		acceptHeader = r.Header.Get("Accept")
-		contentType := r.Header.Get("Content-Type")
-
-		// If Accept is not set or equals */*, use Content-Type
 		if acceptHeader == "" || acceptHeader == "*/*" {
-			acceptHeader = contentType
+			acceptHeader = mediaType(r.Header.Get("Content-Type"))
 			w.Header().Add("Vary", "Content-Type")
+			w.Header().Add("Vary", "Accept")
+			if acceptHeader == "" || acceptHeader == "application/json" {
+				respondJSON(w, status, v)
+				return
+			}
+		} else if strings.IndexByte(acceptHeader, ',') < 0 {
+			acceptHeader = mediaType(acceptHeader)
+			w.Header().Add("Vary", "Accept")
+			if acceptHeader == "" || acceptHeader == "application/json" {
+				respondJSON(w, status, v)
+				return
+			}
 		} else {
-			// If Accept contains multiple types, take the first supported: json, xml, csv, or formdata.
-			acceptTypes := strings.Split(acceptHeader, ",")
-
-			acceptHeader = ""
-			for _, t := range acceptTypes {
-				t = strings.TrimSpace(t)
-				// Remove parameters like charset
-				if idx := strings.Index(t, ";"); idx != -1 {
-					t = t[:idx]
-				}
-				for _, supported := range supportedTypes {
-					if t == supported {
-						acceptHeader = t
-						break
-					}
-				}
-				if acceptHeader != "" {
-					break
-				}
+			acceptHeader = firstSupportedAccept(acceptHeader)
+			w.Header().Add("Vary", "Accept")
+			if acceptHeader == "" || acceptHeader == "application/json" {
+				respondJSON(w, status, v)
+				return
 			}
 		}
+	} else {
+		acceptHeader = mediaType(acceptHeader)
+		w.Header().Add("Vary", "Accept")
+		if acceptHeader == "" || acceptHeader == "application/json" {
+			respondJSON(w, status, v)
+			return
+		}
 	}
-
-	// Remove parameters like charset
-	if idx := strings.Index(acceptHeader, ";"); idx != -1 {
-		acceptHeader = acceptHeader[:idx]
-	}
-	acceptHeader = strings.TrimSpace(acceptHeader)
-
-	w.Header().Add("Vary", "Accept")
 
 	switch acceptHeader {
 	case "application/json", "":

@@ -62,6 +62,35 @@ func expectResponseHarvest(mock pgxmock.PgxPoolIface, settings map[string]string
 	mock.ExpectQuery(harvestResponseSettingsSQL).WillReturnRows(rows)
 }
 
+func expectApplyPluginContext(mock pgxmock.PgxPoolIface, kvs ...string) {
+	if len(kvs)%2 != 0 {
+		panic("expectApplyPluginContext: odd number of key/value args")
+	}
+	type pair struct{ k, v string }
+	items := make([]pair, 0, len(kvs)/2)
+	for i := 0; i < len(kvs); i += 2 {
+		items = append(items, pair{kvs[i], kvs[i+1]})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].k < items[j].k })
+	names := make([]string, 0, len(items)*2)
+	vals := make([]string, 0, len(items)*2)
+	for _, it := range items {
+		names = append(names, "request."+it.k, "erctx."+it.k)
+		vals = append(vals, it.v, it.v)
+	}
+	mock.ExpectExec(applyPluginContextSQL).
+		WithArgs(names, vals).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+}
+
+func expectApplyPluginContextMap(mock pgxmock.PgxPoolIface, ctx map[string]any) {
+	kvs := make([]string, 0, len(ctx)*2)
+	for k, v := range ctx {
+		kvs = append(kvs, k, fmt.Sprintf("%v", v))
+	}
+	expectApplyPluginContext(mock, kvs...)
+}
+
 func TestConvertPlaceholders(t *testing.T) {
 	query := "SELECT * FROM users WHERE id = ? AND status = ?"
 	converted := convertPlaceholders(query)
@@ -108,13 +137,7 @@ func TestTableGetSelectFieldSubstitution(t *testing.T) {
 	selectFields := []string{"id", "erctx.claims_sub"}
 	where := map[string]any{}
 	mock.ExpectBegin()
-	// Expect exact SQL string
-	mock.ExpectExec(`SELECT set_config($1, $2, true)`).
-		WithArgs("request.claims_sub", "sub_value").
-		WillReturnResult(pgxmock.NewResult("SELECT", 1))
-	mock.ExpectExec(`SELECT set_config($1, $2, true)`).
-		WithArgs("erctx.claims_sub", "sub_value").
-		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	expectApplyPluginContext(mock, "claims_sub", "sub_value")
 	// Expect exact SQL string
 	mock.ExpectQuery(`SELECT id, erctx.claims_sub FROM users`).
 		WithArgs().
@@ -146,13 +169,7 @@ func TestTableGetTimeWithTimezone(t *testing.T) {
 	expQ := `SELECT id, created_at FROM dummy WHERE dummy = $1`
 	rows := pgxmock.NewRows([]string{"id", "created_at"}).AddRow(1, utcTime)
 	mock.ExpectBegin()
-	// Expect exact SQL string
-	mock.ExpectExec(`SELECT set_config($1, $2, true)`).
-		WithArgs("request.timezone", "America/New_York").
-		WillReturnResult(pgxmock.NewResult("SELECT", 1))
-	mock.ExpectExec(`SELECT set_config($1, $2, true)`).
-		WithArgs("erctx.timezone", "America/New_York").
-		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	expectApplyPluginContext(mock, "timezone", "America/New_York")
 	mock.ExpectQuery(expQ).WithArgs("val").WillReturnRows(rows)
 	expectEmptyResponseHarvest(mock)
 	mock.ExpectCommit()
@@ -319,13 +336,7 @@ func TestGetSchema(t *testing.T) {
 	plugin.searchPath = "public" // Set default search path for test
 	ctxData := map[string]any{"timezone": "UTC"}
 	mock.ExpectBegin()
-	// Expect exact SQL string
-	mock.ExpectExec(`SELECT set_config($1, $2, true)`).
-		WithArgs("request.timezone", "UTC").
-		WillReturnResult(pgxmock.NewResult("SELECT", 1))
-	mock.ExpectExec(`SELECT set_config($1, $2, true)`).
-		WithArgs("erctx.timezone", "UTC").
-		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	expectApplyPluginContext(mock, "timezone", "UTC")
 	// Base tables.
 	tableRows := pgxmock.NewRows([]string{"table_name"}).AddRow("users").AddRow("orders")
 	// Expect exact SQL string with parameterized schema
@@ -475,9 +486,7 @@ func TestGetSchemaComprehensive(t *testing.T) {
 	plugin, mock := newTestPlugin(t)
 	plugin.searchPath = "public" // Set default search path for test
 	mock.ExpectBegin()
-	// Expect exact SQL string
-	mock.ExpectExec(`SELECT set_config($1, $2, true)`).WithArgs("request.user", "test_user").WillReturnResult(pgxmock.NewResult("SELECT", 1))
-	mock.ExpectExec(`SELECT set_config($1, $2, true)`).WithArgs("erctx.user", "test_user").WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	expectApplyPluginContext(mock, "user", "test_user")
 	// Mock tables query
 	tableRows := pgxmock.NewRows([]string{"table_name"}).AddRow("users").AddRow("products")
 	// Expect exact SQL string with parameterized schema
@@ -613,15 +622,7 @@ func TestTableDeleteComprehensive(t *testing.T) {
 			mock.ExpectBegin()
 
 			if tt.ctx != nil {
-				for k, v := range tt.ctx {
-					// Expect exact SQL string
-					mock.ExpectExec(`SELECT set_config($1, $2, true)`).
-						WithArgs("request."+k, fmt.Sprintf("%v", v)).
-						WillReturnResult(pgxmock.NewResult("SELECT", 1))
-					mock.ExpectExec(`SELECT set_config($1, $2, true)`).
-						WithArgs("erctx."+k, fmt.Sprintf("%v", v)).
-						WillReturnResult(pgxmock.NewResult("SELECT", 1))
-				}
+				expectApplyPluginContextMap(mock, tt.ctx)
 			}
 
 			whereClause, args, _ := easyrest.BuildWhereClauseSorted(tt.where)
@@ -915,13 +916,7 @@ func TestGetSchemaWithCustomSearchPath(t *testing.T) {
 	plugin.searchPath = "my_schema" // Set custom search path for test
 	ctxData := map[string]any{"timezone": "UTC"}
 	mock.ExpectBegin()
-	// Expect exact SQL string
-	mock.ExpectExec(`SELECT set_config($1, $2, true)`).
-		WithArgs("request.timezone", "UTC").
-		WillReturnResult(pgxmock.NewResult("SELECT", 1))
-	mock.ExpectExec(`SELECT set_config($1, $2, true)`).
-		WithArgs("erctx.timezone", "UTC").
-		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	expectApplyPluginContext(mock, "timezone", "UTC")
 	// Base tables.
 	tableRows := pgxmock.NewRows([]string{"table_name"}).AddRow("users").AddRow("orders")
 	// Expect exact SQL string with custom schema
@@ -1029,12 +1024,7 @@ func TestPgQueryCall(t *testing.T) {
 		mock.ExpectBegin()
 		mock.ExpectExec("SET TRANSACTION READ ONLY").
 			WillReturnResult(pgxmock.NewResult("SET", 0))
-		mock.ExpectExec(`SELECT set_config($1, $2, true)`).
-			WithArgs("request.claims_sub", "sub_value").
-			WillReturnResult(pgxmock.NewResult("SELECT", 1))
-		mock.ExpectExec(`SELECT set_config($1, $2, true)`).
-			WithArgs("erctx.claims_sub", "sub_value").
-			WillReturnResult(pgxmock.NewResult("SELECT", 1))
+		expectApplyPluginContext(mock, "claims_sub", "sub_value")
 		mock.ExpectQuery("SELECT id FROM users").
 			WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(1))
 		mock.ExpectCommit()
@@ -1084,14 +1074,9 @@ func TestApplyPluginContext_TypeBranches(t *testing.T) {
 		"arr":   []any{1, 2},
 		"other": time.Second,
 	}
-	for range ctx {
-		mock.ExpectExec("SELECT set_config($1, $2, true)").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnResult(pgxmock.NewResult("SELECT", 1))
-		mock.ExpectExec("SELECT set_config($1, $2, true)").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnResult(pgxmock.NewResult("SELECT", 1))
-	}
+	mock.ExpectExec(applyPluginContextSQL).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
 
 	require.NoError(t, ApplyPluginContext(context.Background(), tx, ctx))
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -1107,12 +1092,12 @@ func TestApplyPluginContext_EmptyAndExecError(t *testing.T) {
 	mock.ExpectBegin()
 	tx, err := mock.Begin(context.Background())
 	require.NoError(t, err)
-	mock.ExpectExec("SELECT set_config($1, $2, true)").
-		WithArgs("request.x", "y").
+	mock.ExpectExec(applyPluginContextSQL).
+		WithArgs([]string{"request.x", "erctx.x"}, []string{"y", "y"}).
 		WillReturnError(fmt.Errorf("boom"))
 	err = ApplyPluginContext(context.Background(), tx, map[string]any{"x": "y"})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "request.x")
+	assert.Contains(t, err.Error(), "plugin context")
 }
 
 func TestNewPgCachePlugin(t *testing.T) {
@@ -1149,12 +1134,7 @@ func TestTableGet_HarvestHeadersAndStatus(t *testing.T) {
 	require.NoError(t, err)
 
 	mock.ExpectBegin()
-	mock.ExpectExec(`SELECT set_config($1, $2, true)`).
-		WithArgs("request.claims", string(claimsJSON)).
-		WillReturnResult(pgxmock.NewResult("SELECT", 1))
-	mock.ExpectExec(`SELECT set_config($1, $2, true)`).
-		WithArgs("erctx.claims", string(claimsJSON)).
-		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	expectApplyPluginContext(mock, "claims", string(claimsJSON))
 	mock.ExpectQuery(`SELECT id FROM users`).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(1))
 	expectResponseHarvest(mock, map[string]string{
@@ -1197,12 +1177,7 @@ func TestTableUpdate_HarvestBeforeRollbackPrefer(t *testing.T) {
 	ctx := map[string]any{"prefer": map[string]any{"tx": "rollback"}}
 
 	mock.ExpectBegin()
-	mock.ExpectExec(`SELECT set_config($1, $2, true)`).
-		WithArgs("request.prefer", string(preferJSON)).
-		WillReturnResult(pgxmock.NewResult("SELECT", 1))
-	mock.ExpectExec(`SELECT set_config($1, $2, true)`).
-		WithArgs("erctx.prefer", string(preferJSON)).
-		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	expectApplyPluginContext(mock, "prefer", string(preferJSON))
 	mock.ExpectExec(`UPDATE users SET name = $1 WHERE id = $2`).
 		WithArgs("Bob", 1).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -1275,12 +1250,7 @@ func TestBulkCreate_HarvestAndApplyContext(t *testing.T) {
 		{"id": 2, "name": "Test2"},
 	}
 	mock.ExpectBegin()
-	mock.ExpectExec(`SELECT set_config($1, $2, true)`).
-		WithArgs("request.claims", "token").
-		WillReturnResult(pgxmock.NewResult("SELECT", 1))
-	mock.ExpectExec(`SELECT set_config($1, $2, true)`).
-		WithArgs("erctx.claims", "token").
-		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	expectApplyPluginContext(mock, "claims", "token")
 	mock.ExpectCopyFrom(pgx.Identifier{"test_table"}, []string{"id", "name"}).
 		WillReturnResult(2)
 	expectResponseHarvest(mock, map[string]string{"response.headers": `[{"X-Bulk":"1"}]`})
@@ -1301,12 +1271,7 @@ func TestApplyPluginContext_SkipsHookKeys(t *testing.T) {
 	mock.ExpectBegin()
 	tx, err := mock.Begin(context.Background())
 	require.NoError(t, err)
-	mock.ExpectExec("SELECT set_config($1, $2, true)").
-		WithArgs("request.timezone", "UTC").
-		WillReturnResult(pgxmock.NewResult("SELECT", 1))
-	mock.ExpectExec("SELECT set_config($1, $2, true)").
-		WithArgs("erctx.timezone", "UTC").
-		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	expectApplyPluginContext(mock, "timezone", "UTC")
 	require.NoError(t, ApplyPluginContext(context.Background(), tx, map[string]any{
 		"timezone":                "UTC",
 		easyrest.CtxDBPreRequest:  "custom_headers",
@@ -1442,12 +1407,7 @@ func TestBulkCreate_ContextHooks(t *testing.T) {
 		{"id": 2, "name": "Test2"},
 	}
 	mock.ExpectBegin()
-	mock.ExpectExec(`SELECT set_config($1, $2, true)`).
-		WithArgs("request.claims", "token").
-		WillReturnResult(pgxmock.NewResult("SELECT", 1))
-	mock.ExpectExec(`SELECT set_config($1, $2, true)`).
-		WithArgs("erctx.claims", "token").
-		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	expectApplyPluginContext(mock, "claims", "token")
 	expectContextRoutine(mock, "pre_hook")
 	mock.ExpectCopyFrom(pgx.Identifier{"test_table"}, []string{"id", "name"}).
 		WillReturnResult(2)

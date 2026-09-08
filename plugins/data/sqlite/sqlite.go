@@ -6,6 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,6 +49,8 @@ type sqliteQueryPlugin struct {
 	dbPluginPointer *sqlitePlugin
 }
 
+const defaultSQLiteCacheSize = 10000
+
 // buildSQLiteDSN converts an easyrest sqlite URI into a modernc driver DSN.
 func buildSQLiteDSN(uri string, readOnly bool) (string, error) {
 	if !strings.HasPrefix(uri, "sqlite://") {
@@ -59,19 +64,51 @@ func buildSQLiteDSN(uri string, readOnly bool) (string, error) {
 		query = rest[idx+1:]
 	}
 
+	cacheSize := defaultSQLiteCacheSize
+	var mmapSize int64
+	restQuery := ""
+	if query != "" {
+		q, err := url.ParseQuery(query)
+		if err != nil {
+			return "", fmt.Errorf("invalid sqlite URI query: %w", err)
+		}
+		if v := q.Get("cache_size"); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				return "", fmt.Errorf("invalid cache_size value: %s", v)
+			}
+			cacheSize = n
+			q.Del("cache_size")
+		}
+		if v := q.Get("mmap_size"); v != "" {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				return "", fmt.Errorf("invalid mmap_size value: %s", v)
+			}
+			if n < 0 {
+				return "", fmt.Errorf("invalid mmap_size value: %s", v)
+			}
+			mmapSize = n
+			q.Del("mmap_size")
+		}
+		restQuery = q.Encode()
+	}
+
 	dsn := "file:" + path
-	params := make([]string, 0, 3)
+	params := make([]string, 0, 5)
 	if readOnly {
 		params = append(params, "mode=ro")
 	} else {
 		params = append(params, "_busy_timeout=5000")
 	}
-	if query != "" {
-		params = append(params, query)
+	params = append(params, fmt.Sprintf("_pragma=cache_size(%d)", cacheSize))
+	if mmapSize > 0 {
+		params = append(params, fmt.Sprintf("_pragma=mmap_size(%d)", mmapSize))
 	}
-	if len(params) > 0 {
-		dsn += "?" + strings.Join(params, "&")
+	if restQuery != "" {
+		params = append(params, restQuery)
 	}
+	dsn += "?" + strings.Join(params, "&")
 	return dsn, nil
 }
 
@@ -117,13 +154,6 @@ func (s *sqlitePlugin) initConnection(uri string, readOnly bool) error {
 			s.closeResources()
 			return err
 		}
-	}
-
-	// Increase cache size for better performance
-	_, err = s.db.Exec("PRAGMA cache_size=10000")
-	if err != nil {
-		s.closeResources()
-		return err
 	}
 
 	if err := s.db.Ping(); err != nil {
@@ -263,9 +293,25 @@ func scanResultRows(rows *sql.Rows, initCap int) ([]map[string]any, error) {
 	return results, nil
 }
 
+func whereHasOp(where map[string]any, op string) bool {
+	for _, val := range where {
+		m, ok := val.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, ok := m[op]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // convertILIKEtoLike converts ILIKE operator to LIKE with COLLATE NOCASE
 func convertILIKEtoLike(where map[string]any) map[string]any {
-	result := make(map[string]any)
+	if where == nil || !whereHasOp(where, "ILIKE") {
+		return where
+	}
+	result := make(map[string]any, len(where))
 	for field, val := range where {
 		switch v := val.(type) {
 		case map[string]any:
@@ -338,6 +384,41 @@ func (s *sqlitePlugin) handleTransaction(userID string, ctxMap map[string]any, o
 	return result, nil
 }
 
+func sortedMapKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+func sqliteNeedsTx(ctx map[string]any, multiStatement bool) (bool, error) {
+	pref, err := easyrest.GetTxPreference(ctx)
+	if err != nil {
+		return true, err
+	}
+	if pref != "commit" || multiStatement {
+		return true, nil
+	}
+	if easyrest.ContextRoutineName(ctx, easyrest.CtxDBPreRequest) != "" ||
+		easyrest.ContextRoutineName(ctx, easyrest.CtxDBPostRequest) != "" {
+		return true, nil
+	}
+	return false, nil
+}
+
+func (s *sqlitePlugin) execPrepared(ctx context.Context, tx *sql.Tx, query string, args ...any) (sql.Result, error) {
+	if tx != nil {
+		return tx.ExecContext(ctx, query, args...)
+	}
+	stmt, err := s.getPreparedStmt(query, ctx)
+	if err != nil {
+		return nil, err
+	}
+	return stmt.ExecContext(ctx, args...)
+}
+
 // TableGet constructs and executes a SELECT query.
 func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, where map[string]any,
 	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, map[string]any, error) {
@@ -377,43 +458,45 @@ func (s *sqlitePlugin) TableCreate(userID, table string, data []map[string]any, 
 			}
 		}
 	}
-	res, err := s.handleTransaction(userID, ctx, func(tx *sql.Tx) (any, error) {
+	needTx, err := sqliteNeedsTx(ctx, len(data) > 1)
+	if err != nil {
+		return nil, nil, err
+	}
+	run := func(tx *sql.Tx) (any, error) {
 		ctxQuery := context.WithValue(backgroundCtx, userIDKey, userID)
-		var results []map[string]any
+		results := make([]map[string]any, 0, len(data))
 		for _, row := range data {
-			cols := make([]string, 0, len(row))
-			placeholders := make([]string, 0, len(row))
-			args := make([]any, 0, len(row))
-			for k, v := range row {
-				cols = append(cols, k)
-				placeholders = append(placeholders, "?")
-				args = append(args, v)
+			keys := sortedMapKeys(row)
+			placeholders := make([]string, len(keys))
+			args := make([]any, len(keys))
+			for i, k := range keys {
+				placeholders[i] = "?"
+				args[i] = row[k]
 			}
 			var insertSB strings.Builder
 			insertSB.WriteString("INSERT INTO ")
 			insertSB.WriteString(table)
 			insertSB.WriteString(" (")
-			insertSB.WriteString(strings.Join(cols, ", "))
+			insertSB.WriteString(strings.Join(keys, ", "))
 			insertSB.WriteString(") VALUES (")
 			insertSB.WriteString(strings.Join(placeholders, ", "))
 			insertSB.WriteByte(')')
-			baseQuery := insertSB.String()
-			_, err := tx.ExecContext(ctxQuery, baseQuery, args...)
-			if err != nil {
-				// Error occurs within the loop, transaction will be rolled back by handleTransaction
+			if _, err := s.execPrepared(ctxQuery, tx, insertSB.String(), args...); err != nil {
 				return nil, err
 			}
 			results = append(results, row)
 		}
-		// Return the collected input data.
 		return results, nil
-	})
-
-	if err != nil {
-		return nil, nil, err // Error already includes context from handleTransaction or the operation
 	}
-
-	// Type assertion for the result
+	var res any
+	if needTx {
+		res, err = s.handleTransaction(userID, ctx, run)
+	} else {
+		res, err = run(nil)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
 	if results, ok := res.([]map[string]any); ok {
 		return results, nil, nil
 	}
@@ -427,55 +510,50 @@ func (s *sqlitePlugin) TableUpdate(userID, table string, data map[string]any, wh
 			return 0, nil, err
 		}
 	}
-	res, err := s.handleTransaction(userID, ctx, func(tx *sql.Tx) (any, error) {
+	needTx, err := sqliteNeedsTx(ctx, false)
+	if err != nil {
+		return 0, nil, err
+	}
+	run := func(tx *sql.Tx) (any, error) {
 		ctxQuery := context.WithValue(backgroundCtx, userIDKey, userID)
-		var setParts []string
-		var args []any
-		if len(data) > 0 {
-			setParts = make([]string, 0, len(data))
-			args = make([]any, 0, len(data))
-		} else {
-			setParts = []string{}
-			args = []any{}
-		}
-		for k, v := range data {
-			setParts = append(setParts, k+" = ?")
-			args = append(args, v)
+		keys := sortedMapKeys(data)
+		setParts := make([]string, len(keys))
+		args := make([]any, 0, len(keys))
+		for i, k := range keys {
+			setParts[i] = k + " = ?"
+			args = append(args, data[k])
 		}
 		var sb strings.Builder
 		sb.WriteString("UPDATE ")
 		sb.WriteString(table)
 		sb.WriteString(" SET ")
 		sb.WriteString(strings.Join(setParts, ", "))
-		baseQuery := sb.String()
-
-		// Convert ILIKE to LIKE COLLATE NOCASE before building where clause
 		where = convertILIKEtoLike(where)
 		whereClause, whereArgs, err := easyrest.BuildWhereClauseSorted(where)
 		if err != nil {
-			// Error in building WHERE clause, transaction will be rolled back
 			return 0, err
 		}
-		baseQuery += whereClause
+		sb.WriteString(whereClause)
 		args = append(args, whereArgs...)
-		sqlRes, err := tx.ExecContext(ctxQuery, baseQuery, args...)
+		sqlRes, err := s.execPrepared(ctxQuery, tx, sb.String(), args...)
 		if err != nil {
-			// Error during execution, transaction will be rolled back
 			return 0, err
 		}
 		affected, err := sqlRes.RowsAffected()
 		if err != nil {
-			// Error getting affected rows, transaction will be rolled back
 			return 0, err
 		}
 		return int(affected), nil
-	})
-
-	if err != nil {
-		return 0, nil, err // Error already includes context from handleTransaction or the operation
 	}
-
-	// Type assertion for the result
+	var res any
+	if needTx {
+		res, err = s.handleTransaction(userID, ctx, run)
+	} else {
+		res, err = run(nil)
+	}
+	if err != nil {
+		return 0, nil, err
+	}
 	if affected, ok := res.(int); ok {
 		return affected, nil, nil
 	}
@@ -484,38 +562,40 @@ func (s *sqlitePlugin) TableUpdate(userID, table string, data map[string]any, wh
 
 // TableDelete builds and executes a DELETE query.
 func (s *sqlitePlugin) TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, map[string]any, error) {
-	res, err := s.handleTransaction(userID, ctx, func(tx *sql.Tx) (any, error) {
+	needTx, err := sqliteNeedsTx(ctx, false)
+	if err != nil {
+		return 0, nil, err
+	}
+	run := func(tx *sql.Tx) (any, error) {
 		ctxQuery := context.WithValue(backgroundCtx, userIDKey, userID)
-		// Convert ILIKE to LIKE COLLATE NOCASE before building where clause
 		where = convertILIKEtoLike(where)
 		whereClause, whereArgs, err := easyrest.BuildWhereClauseSorted(where)
 		if err != nil {
-			// Error in building WHERE clause, transaction will be rolled back
 			return 0, err
 		}
 		var sb strings.Builder
 		sb.WriteString("DELETE FROM ")
 		sb.WriteString(table)
 		sb.WriteString(whereClause)
-		baseQuery := sb.String()
-		sqlRes, err := tx.ExecContext(ctxQuery, baseQuery, whereArgs...)
+		sqlRes, err := s.execPrepared(ctxQuery, tx, sb.String(), whereArgs...)
 		if err != nil {
-			// Error during execution, transaction will be rolled back
 			return 0, err
 		}
 		affected, err := sqlRes.RowsAffected()
 		if err != nil {
-			// Error getting affected rows, transaction will be rolled back
 			return 0, err
 		}
 		return int(affected), nil
-	})
-
-	if err != nil {
-		return 0, nil, err // Error already includes context from handleTransaction or the operation
 	}
-
-	// Type assertion for the result
+	var res any
+	if needTx {
+		res, err = s.handleTransaction(userID, ctx, run)
+	} else {
+		res, err = run(nil)
+	}
+	if err != nil {
+		return 0, nil, err
+	}
 	if affected, ok := res.(int); ok {
 		return affected, nil, nil
 	}

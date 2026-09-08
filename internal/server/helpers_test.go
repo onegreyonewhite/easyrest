@@ -91,6 +91,10 @@ func TestProcessSelectAndWhere(t *testing.T) {
 	if err != nil || fields != nil || group != nil {
 		t.Fatalf("empty: %v %#v %#v", err, fields, group)
 	}
+	fields, group, err = processSelectParam("id", nil, nil)
+	if err != nil || len(fields) != 1 || fields[0] != "id" || len(group) != 1 || group[0] != "id" {
+		t.Fatalf("single identifier: %v %#v %#v", err, fields, group)
+	}
 	fields, group, err = processSelectParam("id, name:alias, amount.sum(), count(), erctx.claims_sub", map[string]string{"claims_sub": "u1"}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -231,6 +235,27 @@ func TestGetNestedValueAndSubstitute(t *testing.T) {
 	arr := substituteValue([]any{"request.id", 1}, flat, pluginCtx).([]any)
 	if arr[0] != "9" {
 		t.Fatalf("subst slice: %#v", arr)
+	}
+}
+
+func TestContextSubstNeeds(t *testing.T) {
+	if queryNeedsContextSubst(map[string][]string{"select": {"id"}, "where.eq.name": {"Alice"}}) {
+		t.Fatal("plain query values must not need flattening")
+	}
+	if !queryNeedsContextSubst(map[string][]string{"select": {"erctx.claims_sub"}}) {
+		t.Fatal("erctx in query values must need flattening")
+	}
+	if !queryNeedsContextSubst(map[string][]string{"where.eq.name": {"request.claims.sub"}}) {
+		t.Fatal("request. in query values must need flattening")
+	}
+	if valueNeedsContextSubst(map[string]any{"name": "Alice"}) {
+		t.Fatal("plain body must not need flattening")
+	}
+	if !valueNeedsContextSubst(map[string]any{"name": "erctx.claims_sub"}) {
+		t.Fatal("erctx in body must need flattening")
+	}
+	if !valueNeedsContextSubst([]map[string]any{{"nested": "request.claims.sub"}}) {
+		t.Fatal("request. in row body must need flattening")
 	}
 }
 
@@ -401,6 +426,20 @@ func TestParseRequestAndMakeResponse(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/?format=csv", nil)
+	makeResponseWithQuery(w, req, http.StatusOK, map[string]any{"a": 1}, nil)
+	if !strings.Contains(w.Header().Get("Content-Type"), "csv") {
+		t.Fatalf("nil query URL format csv: %s", w.Header().Get("Content-Type"))
+	}
+
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/?format=csv", nil)
+	makeResponseWithQuery(w, req, http.StatusOK, map[string]any{"a": 1}, url.Values{})
+	if !strings.Contains(w.Header().Get("Content-Type"), "json") {
+		t.Fatalf("empty query must not fall back to URL format: %s", w.Header().Get("Content-Type"))
+	}
+
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/?format=csv", nil)
 	makeResponseWithQuery(w, req, http.StatusOK, map[string]any{"a": 1}, req.URL.Query())
 	if !strings.Contains(w.Header().Get("Content-Type"), "csv") {
 		t.Fatalf("csv content type: %s", w.Header().Get("Content-Type"))
@@ -475,4 +514,30 @@ func TestProxyHeadersAndSpanName(t *testing.T) {
 	spanNameMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+}
+
+func TestRespondJSONHTMLEscape(t *testing.T) {
+	orig := GetConfig()
+	t.Cleanup(func() { SetConfig(orig) })
+
+	payload := map[string]any{"x": "<a>&"}
+
+	SetConfig(config.Config{Server: config.ServerConfig{DisableHTMLEscape: false}})
+	escaped := httptest.NewRecorder()
+	respondJSON(escaped, http.StatusOK, payload)
+	body := escaped.Body.String()
+	if !strings.Contains(body, `\u003c`) || !strings.Contains(body, `\u0026`) {
+		t.Fatalf("expected HTML-escaped JSON, got %q", body)
+	}
+
+	SetConfig(config.Config{Server: config.ServerConfig{DisableHTMLEscape: true}})
+	raw := httptest.NewRecorder()
+	respondJSON(raw, http.StatusOK, payload)
+	body = raw.Body.String()
+	if strings.Contains(body, `\u003c`) || strings.Contains(body, `\u0026`) {
+		t.Fatalf("expected unescaped JSON, got %q", body)
+	}
+	if !strings.Contains(body, `<a>&`) {
+		t.Fatalf("expected raw <>& in JSON, got %q", body)
+	}
 }

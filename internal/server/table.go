@@ -29,6 +29,16 @@ func processSelectParam(param string, flatCtx map[string]string, pluginCtx map[s
 	if param == "" {
 		return nil, nil, nil
 	}
+	if !strings.ContainsAny(param, ",:.()") {
+		raw := strings.TrimSpace(param)
+		if raw == "" {
+			return nil, nil, nil
+		}
+		if err := sanitizeIdentifier(raw); err != nil {
+			return nil, nil, fmt.Errorf("invalid field name in select field: %s", param)
+		}
+		return []string{raw}, []string{raw}, nil
+	}
 	parts := strings.Split(param, ",")
 	// Preallocate with a reasonable initial capacity.
 	selectFields := make([]string, 0, len(parts))
@@ -238,13 +248,17 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setPreferenceApplied(w, pluginCtx)
-	flatCtx, err := easyrest.FormatToContext(pluginCtx)
-	if err != nil {
-		middlewareHTTPError(w, dbKey, pluginCtx, "Error formatting context: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
 
 	queryValues := r.URL.Query()
+	needFlat := queryNeedsContextSubst(queryValues)
+	var flatCtx map[string]string
+	if needFlat {
+		flatCtx, err = easyrest.FormatToContext(pluginCtx)
+		if err != nil {
+			middlewareHTTPError(w, dbKey, pluginCtx, "Error formatting context: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
 
 	switch r.Method {
 	case http.MethodGet:
@@ -354,6 +368,12 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		flatCtx, err = formatContextForSubst(pluginCtx, flatCtx, data)
+		if err != nil {
+			middlewareHTTPError(w, dbKey, pluginCtx, "Error formatting context: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
 		for i, row := range data {
 			data[i] = substituteValue(row, flatCtx, pluginCtx).(map[string]any)
 		}
@@ -382,6 +402,12 @@ func tableHandler(w http.ResponseWriter, r *http.Request) {
 		data, ok := parsedData.(map[string]any)
 		if !ok {
 			middlewareHTTPError(w, dbKey, pluginCtx, "Invalid data format", http.StatusBadRequest)
+			return
+		}
+
+		flatCtx, err = formatContextForSubst(pluginCtx, flatCtx, data)
+		if err != nil {
+			middlewareHTTPError(w, dbKey, pluginCtx, "Error formatting context: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 

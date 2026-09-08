@@ -12,6 +12,27 @@ type SelectOptions struct {
 	OffsetNeedsLimit bool
 }
 
+func writeJoined(sb *strings.Builder, parts []string, sep string) {
+	for i, p := range parts {
+		if i > 0 {
+			sb.WriteString(sep)
+		}
+		sb.WriteString(p)
+	}
+}
+
+func joinedLen(parts []string, sep string) int {
+	n := 0
+	if len(parts) == 0 {
+		return 0
+	}
+	n = (len(parts) - 1) * len(sep)
+	for _, p := range parts {
+		n += len(p)
+	}
+	return n
+}
+
 // BuildSelectQuery assembles a parameterized SELECT with '?' placeholders.
 func BuildSelectQuery(table string, selectFields []string, where map[string]any, ordering, groupBy []string, limit, offset int, opts SelectOptions) (string, []any, error) {
 	if opts.WhereRewriter != nil {
@@ -19,10 +40,10 @@ func BuildSelectQuery(table string, selectFields []string, where map[string]any,
 	}
 
 	var sb strings.Builder
-	sb.Grow(100 + len(table) + len(strings.Join(selectFields, ", ")))
+	sb.Grow(100 + len(table) + joinedLen(selectFields, ", ") + joinedLen(groupBy, ", ") + joinedLen(ordering, ", "))
 	sb.WriteString("SELECT ")
 	if len(selectFields) > 0 {
-		sb.WriteString(strings.Join(selectFields, ", "))
+		writeJoined(&sb, selectFields, ", ")
 	} else {
 		sb.WriteByte('*')
 	}
@@ -37,11 +58,11 @@ func BuildSelectQuery(table string, selectFields []string, where map[string]any,
 
 	if len(groupBy) > 0 {
 		sb.WriteString(" GROUP BY ")
-		sb.WriteString(strings.Join(groupBy, ", "))
+		writeJoined(&sb, groupBy, ", ")
 	}
 	if len(ordering) > 0 {
 		sb.WriteString(" ORDER BY ")
-		sb.WriteString(strings.Join(ordering, ", "))
+		writeJoined(&sb, ordering, ", ")
 	}
 	if limit > 0 {
 		sb.WriteString(" LIMIT ")

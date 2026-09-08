@@ -263,6 +263,18 @@ func runContextRoutine(q sessionQueryExec, pluginCtx map[string]any, key string)
 
 // scanRows converts row data into []map[string]any.
 // Pre-allocates memory for results with a capacity of 100 for better performance.
+func looksLikeJSON(b []byte) bool {
+	i := 0
+	for i < len(b) && (b[i] == ' ' || b[i] == '\t' || b[i] == '\n' || b[i] == '\r') {
+		i++
+	}
+	if i >= len(b) {
+		return false
+	}
+	c := b[i]
+	return c == '{' || c == '[' || c == '"' || c == 't' || c == 'f' || c == 'n' || c == '-' || (c >= '0' && c <= '9')
+}
+
 func scanRows(r rowScanner) ([]map[string]any, error) {
 	cols, err := r.Columns()
 	if err != nil {
@@ -286,16 +298,15 @@ func scanRows(r rowScanner) ([]map[string]any, error) {
 			if t, ok := val.(time.Time); ok {
 				rowMap[colName] = easyrest.FormatSQLTime(t)
 			} else if b, ok := val.([]byte); ok {
-				// Attempt to unmarshal as JSON
-				var jsonData any
-				err := json.Unmarshal(b, &jsonData)
-				if err == nil {
-					// If successful, use the unmarshaled data
-					rowMap[colName] = jsonData
-				} else {
-					// If not JSON, treat as a regular string
-					rowMap[colName] = string(b)
+				if looksLikeJSON(b) {
+					var jsonData any
+					err := json.Unmarshal(b, &jsonData)
+					if err == nil {
+						rowMap[colName] = jsonData
+						continue
+					}
 				}
+				rowMap[colName] = string(b)
 			} else {
 				rowMap[colName] = val
 			}
@@ -689,12 +700,21 @@ func (m *mysqlPlugin) CallFunction(userID, funcName string, data map[string]any,
 			return nil, nil, fmt.Errorf("unexpected argument: %s", k)
 		}
 	}
-	var callQuery string
+	var callSB strings.Builder
 	if rInfo.ReturnType != "" {
-		callQuery = fmt.Sprintf("SELECT %s(%s) AS result", funcName, strings.Join(placeholders, ", "))
+		callSB.WriteString("SELECT ")
+		callSB.WriteString(funcName)
+		callSB.WriteByte('(')
+		callSB.WriteString(strings.Join(placeholders, ", "))
+		callSB.WriteString(") AS result")
 	} else {
-		callQuery = fmt.Sprintf("CALL %s(%s)", funcName, strings.Join(placeholders, ", "))
+		callSB.WriteString("CALL ")
+		callSB.WriteString(funcName)
+		callSB.WriteByte('(')
+		callSB.WriteString(strings.Join(placeholders, ", "))
+		callSB.WriteByte(')')
 	}
+	callQuery := callSB.String()
 
 	// Use handleTransaction for managing the transaction and context
 	res, outCtx, err := m.handleTransaction(ctx, func(tx *sql.Tx) (any, error) {
@@ -819,6 +839,25 @@ func (m *mysqlPlugin) handleTransaction(ctxMap map[string]any, operation func(tx
 func convertILIKEtoLower(where map[string]any) map[string]any {
 	if where == nil {
 		return nil
+	}
+	hasILIKE := false
+	for _, condition := range where {
+		conditionMap, ok := condition.(map[string]any)
+		if !ok {
+			continue
+		}
+		for op := range conditionMap {
+			if strings.EqualFold(op, "ILIKE") {
+				hasILIKE = true
+				break
+			}
+		}
+		if hasILIKE {
+			break
+		}
+	}
+	if !hasILIKE {
+		return where
 	}
 	result := make(map[string]any, len(where))
 	for field, condition := range where {
@@ -949,8 +988,15 @@ func (m *mysqlPlugin) TableCreate(userID, table string, data []map[string]any, c
 				placeholders = append(placeholders, "?")
 				args = append(args, row[k])
 			}
-			insertQ := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", table, strings.Join(cols, ", "), strings.Join(placeholders, ", "))
-			if _, err := tx.ExecContext(queryCtx, insertQ, args...); err != nil {
+			var insertSB strings.Builder
+			insertSB.WriteString("INSERT INTO ")
+			insertSB.WriteString(table)
+			insertSB.WriteString(" (")
+			insertSB.WriteString(strings.Join(cols, ", "))
+			insertSB.WriteString(") VALUES (")
+			insertSB.WriteString(strings.Join(placeholders, ", "))
+			insertSB.WriteByte(')')
+			if _, err := tx.ExecContext(queryCtx, insertSB.String(), args...); err != nil {
 				// Error occurs within the loop, transaction will be rolled back by handleTransaction
 				return nil, fmt.Errorf("failed to execute insert: %w", err)
 			}

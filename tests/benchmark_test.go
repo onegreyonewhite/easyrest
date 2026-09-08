@@ -21,6 +21,16 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+func sqliteBenchURI(path string) string {
+	return "sqlite://" + path + "?cache_size=-65536&mmap_size=268435456"
+}
+
+func enableBenchJSON() {
+	cfg := server.GetConfig()
+	cfg.Server.DisableHTMLEscape = true
+	server.SetConfig(cfg)
+}
+
 func BenchmarkTableGet(b *testing.B) {
 	// Disable logging
 	log.SetOutput(io.Discard)
@@ -56,7 +66,7 @@ func BenchmarkTableGet(b *testing.B) {
 	}
 
 	// Set environment variables for the server
-	os.Setenv("ER_DB_TEST", "sqlite://"+dbPath)
+	os.Setenv("ER_DB_TEST", sqliteBenchURI(dbPath))
 	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
 	secret := "mytestsecret"
 	os.Setenv("ER_TOKEN_SECRET", secret)
@@ -81,6 +91,7 @@ func BenchmarkTableGet(b *testing.B) {
 		return &jwtplugin.JWTAuthPlugin{}
 	}
 	server.ReloadConfig()
+	enableBenchJSON()
 	router := server.SetupRouter()
 
 	b.ResetTimer()
@@ -128,7 +139,7 @@ func BenchmarkTableCreate(b *testing.B) {
 	}
 
 	// Set environment variables for the server
-	os.Setenv("ER_DB_TEST", "sqlite://"+dbPath)
+	os.Setenv("ER_DB_TEST", sqliteBenchURI(dbPath))
 	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
 	secret := "mytestsecret"
 	os.Setenv("ER_TOKEN_SECRET", secret)
@@ -153,6 +164,7 @@ func BenchmarkTableCreate(b *testing.B) {
 		return &jwtplugin.JWTAuthPlugin{}
 	}
 	server.ReloadConfig()
+	enableBenchJSON()
 	router := server.SetupRouter()
 
 	// JSON body for inserting a record
@@ -213,7 +225,7 @@ func BenchmarkTableUpdate(b *testing.B) {
 	}
 
 	// Set environment variables for the server
-	os.Setenv("ER_DB_TEST", "sqlite://"+dbPath)
+	os.Setenv("ER_DB_TEST", sqliteBenchURI(dbPath))
 	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
 	secret := "mytestsecret"
 	os.Setenv("ER_TOKEN_SECRET", secret)
@@ -238,6 +250,7 @@ func BenchmarkTableUpdate(b *testing.B) {
 		return &jwtplugin.JWTAuthPlugin{}
 	}
 	server.ReloadConfig()
+	enableBenchJSON()
 	router := server.SetupRouter()
 
 	for i := 0; b.Loop(); i++ {
@@ -512,7 +525,7 @@ func BenchmarkQueryCall(b *testing.B) {
 	}
 	db.Close()
 
-	os.Setenv("ER_DB_TEST", "sqlite://"+dbPath)
+	os.Setenv("ER_DB_TEST", sqliteBenchURI(dbPath))
 	os.Setenv("ER_USE_QUERY_TEST", "1")
 	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
 	secret := "mytestsecret"
@@ -536,6 +549,7 @@ func BenchmarkQueryCall(b *testing.B) {
 		return &jwtplugin.JWTAuthPlugin{}
 	}
 	server.ReloadConfig()
+	enableBenchJSON()
 	router := server.SetupRouter()
 
 	queryBody := "SELECT id FROM users ORDER BY id ASC LIMIT 10"

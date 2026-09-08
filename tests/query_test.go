@@ -153,4 +153,73 @@ func TestQueryHandler(t *testing.T) {
 			t.Fatalf("Expected status 400, got %d, response: %s", rr.Code, rr.Body.String())
 		}
 	})
+
+	t.Run("format csv query param", func(t *testing.T) {
+		req, err := http.NewRequest("QUERY", "/api/mock/?format=csv", strings.NewReader("SELECT 1"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+tokenReadStr)
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("Expected status 200, got %d, response: %s", rr.Code, rr.Body.String())
+		}
+		if !strings.Contains(rr.Header().Get("Content-Type"), "text/csv") {
+			t.Fatalf("Expected text/csv, got %s", rr.Header().Get("Content-Type"))
+		}
+		if !strings.Contains(rr.Body.String(), "query") {
+			t.Fatalf("Expected CSV body with query column, got %s", rr.Body.String())
+		}
+	})
+
+	t.Run("format xml query param", func(t *testing.T) {
+		req, err := http.NewRequest("QUERY", "/api/mock/?format=xml", strings.NewReader("SELECT 1"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+tokenReadStr)
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("Expected status 200, got %d, response: %s", rr.Code, rr.Body.String())
+		}
+		if !strings.Contains(rr.Header().Get("Content-Type"), "application/xml") {
+			t.Fatalf("Expected application/xml, got %s", rr.Header().Get("Content-Type"))
+		}
+	})
+
+	t.Run("accept csv without format", func(t *testing.T) {
+		req, err := http.NewRequest("QUERY", "/api/mock/", strings.NewReader("SELECT 1"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+tokenReadStr)
+		req.Header.Set("Accept", "text/csv")
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("Expected status 200, got %d, response: %s", rr.Code, rr.Body.String())
+		}
+		if !strings.Contains(rr.Header().Get("Content-Type"), "text/csv") {
+			t.Fatalf("Expected text/csv from Accept, got %s", rr.Header().Get("Content-Type"))
+		}
+	})
+
+	t.Run("format csv wins over accept json", func(t *testing.T) {
+		req, err := http.NewRequest("QUERY", "/api/mock/?format=csv", strings.NewReader("SELECT 1"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+tokenReadStr)
+		req.Header.Set("Accept", "application/json")
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("Expected status 200, got %d, response: %s", rr.Code, rr.Body.String())
+		}
+		if !strings.Contains(rr.Header().Get("Content-Type"), "text/csv") {
+			t.Fatalf("Expected format=csv to win over Accept json, got %s", rr.Header().Get("Content-Type"))
+		}
+	})
 }

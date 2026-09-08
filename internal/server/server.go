@@ -39,23 +39,43 @@ import (
 type contextKey string
 
 const TokenClaimsKey contextKey = "tokenClaims"
+const requestPluginHeadersKey contextKey = "pluginHeaders"
+
+func buildRequestHeaderMaps(h http.Header) (map[string]string, map[string]any) {
+	authHeaders := make(map[string]string, len(h))
+	pluginHeaders := make(map[string]any, len(h))
+	for k, vals := range h {
+		lk := strings.ToLower(k)
+		if len(vals) == 1 {
+			authHeaders[lk] = vals[0]
+			pluginHeaders[lk] = vals[0]
+			continue
+		}
+		if lk == "cookie" {
+			authHeaders[lk] = strings.Join(vals, ", ")
+			pluginHeaders[lk] = strings.Join(vals, "; ")
+			continue
+		}
+		authHeaders[lk] = strings.Join(vals, ", ")
+		pluginHeaders[lk] = strings.Join(vals, " ")
+	}
+	return authHeaders, pluginHeaders
+}
+
+func pluginHeadersFromRequest(r *http.Request) map[string]any {
+	if headers, ok := r.Context().Value(requestPluginHeadersKey).(map[string]any); ok && headers != nil {
+		return headers
+	}
+	_, pluginHeaders := buildRequestHeaderMaps(r.Header)
+	return pluginHeaders
+}
 
 // BuildPluginContext extracts context variables from the HTTP request.
 func BuildPluginContext(r *http.Request) map[string]any {
 	cfg := currentConfig()
 	dbKey := strings.ToLower(chi.URLParam(r, "db"))
 	dbConfig := cfg.PluginMap[dbKey]
-	headers := make(map[string]any, len(r.Header))
-	for k, vals := range r.Header {
-		lk := strings.ToLower(k)
-		if len(vals) == 1 {
-			headers[lk] = vals[0]
-		} else if lk == "cookie" {
-			headers[lk] = strings.Join(vals, "; ")
-		} else {
-			headers[lk] = strings.Join(vals, " ")
-		}
-	}
+	headers := pluginHeadersFromRequest(r)
 	claims := getTokenClaims(r)
 	plainClaims := make(map[string]any, len(claims))
 	for k, v := range claims {
@@ -174,15 +194,7 @@ func Authenticate(r *http.Request) (string, *http.Request, error) {
 	authorized := false
 	var authErr error
 
-	headersForPlugin := make(map[string]string, len(r.Header))
-	for k, v := range r.Header {
-		lk := strings.ToLower(k)
-		if len(v) == 1 {
-			headersForPlugin[lk] = v[0]
-		} else {
-			headersForPlugin[lk] = strings.Join(v, ", ")
-		}
-	}
+	headersForPlugin, pluginHeaders := buildRequestHeaderMaps(r.Header)
 	pluginMethod := r.Method
 	pluginPath := r.URL.Path
 	pluginQuery := r.URL.RawQuery
@@ -208,7 +220,9 @@ func Authenticate(r *http.Request) (string, *http.Request, error) {
 		return "", r, fmt.Errorf("authentication failed: %w", authErr)
 	}
 
-	r = r.WithContext(context.WithValue(r.Context(), TokenClaimsKey, claims))
+	ctx := context.WithValue(r.Context(), TokenClaimsKey, claims)
+	ctx = context.WithValue(ctx, requestPluginHeadersKey, pluginHeaders)
+	r = r.WithContext(ctx)
 	userID := extractUserIDFromClaims(claims, cfg.TokenUserSearch)
 	// Store in cache using the raw Authorization header value as key
 	if claimsCache != nil {

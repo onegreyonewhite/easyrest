@@ -210,6 +210,8 @@ func (p *pgPlugin) Close() {
 	}
 }
 
+const applyPluginContextSQL = `SELECT set_config(k, v, true) FROM unnest($1::text[], $2::text[]) AS t(k, v)`
+
 // ApplyPluginContext sets session variables using set_config for all keys in ctx.
 // For each key, it sets two variables: one with prefix "request." (complex types are marshaled to JSON)
 // and one with prefix "erctx." using the default string representation.
@@ -218,6 +220,10 @@ func ApplyPluginContext(ctx context.Context, tx pgx.Tx, pluginCtx map[string]any
 	if len(pluginCtx) == 0 {
 		return nil
 	}
+	type kv struct {
+		key, requestVal, erctxVal string
+	}
+	items := make([]kv, 0, len(pluginCtx))
 	for key, val := range pluginCtx {
 		if easyrest.IsContextRoutineKey(key) {
 			continue
@@ -251,15 +257,21 @@ func ApplyPluginContext(ctx context.Context, tx pgx.Tx, pluginCtx map[string]any
 			requestVal = strVal
 			erctxVal = strVal
 		}
-		query := "SELECT set_config($1, $2, true)"
-		if _, err := tx.Exec(ctx, query, "request."+key, requestVal); err != nil {
-			return fmt.Errorf("failed to set request.%s: %w", key, err) // Add context to error
-		}
-		if _, err := tx.Exec(ctx, query, "erctx."+key, erctxVal); err != nil {
-			return fmt.Errorf("failed to set erctx.%s: %w", key, err) // Add context to error
-		}
+		items = append(items, kv{key, requestVal, erctxVal})
 	}
-
+	if len(items) == 0 {
+		return nil
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].key < items[j].key })
+	names := make([]string, 0, len(items)*2)
+	vals := make([]string, 0, len(items)*2)
+	for _, it := range items {
+		names = append(names, "request."+it.key, "erctx."+it.key)
+		vals = append(vals, it.requestVal, it.erctxVal)
+	}
+	if _, err := tx.Exec(ctx, applyPluginContextSQL, names, vals); err != nil {
+		return fmt.Errorf("failed to set plugin context: %w", err)
+	}
 	return nil
 }
 
@@ -328,6 +340,10 @@ func runContextRoutine(ctx context.Context, tx pgx.Tx, pluginCtx map[string]any,
 func (p *pgPlugin) processRows(rows pgx.Rows, loc *time.Location) ([]map[string]any, error) {
 	cols := rows.FieldDescriptions()
 	numCols := len(cols)
+	colNames := make([]string, numCols)
+	for i, col := range cols {
+		colNames[i] = string(col.Name)
+	}
 	results := make([]map[string]any, 0, 1000)
 	for rows.Next() {
 		values, err := rows.Values()
@@ -335,17 +351,17 @@ func (p *pgPlugin) processRows(rows pgx.Rows, loc *time.Location) ([]map[string]
 			return nil, err
 		}
 		rowMap := make(map[string]any, numCols)
-		for i, col := range cols {
+		for i, name := range colNames {
 			val := values[i]
 			switch v := val.(type) {
 			case time.Time:
-				rowMap[string(col.Name)] = easyrest.FormatSQLTime(v.In(loc))
+				rowMap[name] = easyrest.FormatSQLTime(v.In(loc))
 			case []byte:
-				rowMap[string(col.Name)] = string(v)
+				rowMap[name] = string(v)
 			case string, int, int8, int16, int32, int64, float32, float64, bool:
-				rowMap[string(col.Name)] = v
+				rowMap[name] = v
 			default:
-				rowMap[string(col.Name)] = fmt.Sprintf("%v", v)
+				rowMap[name] = fmt.Sprintf("%v", v)
 			}
 		}
 		results = append(results, rowMap)

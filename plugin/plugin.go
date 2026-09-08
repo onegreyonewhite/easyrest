@@ -5,7 +5,7 @@ import (
 )
 
 // Version is the plugin version.
-var Version = "v0.19.0"
+var Version = "v0.19.1"
 
 // DBPlugin – interface for DB access plugins.
 // Methods that take ctx may return an updated context map. A nil returned ctx
