@@ -174,6 +174,37 @@ func TestInjectContext(t *testing.T) {
 	}
 }
 
+func TestInjectContextSkipsHTTPResponseKeys(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	defer plugin.db.Close()
+
+	conn, err := plugin.db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("failed to get db conn: %v", err)
+	}
+	defer conn.Close()
+
+	ctxData := map[string]any{
+		"timezone":                         "UTC",
+		"response.header.Resource-Version": "abc",
+		"response.header.ETag":             `"abc:0.19:deadbeefdeadbeef"`,
+		easyrest.CtxCacheETagVariant:       "Accept=application/json",
+		"_mw.secret":                       "nope",
+	}
+
+	setQuery := regexp.QuoteMeta("SET @erctx_timezone = ?, @request_timezone = ?, time_zone = ?")
+	mock.ExpectExec(setQuery).
+		WithArgs("UTC", "UTC", "UTC").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	if err := plugin.injectContext(conn, ctxData); err != nil {
+		t.Fatalf("injectContext error: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
 func TestInjectContextNil(t *testing.T) {
 	plugin, _ := newTestPlugin(t)
 	defer plugin.db.Close()
@@ -1454,9 +1485,9 @@ func TestInjectContext_WithHookKeys(t *testing.T) {
 		easyrest.CtxDBPreRequest: "pre_hook",
 		"token":                  "secret",
 	}
-	setQuery := regexp.QuoteMeta("SET @erctx_db_pre_request = ?, @request_db_pre_request = ?, @erctx_token = ?, @request_token = ?")
+	setQuery := regexp.QuoteMeta("SET @erctx_token = ?, @request_token = ?")
 	mock.ExpectExec(setQuery).
-		WithArgs("pre_hook", "pre_hook", "secret", "secret").
+		WithArgs("secret", "secret").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	if err := plugin.injectContext(conn, ctxData); err != nil {
@@ -1474,10 +1505,6 @@ func TestTableGet_ContextHooksOrder(t *testing.T) {
 		easyrest.CtxDBPreRequest:  "pre_hook",
 		easyrest.CtxDBPostRequest: "post_hook",
 	}
-	setQuery := regexp.QuoteMeta("SET @erctx_db_post_request = ?, @request_db_post_request = ?, @erctx_db_pre_request = ?, @request_db_pre_request = ?")
-	mock.ExpectExec(setQuery).
-		WithArgs("post_hook", "post_hook", "pre_hook", "pre_hook").
-		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectBegin()
 	expectContextRoutine(mock, "pre_hook")
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT id FROM users")).
@@ -1500,10 +1527,6 @@ func TestTableGet_MissingPreHookSkipped(t *testing.T) {
 	plugin, mock := newTestPlugin(t)
 	defer plugin.db.Close()
 	ctx := map[string]any{easyrest.CtxDBPreRequest: "missing_pre"}
-	setQuery := regexp.QuoteMeta("SET @erctx_db_pre_request = ?, @request_db_pre_request = ?")
-	mock.ExpectExec(setQuery).
-		WithArgs("missing_pre", "missing_pre").
-		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectBegin()
 	mock.ExpectQuery(regexp.QuoteMeta("CALL missing_pre()")).
 		WillReturnError(&mysqldriver.MySQLError{Number: 1305, Message: "PROCEDURE missing_pre does not exist"})
@@ -1530,10 +1553,6 @@ func TestTableCreate_ContextHooksOrder(t *testing.T) {
 		easyrest.CtxDBPostRequest: "post_hook",
 	}
 	mock.ExpectBegin()
-	setQuery := regexp.QuoteMeta("SET @erctx_db_post_request = ?, @request_db_post_request = ?, @erctx_db_pre_request = ?, @request_db_pre_request = ?")
-	mock.ExpectExec(setQuery).
-		WithArgs("post_hook", "post_hook", "pre_hook", "pre_hook").
-		WillReturnResult(sqlmock.NewResult(1, 1))
 	expectContextRoutine(mock, "pre_hook")
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO users (id, name) VALUES (?, ?)")).
 		WithArgs(1, "n").
@@ -1557,10 +1576,6 @@ func TestTableCreate_MissingPostHookSkipped(t *testing.T) {
 	defer plugin.db.Close()
 	ctx := map[string]any{easyrest.CtxDBPostRequest: "missing_post"}
 	mock.ExpectBegin()
-	setQuery := regexp.QuoteMeta("SET @erctx_db_post_request = ?, @request_db_post_request = ?")
-	mock.ExpectExec(setQuery).
-		WithArgs("missing_post", "missing_post").
-		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO users (id, name) VALUES (?, ?)")).
 		WithArgs(1, "n").
 		WillReturnResult(sqlmock.NewResult(1, 1))
@@ -1584,10 +1599,6 @@ func TestTableCreate_PreHookErrorRollsBack(t *testing.T) {
 	defer plugin.db.Close()
 	ctx := map[string]any{easyrest.CtxDBPreRequest: "pre_hook"}
 	mock.ExpectBegin()
-	setQuery := regexp.QuoteMeta("SET @erctx_db_pre_request = ?, @request_db_pre_request = ?")
-	mock.ExpectExec(setQuery).
-		WithArgs("pre_hook", "pre_hook").
-		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectQuery(regexp.QuoteMeta("CALL pre_hook()")).
 		WillReturnError(&mysqldriver.MySQLError{Number: 1644, Message: "blocked"})
 	mock.ExpectRollback()
@@ -1612,10 +1623,6 @@ func TestCallFunction_ContextPostHook(t *testing.T) {
 	}
 	ctx := map[string]any{easyrest.CtxDBPostRequest: "post_hook"}
 	mock.ExpectBegin()
-	setQuery := regexp.QuoteMeta("SET @erctx_db_post_request = ?, @request_db_post_request = ?")
-	mock.ExpectExec(setQuery).
-		WithArgs("post_hook", "post_hook").
-		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT teapot() AS result")).
 		WillReturnRows(sqlmock.NewRows([]string{"result"}).AddRow("ok"))
 	expectContextRoutine(mock, "post_hook")

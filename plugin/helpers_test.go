@@ -84,6 +84,33 @@ func TestContextRoutineName(t *testing.T) {
 	}
 }
 
+func TestSkipDBSessionKey(t *testing.T) {
+	skip := []string{
+		"response.header.Resource-Version",
+		"response.header.ETag",
+		"response.headers",
+		"response.status",
+		CtxCacheInvalidate,
+		CtxCacheETagVariant,
+		CtxDBPreRequest,
+		CtxDBPostRequest,
+		"_",
+		"_mw.trace",
+		"_internal",
+	}
+	for _, k := range skip {
+		if !SkipDBSessionKey(k) {
+			t.Fatalf("expected skip %q", k)
+		}
+	}
+	keep := []string{"timezone", "claims", "headers", "prefer", "table", "foo_bar"}
+	for _, k := range keep {
+		if SkipDBSessionKey(k) {
+			t.Fatalf("must inject %q", k)
+		}
+	}
+}
+
 func TestCacheInvalidateNames(t *testing.T) {
 	if got := CacheInvalidateNames(nil); got != nil {
 		t.Fatalf("nil ctx: %#v", got)
@@ -177,5 +204,28 @@ func TestFormatToContext(t *testing.T) {
 	}
 	if _, ok := got["dash"]; ok {
 		t.Fatal("comment value must be skipped")
+	}
+}
+
+func TestFormatToContextSkipsHTTPAndCacheKeys(t *testing.T) {
+	got, err := FormatToContext(map[string]any{
+		"timezone":                         "UTC",
+		"response.header.ETag":             `"abc"`,
+		"response.header.Resource-Version": "abc",
+		"response.headers":                 `[{"X":"1"}]`,
+		"response.status":                  "200",
+		CtxCacheInvalidate:                 "users",
+		CtxCacheETagVariant:                "Accept=application/json",
+		CtxDBPreRequest:                    "pre_hook",
+		"_mw.secret":                       "nope",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["timezone"] != "UTC" {
+		t.Fatalf("timezone: %#v", got)
+	}
+	if len(got) != 1 {
+		t.Fatalf("HTTP/cache keys must not flatten: %#v", got)
 	}
 }

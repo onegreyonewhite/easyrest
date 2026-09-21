@@ -480,6 +480,123 @@ func TestParseRequestAndMakeResponse(t *testing.T) {
 	if !strings.Contains(w.Header().Get("Content-Type"), "json") {
 		t.Fatalf("unknown format fallback: %s", w.Header().Get("Content-Type"))
 	}
+
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Accept", contentTypeNDJSON)
+	makeResponseWithQuery(w, req, http.StatusOK, []map[string]any{{"a": 1}, {"a": 2}}, url.Values{})
+	if !strings.Contains(w.Header().Get("Content-Type"), contentTypeNDJSON) {
+		t.Fatalf("ndjson content type: %s", w.Header().Get("Content-Type"))
+	}
+	lines := strings.Split(strings.TrimSuffix(w.Body.String(), "\n"), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], `"a"`) || !strings.Contains(lines[1], `"a"`) {
+		t.Fatalf("ndjson array body: %q", w.Body.String())
+	}
+
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/?format=ndjson", nil)
+	makeResponseWithQuery(w, req, http.StatusOK, []map[string]any{}, req.URL.Query())
+	if !strings.Contains(w.Header().Get("Content-Type"), contentTypeNDJSON) {
+		t.Fatalf("empty ndjson content type: %s", w.Header().Get("Content-Type"))
+	}
+	if w.Body.Len() != 0 {
+		t.Fatalf("empty ndjson body: %q", w.Body.String())
+	}
+
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/?format=json", nil)
+	req.Header.Set("Accept", contentTypeNDJSON)
+	makeResponseWithQuery(w, req, http.StatusOK, []map[string]any{{"a": 1}}, req.URL.Query())
+	if !strings.Contains(w.Header().Get("Content-Type"), "application/json") {
+		t.Fatalf("format=json must win over ndjson Accept: %s", w.Header().Get("Content-Type"))
+	}
+	if !strings.HasPrefix(strings.TrimSpace(w.Body.String()), "[") {
+		t.Fatalf("format=json body: %q", w.Body.String())
+	}
+}
+
+func assertVaryAcceptAndContentType(t *testing.T, h http.Header) {
+	t.Helper()
+	joined := strings.Join(h.Values("Vary"), ",")
+	for _, name := range []string{"Accept", "Content-Type", "Prefer", "Range"} {
+		if !strings.Contains(joined, name) {
+			t.Fatalf("Vary missing %s: %q", name, joined)
+		}
+	}
+	if strings.Contains(joined, "Accept-Language") {
+		t.Fatalf("Vary must not include Accept-Language: %q", joined)
+	}
+}
+
+func TestMakeResponseAlwaysVariesAcceptAndContentType(t *testing.T) {
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Accept", "application/json")
+	makeResponseWithQuery(w, req, http.StatusOK, map[string]any{"a": 1}, url.Values{})
+	if !strings.Contains(w.Header().Get("Content-Type"), "application/json") {
+		t.Fatalf("content type: %s", w.Header().Get("Content-Type"))
+	}
+	assertVaryAcceptAndContentType(t, w.Header())
+}
+
+func TestCacheVaryFingerprint(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set("Range", "0-9")
+	req.Header.Set("Range-Unit", "items")
+	got := cacheVaryFingerprint("", req, map[string]any{
+		"prefer": map[string]any{"tx": "commit", "timezone": "UTC"},
+	})
+	want := "Accept=application/json\nContent-Type=application/json\nPrefer=timezone=UTC tx=commit\nRange=0-9\nRange-Unit=items"
+	if got != want {
+		t.Fatalf("fingerprint:\n%s\nwant:\n%s", got, want)
+	}
+
+	got = cacheVaryFingerprint("application/json", httptest.NewRequest(http.MethodGet, "/", nil), map[string]any{
+		"timezone": "GMT",
+		"prefer":   map[string]any{"tx": "commit"},
+	})
+	want = "Accept=application/json\nContent-Type=\nPrefer=timezone=GMT tx=commit\nRange=\nRange-Unit="
+	if got != want {
+		t.Fatalf("ctx timezone fingerprint:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestAddResponseFormatVaryIdempotent(t *testing.T) {
+	w := httptest.NewRecorder()
+	w.Header().Add("Vary", "Origin")
+	addResponseFormatVary(w)
+	addResponseFormatVary(w)
+	got := w.Header().Values("Vary")
+	want := []string{"Origin", "Accept", "Content-Type", "Prefer", "Range"}
+	if len(got) != len(want) {
+		t.Fatalf("Vary values: %q", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Vary values: %q", got)
+		}
+	}
+}
+
+func TestTableGetVariesAcceptAndContentTypeOnce(t *testing.T) {
+	router, _ := setupTableRouter(t, &fakeAuthPlugin{}, "", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/test/users/", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET status: %d body=%q", w.Code, w.Body.String())
+	}
+	assertVaryAcceptAndContentType(t, w.Header())
+	counts := map[string]int{}
+	for _, v := range w.Header().Values("Vary") {
+		counts[v]++
+	}
+	for _, name := range []string{"Accept", "Content-Type", "Prefer", "Range"} {
+		if counts[name] != 1 {
+			t.Fatalf("Vary %s count: %d values=%q", name, counts[name], w.Header().Values("Vary"))
+		}
+	}
 }
 
 func TestProxyHeadersAndSpanName(t *testing.T) {
@@ -539,5 +656,18 @@ func TestRespondJSONHTMLEscape(t *testing.T) {
 	}
 	if !strings.Contains(body, `<a>&`) {
 		t.Fatalf("expected raw <>& in JSON, got %q", body)
+	}
+
+	SetConfig(config.Config{Server: config.ServerConfig{DisableHTMLEscape: false}})
+	ndjsonEscaped := httptest.NewRecorder()
+	respondNDJSON(ndjsonEscaped, http.StatusOK, map[string]any{"x": "<a>&"})
+	if !strings.Contains(ndjsonEscaped.Body.String(), `\u003c`) {
+		t.Fatalf("expected HTML-escaped NDJSON, got %q", ndjsonEscaped.Body.String())
+	}
+	SetConfig(config.Config{Server: config.ServerConfig{DisableHTMLEscape: true}})
+	ndjsonRaw := httptest.NewRecorder()
+	respondNDJSON(ndjsonRaw, http.StatusOK, map[string]any{"x": "<a>&"})
+	if !strings.Contains(ndjsonRaw.Body.String(), `<a>&`) {
+		t.Fatalf("expected unescaped NDJSON, got %q", ndjsonRaw.Body.String())
 	}
 }

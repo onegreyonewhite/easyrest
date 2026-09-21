@@ -674,6 +674,9 @@ func TestCorsMiddleware(t *testing.T) {
 	if rr.Header().Get("Access-Control-Allow-Origin") != "http://example.com" {
 		t.Errorf("Expected CORS Allow-Origin header, got %q", rr.Header().Get("Access-Control-Allow-Origin"))
 	}
+	if got := rr.Header().Get("Access-Control-Expose-Headers"); got != "ETag, Resource-Version, Vary, Preference-Applied" {
+		t.Errorf("Expected CORS Expose-Headers, got %q", got)
+	}
 
 	// Test regular request with origin
 	req2, _ := http.NewRequest("GET", "/health", nil)

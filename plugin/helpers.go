@@ -59,6 +59,9 @@ const (
 	CtxFunction        = "function"
 	CtxHandlerStatus   = "handler.status"
 	CtxCacheInvalidate = "cache.invalidate"
+	// CtxCacheETagVariant is the canonical Vary fingerprint for cache ETags
+	// (negotiated type, Content-Type, Prefer, Range), not the media type alone.
+	CtxCacheETagVariant = "cache.etag.variant"
 )
 
 // dbTypeAliases maps URI schemes to a stable type name. Unknown schemes stay as-is.
@@ -96,6 +99,17 @@ func DBTypeFromURI(uri string) string {
 // not be written as a session GUC (hyphens are invalid in PostgreSQL GUC names).
 func IsContextRoutineKey(key string) bool {
 	return key == CtxDBPreRequest || key == CtxDBPostRequest
+}
+
+// SkipDBSessionKey reports whether key must not be injected as a request/erctx
+// session variable. HTTP outbound keys (response.*) and cache plugin keys
+// (cache.*) stay on pluginCtx for headers and harvest. Keys that start with
+// "_" are private to middleware on the same request. None of these are request GUCs.
+func SkipDBSessionKey(key string) bool {
+	return IsContextRoutineKey(key) ||
+		strings.HasPrefix(key, "response.") ||
+		strings.HasPrefix(key, "cache.") ||
+		strings.HasPrefix(key, "_")
 }
 
 // isSafeRoutineName allows ident or schema.ident.
@@ -312,6 +326,7 @@ func BuildWhereClauseSorted(where map[string]any) (string, []any, error) {
 // It replaces dots and dashes with underscores and converts keys to lowercase.
 // For arrays, it uses the index as part of the key.
 // It also validates that the final values do not contain dangerous characters.
+// Top-level keys that SkipDBSessionKey reports are omitted.
 var keyNormalizer = strings.NewReplacer(".", "_", "-", "_")
 
 func normalizeKey(k string) string {
@@ -376,6 +391,9 @@ func FormatToContext(input map[string]any) (map[string]string, error) {
 		return nil
 	}
 	for k, v := range input {
+		if SkipDBSessionKey(k) {
+			continue
+		}
 		nk := normalizeKey(k)
 		if err := flatten(nk, v); err != nil {
 			return nil, err

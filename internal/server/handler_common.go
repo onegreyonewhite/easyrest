@@ -74,6 +74,22 @@ func setPreferenceApplied(w http.ResponseWriter, pluginCtx map[string]any) {
 	w.Header().Set("Preference-Applied", applied.String())
 }
 
+func appendPreferenceApplied(w http.ResponseWriter, token string) {
+	if token == "" {
+		return
+	}
+	cur := strings.TrimSpace(w.Header().Get("Preference-Applied"))
+	if cur == "" {
+		w.Header().Set("Preference-Applied", token)
+		return
+	}
+	w.Header().Set("Preference-Applied", cur+" "+token)
+}
+
+func formatDBServerTiming(elapsed time.Duration) string {
+	return "db;dur=" + strconv.FormatFloat(float64(elapsed.Milliseconds()), 'f', 3, 64)
+}
+
 func setDBServerTiming(w http.ResponseWriter, elapsed time.Duration) {
-	w.Header().Set("Server-Timing", "db;dur="+strconv.FormatFloat(float64(elapsed.Milliseconds()), 'f', 3, 64))
+	w.Header().Set("Server-Timing", formatDBServerTiming(elapsed))
 }

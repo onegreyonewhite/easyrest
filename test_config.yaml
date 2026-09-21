@@ -19,6 +19,12 @@ cors:
     - "Content-Type"
     - "Authorization"
     - "X-Requested-With"
+    - "Prefer"
+    - "If-Match"
+    - "If-None-Match"
+    - "If-Resource-Version"
+    - "Range"
+    - "Range-Unit"
   max_age: 86400
 auth_plugins:
   jwt:

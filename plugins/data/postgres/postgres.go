@@ -212,10 +212,12 @@ func (p *pgPlugin) Close() {
 
 const applyPluginContextSQL = `SELECT set_config(k, v, true) FROM unnest($1::text[], $2::text[]) AS t(k, v)`
 
-// ApplyPluginContext sets session variables using set_config for all keys in ctx.
-// For each key, it sets two variables: one with prefix "request." (complex types are marshaled to JSON)
-// and one with prefix "erctx." using the default string representation.
-// Keys are processed in sorted order.
+// ApplyPluginContext sets session variables using set_config for ctx keys
+// that belong in the SQL session. SkipDBSessionKey omits HTTP outbound keys,
+// cache plugin keys, hook names, and middleware-private keys that start with "_".
+// For each remaining key, it sets two variables: one with prefix "request."
+// (complex types are marshaled to JSON) and one with prefix "erctx." using
+// the default string representation. Keys are processed in sorted order.
 func ApplyPluginContext(ctx context.Context, tx pgx.Tx, pluginCtx map[string]any) error {
 	if len(pluginCtx) == 0 {
 		return nil
@@ -225,7 +227,7 @@ func ApplyPluginContext(ctx context.Context, tx pgx.Tx, pluginCtx map[string]any
 	}
 	items := make([]kv, 0, len(pluginCtx))
 	for key, val := range pluginCtx {
-		if easyrest.IsContextRoutineKey(key) {
+		if easyrest.SkipDBSessionKey(key) {
 			continue
 		}
 		var requestVal, erctxVal string

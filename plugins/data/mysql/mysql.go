@@ -50,7 +50,8 @@ type mysqlPlugin struct {
 	defaultTimeout time.Duration
 }
 
-// injectContext sets *all* keys from ctx under two prefixes: erctx_ and request_.
+// injectContext sets request/erctx session variables from ctx.
+// SkipDBSessionKey omits response.*, cache.*, hook names, and keys that start with "_".
 func (m *mysqlPlugin) injectContext(conn *sql.Conn, ctx map[string]any) error {
 	if ctx == nil {
 		return nil

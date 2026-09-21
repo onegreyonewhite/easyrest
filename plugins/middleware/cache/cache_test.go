@@ -64,6 +64,10 @@ func mustInit(t *testing.T, store Store, settings map[string]any) *Plugin {
 }
 
 func tableCtx(method, table, ifMatch, ifNoneMatch string) map[string]any {
+	return tableCtxHeaders(method, table, ifMatch, ifNoneMatch, "")
+}
+
+func tableCtxHeaders(method, table, ifMatch, ifNoneMatch, ifResourceVersion string) map[string]any {
 	headers := map[string]any{}
 	if ifMatch != "" {
 		headers["if-match"] = ifMatch
@@ -71,11 +75,18 @@ func tableCtx(method, table, ifMatch, ifNoneMatch string) map[string]any {
 	if ifNoneMatch != "" {
 		headers["if-none-match"] = ifNoneMatch
 	}
+	if ifResourceVersion != "" {
+		headers["if-resource-version"] = ifResourceVersion
+	}
 	return map[string]any{
 		easyrest.CtxTable: table,
 		"method":          method,
 		"headers":         headers,
 	}
+}
+
+func jsonFingerprint() string {
+	return "Accept=application/json\nContent-Type=\nPrefer=\nRange=\nRange-Unit="
 }
 
 func TestInitDefaults(t *testing.T) {
@@ -148,7 +159,10 @@ func TestPreRequest304(t *testing.T) {
 	store := newFakeStore()
 	store.values["etag:test:users"] = "abc"
 	p := mustInit(t, store, nil)
-	ctx := tableCtx(http.MethodGet, "users", "", "abc")
+	fp := jsonFingerprint()
+	etag := quoteETag(opaqueTag("abc", fp), false)
+	ctx := tableCtx(http.MethodGet, "users", "", etag)
+	ctx[easyrest.CtxCacheETagVariant] = fp
 	got, status, err := p.PreRequest("test", ctx)
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -156,8 +170,90 @@ func TestPreRequest304(t *testing.T) {
 	if status == nil || *status != http.StatusNotModified {
 		t.Fatalf("status: %v", status)
 	}
-	if got[headerETag] != "abc" {
+	if got[headerETag] != etag {
 		t.Fatalf("etag header: %#v", got[headerETag])
+	}
+	if got[headerResourceVersion] != "abc" {
+		t.Fatalf("resource-version: %#v", got[headerResourceVersion])
+	}
+}
+
+func TestPreRequest304WeakAndStrongSameOpaque(t *testing.T) {
+	store := newFakeStore()
+	store.values["etag:test:users"] = "abc"
+	p := mustInit(t, store, nil)
+	fp := jsonFingerprint()
+	opaque := opaqueTag("abc", fp)
+	ctx := tableCtx(http.MethodGet, "users", "", `W/"`+opaque+`"`)
+	ctx[easyrest.CtxCacheETagVariant] = fp
+	_, status, err := p.PreRequest("test", ctx)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if status == nil || *status != http.StatusNotModified {
+		t.Fatalf("weak If-None-Match: %v", status)
+	}
+
+	ctx = tableCtx(http.MethodGet, "users", "", `"`+opaque+`", W/"other"`)
+	ctx[easyrest.CtxCacheETagVariant] = fp
+	_, status, err = p.PreRequest("test", ctx)
+	if err != nil || status == nil || *status != http.StatusNotModified {
+		t.Fatalf("list If-None-Match: status=%v err=%v", status, err)
+	}
+}
+
+func TestPreRequest304Star(t *testing.T) {
+	store := newFakeStore()
+	store.values["etag:test:users"] = "abc"
+	p := mustInit(t, store, nil)
+	ctx := tableCtx(http.MethodGet, "users", "", "*")
+	_, status, err := p.PreRequest("test", ctx)
+	if err != nil || status == nil || *status != http.StatusNotModified {
+		t.Fatalf("star: status=%v err=%v", status, err)
+	}
+}
+
+func TestPreRequest304RequiresRepresentationETag(t *testing.T) {
+	store := newFakeStore()
+	store.values["etag:test:users"] = "abc"
+	p := mustInit(t, store, nil)
+	fp := jsonFingerprint()
+	ctx := tableCtx(http.MethodGet, "users", "", "abc")
+	ctx[easyrest.CtxCacheETagVariant] = fp
+	got, status, err := p.PreRequest("test", ctx)
+	if err != nil || status != nil {
+		t.Fatalf("bare version must not 304, status=%v err=%v", status, err)
+	}
+	want := quoteETag(opaqueTag("abc", fp), false)
+	if got[headerETag] != want {
+		t.Fatalf("etag header: %#v want %s", got[headerETag], want)
+	}
+	if store.values["etag:test:users"] != "abc" {
+		t.Fatalf("store: %#v", store.values)
+	}
+
+	other := "Accept=application/x-ndjson\nContent-Type=\nPrefer=\nRange=\nRange-Unit="
+	ctx = tableCtx(http.MethodGet, "users", "", want)
+	ctx[easyrest.CtxCacheETagVariant] = other
+	got, status, err = p.PreRequest("test", ctx)
+	if err != nil || status != nil {
+		t.Fatalf("different fingerprint must not 304, status=%v err=%v", status, err)
+	}
+	if got[headerETag] == want {
+		t.Fatalf("NDJSON ETag must differ: %q", got[headerETag])
+	}
+
+	ctx = tableCtx(http.MethodGet, "users", "", want)
+	ctx[easyrest.CtxCacheETagVariant] = fp
+	got, status, err = p.PreRequest("test", ctx)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if status == nil || *status != http.StatusNotModified {
+		t.Fatalf("status: %v", status)
+	}
+	if got[headerETag] != want {
+		t.Fatalf("304 etag: %#v", got[headerETag])
 	}
 }
 
@@ -165,13 +261,76 @@ func TestPreRequest412(t *testing.T) {
 	store := newFakeStore()
 	store.values["etag:test:users"] = "current"
 	p := mustInit(t, store, nil)
-	ctx := tableCtx(http.MethodPatch, "users", "stale", "")
+	fp := jsonFingerprint()
+	ctx := tableCtx(http.MethodPatch, "users", `"stale"`, "")
+	ctx[easyrest.CtxCacheETagVariant] = fp
 	_, status, err := p.PreRequest("test", ctx)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	if status == nil || *status != http.StatusPreconditionFailed {
 		t.Fatalf("status: %v", status)
+	}
+
+	opaque := opaqueTag("current", fp)
+	ctx = tableCtx(http.MethodPatch, "users", `"`+opaque+`"`, "")
+	ctx[easyrest.CtxCacheETagVariant] = fp
+	_, status, err = p.PreRequest("test", ctx)
+	if err != nil || status != nil {
+		t.Fatalf("strong If-Match must not 412, status=%v err=%v", status, err)
+	}
+}
+
+func TestPreRequestIfResourceVersion(t *testing.T) {
+	store := newFakeStore()
+	store.values["etag:test:users"] = "current"
+	p := mustInit(t, store, nil)
+	ctx := tableCtxHeaders(http.MethodPatch, "users", `"stale"`, "", "stale-rev")
+	_, status, err := p.PreRequest("test", ctx)
+	if err != nil || status == nil || *status != http.StatusPreconditionFailed {
+		t.Fatalf("mismatch: status=%v err=%v", status, err)
+	}
+
+	ctx = tableCtxHeaders(http.MethodPatch, "users", `"stale"`, "", "current")
+	_, status, err = p.PreRequest("test", ctx)
+	if err != nil || status != nil {
+		t.Fatalf("matching Resource-Version skips If-Match, status=%v err=%v", status, err)
+	}
+
+	ctx = tableCtxHeaders(http.MethodPatch, "users", `"stale"`, "", `"current"`)
+	_, status, err = p.PreRequest("test", ctx)
+	if err != nil || status != nil {
+		t.Fatalf("quoted Resource-Version, status=%v err=%v", status, err)
+	}
+}
+
+func TestPreRequestWeakIfMatchRevision(t *testing.T) {
+	store := newFakeStore()
+	store.values["etag:test:users"] = "current"
+	p := mustInit(t, store, nil)
+	ctx := tableCtx(http.MethodPatch, "users", `W/"stale"`, "")
+	_, status, err := p.PreRequest("test", ctx)
+	if err != nil || status == nil || *status != http.StatusPreconditionFailed {
+		t.Fatalf("weak mismatch: status=%v err=%v", status, err)
+	}
+
+	ctx = tableCtx(http.MethodPatch, "users", `W/"current"`, "")
+	_, status, err = p.PreRequest("test", ctx)
+	if err != nil || status != nil {
+		t.Fatalf("weak match revision, status=%v err=%v", status, err)
+	}
+}
+
+func TestPreRequestGETIfMatch412(t *testing.T) {
+	store := newFakeStore()
+	store.values["etag:test:users"] = "current"
+	p := mustInit(t, store, nil)
+	fp := jsonFingerprint()
+	ctx := tableCtx(http.MethodGet, "users", `"stale"`, "")
+	ctx[easyrest.CtxCacheETagVariant] = fp
+	_, status, err := p.PreRequest("test", ctx)
+	if err != nil || status == nil || *status != http.StatusPreconditionFailed {
+		t.Fatalf("GET If-Match: status=%v err=%v", status, err)
 	}
 }
 
@@ -203,8 +362,15 @@ func TestPreRequestGETSetsETag(t *testing.T) {
 	if etag == "" {
 		t.Fatal("expected ETag in ctx")
 	}
-	if store.values["etag:test:users"] != etag {
-		t.Fatalf("stored: %#v", store.values)
+	rev := store.values["etag:test:users"]
+	if rev == "" || rev == etag {
+		t.Fatalf("store must keep UUID, got %#v etag=%q", store.values, etag)
+	}
+	if got[headerResourceVersion] != rev {
+		t.Fatalf("resource-version: %#v store=%q", got[headerResourceVersion], rev)
+	}
+	if etag != quoteETag(opaqueTag(rev, ""), false) {
+		t.Fatalf("etag: %q", etag)
 	}
 }
 
@@ -235,8 +401,15 @@ func TestPostRequestBumpOnSuccessWrite(t *testing.T) {
 	if headers["ETag"] == "" || headers["ETag"] == "old" {
 		t.Fatalf("headers: %#v", headers)
 	}
-	if store.values["etag:test:users"] != headers["ETag"] {
+	rev := store.values["etag:test:users"]
+	if rev == "" || rev == "old" {
 		t.Fatalf("store: %#v", store.values)
+	}
+	if headers["Resource-Version"] != rev {
+		t.Fatalf("resource-version: %#v store=%q", headers, rev)
+	}
+	if headers["ETag"] != quoteETag(opaqueTag(rev, ""), true) {
+		t.Fatalf("etag: %#v", headers)
 	}
 }
 
@@ -347,7 +520,8 @@ func TestPostRequestCacheInvalidateWithWriteETag(t *testing.T) {
 	if headers["ETag"] == "" || headers["ETag"] == "old-users" {
 		t.Fatalf("headers: %#v", headers)
 	}
-	if store.values["etag:test:users"] != headers["ETag"] {
+	rev := store.values["etag:test:users"]
+	if headers["Resource-Version"] != rev {
 		t.Fatalf("users etag: %#v", store.values)
 	}
 	if store.values["etag:test:orders"] == "old-orders" {

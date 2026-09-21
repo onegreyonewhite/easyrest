@@ -277,6 +277,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Methods", joinedMethods)
 			w.Header().Set("Access-Control-Allow-Headers", joinedHeaders)
+			w.Header().Set("Access-Control-Expose-Headers", "ETag, Resource-Version, Vary, Preference-Applied")
 			w.Header().Set("Access-Control-Max-Age", maxAgeStr)
 		}
 
@@ -371,8 +372,23 @@ func SetupRouter() chi.Router {
 	r.Method("QUERY", "/api/{db}/", http.HandlerFunc(queryHandler))
 	// Call RPC function endpoint.
 	r.Post("/api/{db}/rpc/{func}/", rpcHandler)
-	// Call table endpoint (supports multiple methods inside handler).
-	r.HandleFunc("/api/{db}/{table}/", tableHandler)
+	// Table CRUD. HandleFunc registers mALL first so PUT/HEAD/OPTIONS/QUERY keep
+	// today's 405 after the table preamble. Later Get/Post/Patch/Delete replace
+	// only those method slots (chi setEndpoint mALL vs single-method). Do not
+	// reorder; do not use MethodNotAllowed or Route/Mount here.
+	tables := r.With(
+		sanitizeTableMiddleware,
+		requirePluginMiddleware(tableResource),
+		authenticateMiddleware,
+		tableScopeMiddleware,
+		tablePreRequestMiddleware,
+	)
+	const tablePath = "/api/{db}/{table}/"
+	tables.HandleFunc(tablePath, tableMethodNotAllowed)
+	tables.Get(tablePath, tableGet)
+	tables.Post(tablePath, tablePost)
+	tables.Patch(tablePath, tablePatch)
+	tables.Delete(tablePath, tableDelete)
 	// Add health check endpoint.
 	r.Get("/health", healthHandler)
 	return r

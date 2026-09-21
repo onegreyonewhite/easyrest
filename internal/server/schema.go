@@ -199,7 +199,7 @@ func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs, viewDefs, rpcDef
 		BasePath:            "/api/" + dbKey,
 		Schemes:             []string{"http"},
 		Consumes:            []string{"application/json"},
-		Produces:            []string{"application/json"},
+		Produces:            []string{"application/json", "application/x-ndjson"},
 		Definitions:         mergedDefs,
 		SecurityDefinitions: swaggerSecurityDefinitions,
 		Paths:               make(map[string]any),

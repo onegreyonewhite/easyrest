@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
@@ -41,6 +42,9 @@ def seed(db_path: Path, rows: int = DEFAULT_ROWS) -> None:
     conn.commit()
     count = cur.execute("SELECT COUNT(*) FROM users").fetchone()[0]
     conn.close()
+    # Distroless easyrest-server runs as uid 65532 and needs WAL sidecars.
+    os.chmod(db_path.parent, 0o777)
+    os.chmod(db_path, 0o666)
     print(f"Seeded {count} rows into {db_path}")
 
 

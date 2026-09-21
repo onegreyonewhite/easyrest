@@ -27,8 +27,29 @@ python3 "${PGO_DIR}/seed_sqlite.py"
 
 mkdir -p "${PROFILES_DIR}" "${LOG_DIR}"
 
+fetch_etag() {
+  local url="$1"
+  shift
+  local hdrs body status etag
+  hdrs="$(mktemp)"
+  body="$(mktemp)"
+  status="$(curl -sS -D "${hdrs}" -o "${body}" -w '%{http_code}' "$@" "${url}" || true)"
+  etag="$(awk 'BEGIN{IGNORECASE=1} /^etag:/{sub(/^[^:]+:[ \t]*/, ""); gsub("\r",""); print; exit}' "${hdrs}")"
+  if [[ "${status}" != "200" || -z "${etag}" ]]; then
+    echo "ERROR: ETag warm failed for ${url} (HTTP ${status})" >&2
+    cat "${hdrs}" >&2
+    echo "--- body ---" >&2
+    head -c 500 "${body}" >&2 || true
+    echo >&2
+    rm -f "${hdrs}" "${body}"
+    exit 1
+  fi
+  rm -f "${hdrs}" "${body}"
+  printf '%s\n' "${etag}"
+}
+
 echo "==> Starting docker compose stack"
-docker compose -f "${COMPOSE_FILE}" up -d --build
+docker compose -f "${COMPOSE_FILE}" up -d --build --force-recreate easyrest-server
 
 echo "==> Waiting for ${SERVER_URL}/health"
 deadline=$((SECONDS + 180))
@@ -45,6 +66,20 @@ echo "    server is healthy"
 # shellcheck disable=SC1090
 eval "$("${PGO_DIR}/scripts/mint_tokens.sh")"
 
+echo "==> Warming JSON ETags for cache 304 workloads"
+REDIS_JSON_ETAG="$(fetch_etag "${SERVER_URL}/api/redis_cache_test/users/?select=id,name&limit=10" \
+  -H "Accept: application/json" \
+  -H "Authorization: ${BASIC_AUTH}")"
+MEMCACHED_JSON_ETAG="$(fetch_etag "${SERVER_URL}/api/memcached_cache_test/users/?select=id,name&limit=10" \
+  -H "Accept: application/json" \
+  -H "X-API-Key: ${API_KEY}")"
+LRU_JSON_ETAG="$(fetch_etag "${SERVER_URL}/api/lru_cache_test/users/?select=id,name&limit=10" \
+  -H "Accept: application/json" \
+  -H "Authorization: Bearer ${OIDC_TOKEN}")"
+echo "    redis=${REDIS_JSON_ETAG}"
+echo "    memcached=${MEMCACHED_JSON_ETAG}"
+echo "    lru=${LRU_JSON_ETAG}"
+
 echo "==> Pre-pulling oha image"
 docker pull "${OHA_IMAGE}"
 
@@ -55,7 +90,9 @@ run_oha() {
   local name="$1"
   shift
   echo "    starting oha: ${name} (log: ${LOG_DIR}/${name}.log)" >&2
-  docker run --rm --network "${NETWORK}" "${OHA_IMAGE}" "$@" \
+  docker run --rm --network "${NETWORK}" "${OHA_IMAGE}" \
+    -w --http-version=1.1 \
+    "$@" \
     >"${LOG_DIR}/${name}.log" 2>&1 &
   OHA_PIDS+=("$!")
   OHA_NAMES+=("${name}")
@@ -93,6 +130,20 @@ run_oha postgres-get-jwt \
   -H "Authorization: Bearer ${JWT_TOKEN}" \
   "${OHA_TARGET_URL}/api/postgres_crud/users/?select=id,name&limit=10"
 
+run_oha sqlite-ndjson-jwt \
+  -z "${LOAD_DURATION}s" -c "${CONCURRENCY}" --no-tui \
+  -A application/x-ndjson \
+  -H "Authorization: Bearer ${JWT_TOKEN}" \
+  -H "Prefer: page_size=50" \
+  "${OHA_TARGET_URL}/api/sqlite_crud/users/?select=id,name&ordering=id&limit=250"
+
+run_oha postgres-ndjson-jwt \
+  -z "${LOAD_DURATION}s" -c "${CONCURRENCY}" --no-tui \
+  -A application/x-ndjson \
+  -H "Authorization: Bearer ${JWT_TOKEN}" \
+  -H "Prefer: page_size=2" \
+  "${OHA_TARGET_URL}/api/postgres_crud/users/?select=id,name&ordering=id"
+
 run_oha redis-cache-basic \
   -z "${LOAD_DURATION}s" -c "${CONCURRENCY}" --no-tui \
   -H "Authorization: ${BASIC_AUTH}" \
@@ -106,6 +157,27 @@ run_oha memcached-cache-apikey \
 run_oha lru-cache-oidc \
   -z "${LOAD_DURATION}s" -c "${CONCURRENCY}" --no-tui \
   -H "Authorization: Bearer ${OIDC_TOKEN}" \
+  "${OHA_TARGET_URL}/api/lru_cache_test/users/?select=id,name&limit=10"
+
+run_oha redis-cache-304-basic \
+  -z "${LOAD_DURATION}s" -c "${CONCURRENCY}" --no-tui \
+  -A application/json \
+  -H "Authorization: ${BASIC_AUTH}" \
+  -H "If-None-Match: ${REDIS_JSON_ETAG}" \
+  "${OHA_TARGET_URL}/api/redis_cache_test/users/?select=id,name&limit=10"
+
+run_oha memcached-cache-304-apikey \
+  -z "${LOAD_DURATION}s" -c "${CONCURRENCY}" --no-tui \
+  -A application/json \
+  -H "X-API-Key: ${API_KEY}" \
+  -H "If-None-Match: ${MEMCACHED_JSON_ETAG}" \
+  "${OHA_TARGET_URL}/api/memcached_cache_test/users/?select=id,name&limit=10"
+
+run_oha lru-cache-304-oidc \
+  -z "${LOAD_DURATION}s" -c "${CONCURRENCY}" --no-tui \
+  -A application/json \
+  -H "Authorization: Bearer ${OIDC_TOKEN}" \
+  -H "If-None-Match: ${LRU_JSON_ETAG}" \
   "${OHA_TARGET_URL}/api/lru_cache_test/users/?select=id,name&limit=10"
 
 run_oha sqlite-post-jwt \

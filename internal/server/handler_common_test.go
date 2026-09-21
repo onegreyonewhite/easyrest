@@ -115,6 +115,16 @@ func TestEnforceScopeAndPreference(t *testing.T) {
 	}
 
 	w = httptest.NewRecorder()
+	setPreferenceApplied(w, map[string]any{
+		"prefer":   map[string]any{"tx": "commit"},
+		"timezone": "UTC",
+	})
+	appendPreferenceApplied(w, "page_size=50")
+	if got := w.Header().Get("Preference-Applied"); got != "tx=commit timezone=UTC page_size=50" {
+		t.Fatalf("page_size applied: %q", got)
+	}
+
+	w = httptest.NewRecorder()
 	setDBServerTiming(w, 12*time.Millisecond)
 	if w.Header().Get("Server-Timing") == "" {
 		t.Fatal("expected server-timing")
@@ -156,6 +166,9 @@ func TestEnforceScopeAndPreference(t *testing.T) {
 	cors.ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("preflight: %d", w.Code)
+	}
+	if got := w.Header().Get("Access-Control-Expose-Headers"); got != "ETag, Resource-Version, Vary, Preference-Applied" {
+		t.Fatalf("expose headers: %s", got)
 	}
 	r = httptest.NewRequest(http.MethodGet, "/", nil)
 	r.Header.Set("Origin", strings.Repeat("x", 1025))

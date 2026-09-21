@@ -4,8 +4,15 @@ import (
 	"github.com/hashicorp/go-plugin"
 )
 
+// VersionMajor and VersionMinor are the plugin API version. They are encoded
+// into HTTP ETags; the patch component of Version is not.
+const (
+	VersionMajor = 0
+	VersionMinor = 20
+)
+
 // Version is the plugin version.
-var Version = "v0.19.1"
+var Version = "v0.20.0"
 
 // DBPlugin – interface for DB access plugins.
 // Methods that take ctx may return an updated context map. A nil returned ctx

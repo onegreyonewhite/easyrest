@@ -39,7 +39,7 @@ run-perf: server
 
 pgo-up:
 	python3 pgo/seed_sqlite.py
-	docker compose -f pgo/docker-compose.yml up -d --build
+	docker compose -f pgo/docker-compose.yml up -d --build --force-recreate easyrest-server
 
 pgo-collect:
 	./pgo/scripts/run_load_test.sh

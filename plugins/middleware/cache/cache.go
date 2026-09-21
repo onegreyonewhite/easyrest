@@ -1,9 +1,12 @@
 package cache
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,13 +15,16 @@ import (
 )
 
 const (
-	defaultTTL        = 24 * time.Hour
-	headerETag        = "response.header.ETag"
-	etagKeyPrefix     = "etag:"
-	ctxHeaders        = "headers"
-	ctxMethod         = "method"
-	headerIfMatch     = "if-match"
-	headerIfNoneMatch = "if-none-match"
+	defaultTTL              = 24 * time.Hour
+	headerETag              = "response.header.ETag"
+	headerResourceVersion   = "response.header.Resource-Version"
+	etagKeyPrefix           = "etag:"
+	ctxHeaders              = "headers"
+	ctxMethod               = "method"
+	headerIfMatch           = "if-match"
+	headerIfNoneMatch       = "if-none-match"
+	headerIfResourceVersion = "if-resource-version"
+	contentTypeNDJSON       = "application/x-ndjson"
 )
 
 var (
@@ -90,7 +96,7 @@ func (p *Plugin) Init(settings map[string]any) error {
 	return nil
 }
 
-// PreRequest implements If-None-Match (304) and If-Match (412) for table routes.
+// PreRequest implements If-None-Match (304) and lost-update checks for table routes.
 func (p *Plugin) PreRequest(dbKey string, ctx map[string]any) (map[string]any, *int, error) {
 	table, _ := easyrest.CtxString(ctx, easyrest.CtxTable)
 	if table == "" {
@@ -100,21 +106,28 @@ func (p *Plugin) PreRequest(dbKey string, ctx map[string]any) (map[string]any, *
 	isRead := method == http.MethodGet || method == http.MethodHead
 	ifMatch := headerOf(ctx, headerIfMatch)
 	ifNoneMatch := headerOf(ctx, headerIfNoneMatch)
-	if !isRead && ifMatch == "" && ifNoneMatch == "" {
+	ifResourceVersion := headerOf(ctx, headerIfResourceVersion)
+	if !isRead && ifMatch == "" && ifNoneMatch == "" && ifResourceVersion == "" {
 		return ctx, nil, nil
 	}
 
-	etag := p.getOrGenerate(etagKey(dbKey, table))
+	version := p.getOrGenerate(etagKey(dbKey, table))
 	ctx = ensureCtx(ctx)
-	if isRead && ifNoneMatch != "" && ifNoneMatch == etag {
-		ctx[headerETag] = etag
+	fingerprint, _ := easyrest.CtxString(ctx, easyrest.CtxCacheETagVariant)
+	opaque := opaqueTag(version, fingerprint)
+	etag := quoteETag(opaque, !isRead || representationWeak(fingerprint))
+
+	if status := checkPrecondition(ifResourceVersion, ifMatch, version, opaque); status != nil {
+		return ctx, status, nil
+	}
+	if !isRead {
+		return ctx, nil, nil
+	}
+
+	ctx[headerETag] = etag
+	ctx[headerResourceVersion] = version
+	if ifNoneMatch != "" && noneMatch(ifNoneMatch, opaque) {
 		return ctx, &statusNotModified, nil
-	}
-	if !isRead && ifMatch != "" && ifMatch != etag {
-		return ctx, &statusPreconditionFailed, nil
-	}
-	if isRead {
-		ctx[headerETag] = etag
 	}
 	return ctx, nil, nil
 }
@@ -139,7 +152,12 @@ func (p *Plugin) PostRequest(dbKey string, ctx map[string]any) (map[string]strin
 	if table == "" || !isWrite(method) {
 		return nil, nil
 	}
-	return map[string]string{"ETag": p.bump(etagKey(dbKey, table))}, nil
+	rev := p.bump(etagKey(dbKey, table))
+	fingerprint, _ := easyrest.CtxString(ctx, easyrest.CtxCacheETagVariant)
+	return map[string]string{
+		"ETag":             quoteETag(opaqueTag(rev, fingerprint), true),
+		"Resource-Version": rev,
+	}, nil
 }
 
 func (p *Plugin) getOrGenerate(key string) string {
@@ -164,6 +182,152 @@ func etagKey(dbKey, table string) string {
 	b.WriteByte(':')
 	b.WriteString(table)
 	return b.String()
+}
+
+func opaqueTag(revision, fingerprint string) string {
+	var b strings.Builder
+	maj := strconv.Itoa(easyrest.VersionMajor)
+	min := strconv.Itoa(easyrest.VersionMinor)
+	fp := fingerprintHex(fingerprint)
+	b.Grow(len(revision) + 1 + len(maj) + 1 + len(min) + 1 + len(fp))
+	b.WriteString(revision)
+	b.WriteByte(':')
+	b.WriteString(maj)
+	b.WriteByte('.')
+	b.WriteString(min)
+	b.WriteByte(':')
+	b.WriteString(fp)
+	return b.String()
+}
+
+func fingerprintHex(fingerprint string) string {
+	sum := sha256.Sum256([]byte(fingerprint))
+	return hex.EncodeToString(sum[:8])
+}
+
+func quoteETag(opaque string, weak bool) string {
+	if weak {
+		return `W/"` + opaque + `"`
+	}
+	return `"` + opaque + `"`
+}
+
+func representationWeak(fingerprint string) bool {
+	for line := range strings.SplitSeq(fingerprint, "\n") {
+		key, val, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		if key == "Accept" && val == contentTypeNDJSON {
+			return true
+		}
+		if key == "Range" && val != "" {
+			return true
+		}
+	}
+	return false
+}
+
+type entityTag struct {
+	weak   bool
+	opaque string
+}
+
+func parseEntityTags(h string) (tags []entityTag, star bool) {
+	s := strings.TrimSpace(h)
+	if s == "*" {
+		return nil, true
+	}
+	for i := 0; i < len(s); {
+		for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == ',') {
+			i++
+		}
+		if i >= len(s) {
+			break
+		}
+		if s[i] == '*' {
+			return nil, true
+		}
+		weak := false
+		if i+2 <= len(s) && s[i] == 'W' && s[i+1] == '/' {
+			weak = true
+			i += 2
+		}
+		if i >= len(s) || s[i] != '"' {
+			// Skip a malformed token up to the next comma.
+			if j := strings.IndexByte(s[i:], ','); j >= 0 {
+				i += j + 1
+				continue
+			}
+			break
+		}
+		i++
+		start := i
+		for i < len(s) && s[i] != '"' {
+			i++
+		}
+		if i >= len(s) {
+			break
+		}
+		tags = append(tags, entityTag{weak: weak, opaque: s[start:i]})
+		i++
+	}
+	return tags, false
+}
+
+func stripQuotes(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		return s[1 : len(s)-1]
+	}
+	return s
+}
+
+func checkPrecondition(ifResourceVersion, ifMatch, revision, opaque string) *int {
+	if ifResourceVersion != "" {
+		if stripQuotes(ifResourceVersion) != revision {
+			return &statusPreconditionFailed
+		}
+		return nil
+	}
+	if ifMatch == "" {
+		return nil
+	}
+	tags, star := parseEntityTags(ifMatch)
+	if star {
+		return nil
+	}
+	hasWeak := false
+	for _, t := range tags {
+		if t.weak {
+			hasWeak = true
+			if t.opaque == revision {
+				return nil
+			}
+		}
+	}
+	if hasWeak {
+		return &statusPreconditionFailed
+	}
+	for _, t := range tags {
+		if !t.weak && t.opaque == opaque {
+			return nil
+		}
+	}
+	return &statusPreconditionFailed
+}
+
+func noneMatch(ifNoneMatch, opaque string) bool {
+	tags, star := parseEntityTags(ifNoneMatch)
+	if star {
+		return true
+	}
+	for _, t := range tags {
+		if t.opaque == opaque {
+			return true
+		}
+	}
+	return false
 }
 
 func isWrite(method string) bool {

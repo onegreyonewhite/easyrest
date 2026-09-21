@@ -31,6 +31,120 @@ func enableBenchJSON() {
 	server.SetConfig(cfg)
 }
 
+func setupTableGet1kBench(b *testing.B) (http.Handler, string) {
+	b.Helper()
+	log.SetOutput(io.Discard)
+	os.Setenv("ER_NO_PLUGIN_LOG", "1")
+
+	tmpFile, err := os.CreateTemp("", "benchdb-get-1k-*.db")
+	if err != nil {
+		b.Fatalf("Failed to create temporary DB: %v", err)
+	}
+	dbPath := tmpFile.Name()
+	tmpFile.Close()
+	b.Cleanup(func() {
+		os.Remove(dbPath)
+		server.StopPlugins()
+	})
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		b.Fatalf("Failed to open sqlite DB: %v", err)
+	}
+	defer db.Close()
+
+	_, err = db.Exec(`CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT);`)
+	if err != nil {
+		b.Fatalf("Failed to create table: %v", err)
+	}
+	for i := 0; i < 1000; i++ {
+		_, err = db.Exec(`INSERT INTO users (name) VALUES (?)`, fmt.Sprintf("User%d", i))
+		if err != nil {
+			b.Fatalf("Failed to insert data: %v", err)
+		}
+	}
+
+	os.Setenv("ER_DB_TEST", sqliteBenchURI(dbPath))
+	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
+	secret := "mytestsecret"
+	os.Setenv("ER_TOKEN_SECRET", secret)
+
+	claims := jwt.MapClaims{
+		"sub":   "testuser",
+		"exp":   time.Now().Add(time.Hour).Unix(),
+		"scope": "read",
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenStr, err := token.SignedString([]byte(secret))
+	if err != nil {
+		b.Fatalf("Failed to sign token: %v", err)
+	}
+
+	server.PreservedDbPlugins["sqlite"] = func() easyrest.DBPlugin {
+		return sqlitePlugin.NewSqlitePlugin()
+	}
+	server.PreservedAuthPlugins["jwt"] = func() easyrest.AuthPlugin {
+		return &jwtplugin.JWTAuthPlugin{}
+	}
+	server.ReloadConfig()
+	cfg := server.GetConfig()
+	plugin := cfg.PluginMap["test"]
+	plugin.DefaultLimit = 100
+	cfg.PluginMap["test"] = plugin
+	server.SetConfig(cfg)
+	enableBenchJSON()
+	return server.SetupRouter(), tokenStr
+}
+
+type ttfbRecorder struct {
+	*httptest.ResponseRecorder
+	first time.Time
+}
+
+func (r *ttfbRecorder) mark() {
+	if r.first.IsZero() {
+		r.first = time.Now()
+	}
+}
+
+// jsonTTFBRecorder timestamps the first Write so JSON TTFB includes encoding.
+type jsonTTFBRecorder struct{ *ttfbRecorder }
+
+func newJSONTTFBRecorder() *jsonTTFBRecorder {
+	return &jsonTTFBRecorder{&ttfbRecorder{ResponseRecorder: httptest.NewRecorder()}}
+}
+
+func (r *jsonTTFBRecorder) Write(p []byte) (int, error) {
+	r.mark()
+	return r.ResponseRecorder.Write(p)
+}
+
+// ndjsonTTFBRecorder timestamps the first Flush (headers after the first TableGet)
+// and leaves Write on the embedded recorder so NDJSON total time stays comparable.
+type ndjsonTTFBRecorder struct{ *ttfbRecorder }
+
+func newNDJSONTTFBRecorder() *ndjsonTTFBRecorder {
+	return &ndjsonTTFBRecorder{&ttfbRecorder{ResponseRecorder: httptest.NewRecorder()}}
+}
+
+func (r *ndjsonTTFBRecorder) Flush() {
+	r.mark()
+	r.ResponseRecorder.Flush()
+}
+
+func (r *ndjsonTTFBRecorder) FlushError() error {
+	r.Flush()
+	return nil
+}
+
+func reportTTFB(b *testing.B, sum time.Duration, n int) {
+	b.Helper()
+	if n == 0 {
+		return
+	}
+	b.ReportMetric(float64(sum.Nanoseconds())/float64(n), "ttfb-ns/op")
+}
+
 func BenchmarkTableGet(b *testing.B) {
 	// Disable logging
 	log.SetOutput(io.Discard)
@@ -109,6 +223,74 @@ func BenchmarkTableGet(b *testing.B) {
 			break
 		}
 	}
+}
+
+func BenchmarkTableGetJSON1k(b *testing.B) {
+	router, tokenStr := setupTableGet1kBench(b)
+
+	var ttfbSum time.Duration
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		req, err := http.NewRequest(http.MethodGet, "/api/test/users/?select=id,name&limit=1000", nil)
+		if err != nil {
+			b.Fatalf("Error creating request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+tokenStr)
+		req.Header.Set("Accept", "application/json")
+		rr := newJSONTTFBRecorder()
+		start := time.Now()
+		router.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			b.Errorf("Expected status 200, got %d", rr.Code)
+			break
+		}
+		if !strings.Contains(rr.Header().Get("Content-Type"), "application/json") {
+			b.Errorf("Expected JSON content type, got %s", rr.Header().Get("Content-Type"))
+			break
+		}
+		if rr.first.IsZero() {
+			b.Errorf("JSON TTFB was not observed")
+			break
+		}
+		ttfbSum += rr.first.Sub(start)
+	}
+	reportTTFB(b, ttfbSum, b.N)
+}
+
+func BenchmarkTableGetNDJSON1k(b *testing.B) {
+	router, tokenStr := setupTableGet1kBench(b)
+
+	var ttfbSum time.Duration
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		req, err := http.NewRequest(http.MethodGet, "/api/test/users/?select=id,name", nil)
+		if err != nil {
+			b.Fatalf("Error creating request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+tokenStr)
+		req.Header.Set("Accept", "application/x-ndjson")
+		rr := newNDJSONTTFBRecorder()
+		start := time.Now()
+		router.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			b.Errorf("Expected status 200, got %d", rr.Code)
+			break
+		}
+		if !strings.Contains(rr.Header().Get("Content-Type"), "application/x-ndjson") {
+			b.Errorf("Expected NDJSON content type, got %s", rr.Header().Get("Content-Type"))
+			break
+		}
+		if cr := rr.Header().Get("Content-Range"); cr != "" {
+			b.Errorf("auto-stream must omit Content-Range, got %q", cr)
+			break
+		}
+		if rr.first.IsZero() {
+			b.Errorf("NDJSON TTFB was not observed")
+			break
+		}
+		ttfbSum += rr.first.Sub(start)
+	}
+	reportTTFB(b, ttfbSum, b.N)
 }
 
 func BenchmarkTableCreate(b *testing.B) {

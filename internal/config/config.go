@@ -208,8 +208,12 @@ func loadEnvCORS() CORSConfig {
 		Enabled: os.Getenv("ER_CORS_ENABLED") == "1",
 		Origins: envCSV("ER_CORS_ORIGINS", []string{"*"}),
 		Methods: envCSV("ER_CORS_METHODS", []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}),
-		Headers: envCSV("ER_CORS_HEADERS", []string{"Content-Type", "Authorization", "X-Requested-With"}),
-		MaxAge:  maxAge,
+		Headers: envCSV("ER_CORS_HEADERS", []string{
+			"Content-Type", "Authorization", "X-Requested-With",
+			"Accept", "Prefer", "If-Match", "If-None-Match", "If-Resource-Version",
+			"Range", "Range-Unit",
+		}),
+		MaxAge: maxAge,
 	}
 }
 

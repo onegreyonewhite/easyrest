@@ -86,6 +86,9 @@ func expectApplyPluginContext(mock pgxmock.PgxPoolIface, kvs ...string) {
 func expectApplyPluginContextMap(mock pgxmock.PgxPoolIface, ctx map[string]any) {
 	kvs := make([]string, 0, len(ctx)*2)
 	for k, v := range ctx {
+		if easyrest.SkipDBSessionKey(k) {
+			continue
+		}
 		kvs = append(kvs, k, fmt.Sprintf("%v", v))
 	}
 	expectApplyPluginContext(mock, kvs...)
@@ -1273,9 +1276,16 @@ func TestApplyPluginContext_SkipsHookKeys(t *testing.T) {
 	require.NoError(t, err)
 	expectApplyPluginContext(mock, "timezone", "UTC")
 	require.NoError(t, ApplyPluginContext(context.Background(), tx, map[string]any{
-		"timezone":                "UTC",
-		easyrest.CtxDBPreRequest:  "custom_headers",
-		easyrest.CtxDBPostRequest: "after_hook",
+		"timezone":                         "UTC",
+		easyrest.CtxDBPreRequest:           "custom_headers",
+		easyrest.CtxDBPostRequest:          "after_hook",
+		"response.header.ETag":             `"abc:0.19:deadbeefdeadbeef"`,
+		"response.header.Resource-Version": "abc",
+		"response.headers":                 `[{"X-From-Sql":"1"}]`,
+		"response.status":                  "200",
+		easyrest.CtxCacheInvalidate:        "users",
+		easyrest.CtxCacheETagVariant:       "Accept=application/json",
+		"_mw.secret":                       "nope",
 	}))
 	require.NoError(t, mock.ExpectationsWereMet())
 }

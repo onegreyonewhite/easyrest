@@ -202,6 +202,32 @@ func TestSelectAcceptStarFallbackToContentType(t *testing.T) {
 	if !strings.Contains(rr.Header().Get("Content-Type"), "text/csv") {
 		t.Fatalf("Expected text/csv via */* fallback, got %s", rr.Header().Get("Content-Type"))
 	}
+	assertVaryAcceptAndContentType(t, rr.Header())
+}
+
+func TestSelectJSONVaryAcceptAndContentType(t *testing.T) {
+	dbPath := setupTestDB(t)
+	defer os.Remove(dbPath)
+	defer server.StopPlugins()
+	insertUser(t, dbPath, "Alice", "")
+	router := setupServerWithDB(t, dbPath)
+	tokenStr := generateToken(t)
+
+	req, err := http.NewRequest("GET", "/api/test/users/?select=id,name", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tokenStr)
+	req.Header.Set("Accept", "application/json")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Header().Get("Content-Type"), "application/json") {
+		t.Fatalf("Expected application/json, got %s", rr.Header().Get("Content-Type"))
+	}
+	assertVaryAcceptAndContentType(t, rr.Header())
 }
 
 func TestTrustedProxyHeaderMode(t *testing.T) {

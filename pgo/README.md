@@ -31,10 +31,11 @@ make pgo-down      # tear down containers and volumes
 | `mock-oidc` | Minimal OIDC discovery + userinfo mock |
 | `easyrest-server` | Built from repo `Dockerfile`; pprof on `:6060` when `ER_PPROF_ADDR` is set |
 
-Load generators use [oha](https://github.com/hatoo/oha) (`ghcr.io/hatoo/oha`) against:
+Load generators use [oha](https://github.com/hatoo/oha) (`ghcr.io/hatoo/oha`) with `-w` so HTTP/1 in-flight requests are not aborted when `-z` ends (`aborted due to deadline`), and `--http-version=1.1` so h2c is not probed. Workloads:
 
-- `sqlite_crud`, `mysql_crud`, `postgres_crud` — CRUD reads/writes
-- `redis_cache_test`, `memcached_cache_test`, `lru_cache_test` — ETag cache-middleware paths
+- `sqlite_crud`, `mysql_crud`, `postgres_crud` — CRUD reads/writes (`sqlite-get-jwt.log`, `mysql-get-jwt.log`, `postgres-get-jwt.log`, plus `sqlite-post-jwt.log` / `mysql-patch-basic.log`)
+- `sqlite-ndjson-jwt`, `postgres-ndjson-jwt` — NDJSON streams with `Prefer: page_size` so SQLite does five pages (`limit=250`, `page_size=50`) and Postgres three pages (five seed rows, `page_size=2`)
+- `redis_cache_test`, `memcached_cache_test`, `lru_cache_test` — 200 GETs that mint quoted representation ETags, and matching `*-cache-304-*` runs that send `If-None-Match` (quotes kept) for 304
 - Auth schemes: JWT, Basic, API key, OIDC (mock)
 
 **Not covered:** `awssigv4` auth (requires AWS-compatible SigV4 signing infrastructure).
@@ -42,7 +43,7 @@ Load generators use [oha](https://github.com/hatoo/oha) (`ghcr.io/hatoo/oha`) ag
 ## Configuration
 
 - [`config.yaml`](config.yaml) — plugin wiring for the compose network
-- [`docker-compose.yml`](docker-compose.yml) — service definitions
+- [`docker-compose.yml`](docker-compose.yml) — service definitions. The SQLite file is chmod'd world-writable by [`seed_sqlite.py`](seed_sqlite.py) so the distroless `nonroot` process (uid 65532) can enable WAL.
 - Environment overrides for the load script:
   - `PGO_DURATION` — profile capture duration in seconds (default: `30`); load generators run for this plus `PGO_STARTUP_BARRIER`
   - `PGO_STARTUP_BARRIER` — warm-up seconds after all oha containers start and before CPU profiling begins (default: `5`)
@@ -52,7 +53,7 @@ Load generators use [oha](https://github.com/hatoo/oha) (`ghcr.io/hatoo/oha`) ag
 
 ## Load test logs
 
-Each `oha` workload writes its own summary to [`profiles/oha-logs/`](profiles/oha-logs/) (for example `sqlite-get-jwt.log`). After `make pgo-collect`, the script prints a compact per-test status summary and points to these files for full histograms and status-code breakdowns.
+Each `oha` workload writes its own summary to [`profiles/oha-logs/`](profiles/oha-logs/) (for example `sqlite-get-jwt.log`, `sqlite-ndjson-jwt.log`, `redis-cache-304-basic.log`). After `make pgo-collect`, the script prints a compact per-test status summary and points to these files for full histograms and status-code breakdowns.
 
 ## Manual steps
 

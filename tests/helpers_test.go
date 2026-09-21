@@ -2,7 +2,9 @@ package tests
 
 import (
 	"database/sql"
+	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,57 @@ import (
 	"github.com/onegreyonewhite/easyrest/internal/server"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
+
+func assertVaryAcceptAndContentType(t *testing.T, h http.Header) {
+	t.Helper()
+	joined := strings.Join(h.Values("Vary"), ",")
+	for _, name := range []string{"Accept", "Content-Type", "Prefer", "Range"} {
+		if !strings.Contains(joined, name) {
+			t.Fatalf("Vary missing %s: %q", name, joined)
+		}
+	}
+	if strings.Contains(joined, "Accept-Language") {
+		t.Fatalf("Vary must not include Accept-Language: %q", joined)
+	}
+}
+
+func parseCacheETag(t *testing.T, etag string) (weak bool, rev, opaque string) {
+	t.Helper()
+	switch {
+	case strings.HasPrefix(etag, `W/"`) && strings.HasSuffix(etag, `"`) && len(etag) > 4:
+		weak = true
+		opaque = etag[3 : len(etag)-1]
+	case strings.HasPrefix(etag, `"`) && strings.HasSuffix(etag, `"`) && len(etag) > 2:
+		opaque = etag[1 : len(etag)-1]
+	default:
+		t.Fatalf("ETag must be W/\"…\" or \"…\", got %q", etag)
+	}
+	rev, rest, ok := strings.Cut(opaque, ":")
+	if !ok {
+		t.Fatalf("opaque-tag %q", opaque)
+	}
+	ver, fp, ok := strings.Cut(rest, ":")
+	wantVer := strconv.Itoa(easyrest.VersionMajor) + "." + strconv.Itoa(easyrest.VersionMinor)
+	if !ok || ver != wantVer || len(fp) != 16 {
+		t.Fatalf("opaque-tag %q want %s and 16-hex fingerprint", opaque, wantVer)
+	}
+	return weak, rev, opaque
+}
+
+func assertCacheValidators(t *testing.T, h http.Header, wantWeak bool) (etag, rev string) {
+	t.Helper()
+	etag = h.Get("ETag")
+	weak, parsedRev, opaque := parseCacheETag(t, etag)
+	if weak != wantWeak {
+		t.Fatalf("ETag weakness: got weak=%v want %v (%q)", weak, wantWeak, etag)
+	}
+	rev = h.Get("Resource-Version")
+	if rev == "" || rev != parsedRev {
+		t.Fatalf("Resource-Version %q opaque %q", rev, opaque)
+	}
+	assertVaryAcceptAndContentType(t, h)
+	return etag, rev
+}
 
 // setupTestDB creates a temporary database and a 'users' table with an update_field column.
 func setupTestDB(t *testing.T) string {
