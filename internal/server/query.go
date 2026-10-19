@@ -12,6 +12,9 @@ import (
 // queryHandler processes read-only SQL queries via the QUERY HTTP method.
 func queryHandler(w http.ResponseWriter, r *http.Request) {
 	dbKey := strings.ToLower(chi.URLParam(r, "db"))
+	if denyInternalDB(w, r, dbKey) {
+		return
+	}
 
 	config := currentConfig()
 
@@ -62,7 +65,7 @@ func queryHandler(w http.ResponseWriter, r *http.Request) {
 	setDBServerTiming(w, queryTime)
 
 	if err != nil {
-		middlewareHTTPError(w, dbKey, pluginCtx, "Error in QueryCall: "+err.Error(), http.StatusInternalServerError)
+		middlewareHTTPError(w, r, dbKey, pluginCtx, "Error in QueryCall: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 

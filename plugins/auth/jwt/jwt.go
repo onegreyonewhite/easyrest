@@ -13,12 +13,14 @@ import (
 
 	"github.com/goccy/go-json"
 	"github.com/golang-jwt/jwt/v5"
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
 
 // --- JWTAuthPlugin: Handles direct JWT validation or apiKey flow ---
 
 // JWTAuthPlugin implements the AuthPlugin interface for direct JWT authentication or API Key style.
 type JWTAuthPlugin struct {
+	host                   easyrest.HostRPC
 	jwt_secret             string
 	token_type             string
 	token_endpoint         string // Optional: For OAuth2 password/client_credentials flow without OIDC
@@ -29,7 +31,16 @@ type JWTAuthPlugin struct {
 // Init initializes the JWTAuthPlugin.
 // If token_endpoint is provided, it generates an oauth2 security definition.
 // Otherwise, it generates an apiKey security definition.
-func (p *JWTAuthPlugin) Init(settings map[string]any) (map[string]any, error) {
+func (p *JWTAuthPlugin) Init(settings map[string]any, host easyrest.HostRPC) (easyrest.AuthInfo, error) {
+	p.host = host
+	schema, err := p.initSettings(settings)
+	if err != nil {
+		return easyrest.AuthInfo{}, err
+	}
+	return easyrest.NewAuthInfo(schema), nil
+}
+
+func (p *JWTAuthPlugin) initSettings(settings map[string]any) (map[string]any, error) {
 	if s, ok := settings["jwt_secret"].(string); ok {
 		p.jwt_secret = s
 	}
@@ -107,28 +118,50 @@ func (p *JWTAuthPlugin) Authenticate(headers map[string]string, method string, p
 		return nil, fmt.Errorf("missing authorization header")
 	}
 
-	parts := strings.SplitN(authHeader, " ", 2)
-	if len(parts) != 2 || !strings.EqualFold(parts[0], p.token_type) {
+	tokenStr, err := TokenFromCredential(authHeader, p.token_type)
+	if err != nil {
+		return nil, err
+	}
+	// Header auth still requires the type prefix. A raw JWT is for the cookie plugin.
+	if !strings.Contains(authHeader, " ") {
 		return nil, fmt.Errorf("invalid authorization header format, expected %s token", p.token_type)
 	}
-	tokenStr := parts[1]
-
-	if strings.TrimSpace(tokenStr) == "" {
-		return nil, fmt.Errorf("invalid authorization header: token is empty after type %s", p.token_type)
-	}
-
 	return p.parseToken(tokenStr)
+}
+
+// TokenFromCredential returns the JWT from a raw token or a "<type> <jwt>" value.
+func TokenFromCredential(value, tokenType string) (string, error) {
+	parts := strings.SplitN(value, " ", 2)
+	if len(parts) != 2 {
+		if strings.TrimSpace(value) == "" {
+			return "", fmt.Errorf("invalid authorization header format, expected %s token", tokenType)
+		}
+		return value, nil
+	}
+	if !strings.EqualFold(parts[0], tokenType) {
+		return "", fmt.Errorf("invalid authorization header format, expected %s token", tokenType)
+	}
+	tokenStr := parts[1]
+	if strings.TrimSpace(tokenStr) == "" {
+		return "", fmt.Errorf("invalid authorization header: token is empty after type %s", tokenType)
+	}
+	return tokenStr, nil
 }
 
 // parseToken parses a JWT string. If p.jwt_secret is set, it validates the signature. Otherwise, it decodes without validation.
 func (p *JWTAuthPlugin) parseToken(tokenStr string) (map[string]any, error) {
-	if p.jwt_secret != "" {
-		parsedToken, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
+	return ParseToken(tokenStr, p.jwt_secret)
+}
+
+// ParseToken verifies a JWT when secret is set and decodes an unsigned payload when it is empty.
+func ParseToken(tokenStr, secret string) (map[string]any, error) {
+	if secret != "" {
+		parsedToken, err := jwt.Parse(tokenStr, func(token *jwt.Token) (any, error) {
 			// Validate the alg is what you expect:
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok { // Assuming HMAC, adjust if other methods are primary
 				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 			}
-			return []byte(p.jwt_secret), nil
+			return []byte(secret), nil
 		})
 
 		if err != nil {
@@ -173,6 +206,7 @@ func (p *JWTAuthPlugin) parseToken(tokenStr string) (map[string]any, error) {
 
 // OIDCAuthPlugin implements the AuthPlugin interface for OpenID Connect authentication.
 type OIDCAuthPlugin struct {
+	host                   easyrest.HostRPC
 	open_id_connect_url    string
 	userinfo_endpoint      string // Populated from discovery
 	token_endpoint         string // Populated from discovery
@@ -191,7 +225,16 @@ type OpenIDConfiguration struct {
 }
 
 // Init initializes the OIDCAuthPlugin, performs OIDC discovery, and returns an OAuth2 Swagger security definition.
-func (p *OIDCAuthPlugin) Init(settings map[string]any) (map[string]any, error) {
+func (p *OIDCAuthPlugin) Init(settings map[string]any, host easyrest.HostRPC) (easyrest.AuthInfo, error) {
+	p.host = host
+	schema, err := p.initSettings(settings)
+	if err != nil {
+		return easyrest.AuthInfo{}, err
+	}
+	return easyrest.NewAuthInfo(schema), nil
+}
+
+func (p *OIDCAuthPlugin) initSettings(settings map[string]any) (map[string]any, error) {
 	oidcURL, ok := settings["open_id_connect_url"].(string)
 	if !ok || oidcURL == "" {
 		return nil, errors.New("open_id_connect_url is required for OIDCAuthPlugin")

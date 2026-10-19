@@ -5,23 +5,22 @@
 ![Go](https://img.shields.io/github/go-mod/go-version/onegreyonewhite/easyrest)
 ![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
 
-Turn a SQL database into a REST API. Authentication, request hooks, and every data backend are plugins: in-process in `easyrest-server`, or separate HashiCorp [go-plugin](https://github.com/hashicorp/go-plugin) processes in `easyrest-gateway`.
+<p align="center">
+  <img src="logo.png" width="80%">
+</p>
+
+Turn a SQL database into a REST API. Authentication, request hooks, content types, storage, and every data backend are plugins: in-process in `easyrest-server`, or separate HashiCorp [go-plugin](https://github.com/hashicorp/go-plugin) processes in `easyrest-gateway`.
 
 ## Table of contents
 
 - [What it is](#what-it-is)
-- [Why it is different](#why-it-is-different)
 - [Quickstart](#quickstart)
 - [Architecture](#architecture)
-- [API](#api)
-- [Plugin model](#plugin-model)
 - [Configuration](#configuration)
+- [Plugins](#plugins)
 - [Distributions and deployment](#distributions-and-deployment)
-- [Writing a plugin](#writing-a-plugin)
 - [Development](#development)
 - [License](#license)
-
-
 
 ## What it is
 
@@ -29,15 +28,11 @@ EasyREST is a small HTTP server that maps URL paths to database connections. Eac
 
 The HTTP core never talks to a database driver itself. It sanitizes identifiers, parses query parameters into typed SQL fragments, and forwards those fragments to a plugin that owns the connection (in-process, or over go-plugin RPC).
 
-## Why it is different
+SQLite, PostgreSQL, and MySQL can sit next to each other as `/api/app/`, `/api/analytics/`, and `/api/legacy/`. Auth, middleware, data, content, and storage are separate plugin families. A request can pass through auth, middleware, and data. Content and storage join when the handler parses a body, renders a response, or stores a file. Claims, headers, and `Prefer` values can be injected into the SQL session so triggers can set response metadata. Cache and rate limiting are ordinary middleware plugins.
 
-- Several backends in one process. SQLite, PostgreSQL, and MySQL can sit next to each other as `/api/app/`, `/api/analytics/`, `/api/legacy/`.
-- Three extension points. Auth, middleware (`PreRequest` / `PostRequest`), and data (`DBPlugin` / `DBQueryPlugin`) are independent plugin families, and a request passes through all three.
-- PostgREST-style context round-trip. Claims, headers, and `Prefer` values are injected into the SQL session. Triggers and functions can set `response.headers`, `response.status`, and `cache.invalidate`; the plugin harvests them before `COMMIT`.
-- Two distributions. `easyrest-server` embeds the common plugins. `easyrest-gateway` is the same HTTP core with no built-ins, so every plugin is an external binary.
-- Cache and rate limiting as middleware. ETag version tokens, 304/412 handling, and a fixed-window limiter ship as ordinary middleware plugins.
+The HTTP contract is in [internal/server/README.md](internal/server/README.md). How to write a plugin is in [plugin/README.md](plugin/README.md).
 
-
+A full application can live in the `application` section: your own page on `GET /`, API versions, routes that call Postgres functions, file fields, and a cookie session. The SQL keeps the business rules and the row filters. [APPLICATION.md](APPLICATION.md) walks through one such app in [examples/application/](examples/application/).
 
 ## Quickstart
 
@@ -66,15 +61,13 @@ curl -s "http://localhost:8080/api/crud/users/?where.gt.age=40&where.eq.city=Ber
 curl -s "http://localhost:8080/api/crud/"
 ```
 
-The same file also configures a read-only `QUERY` connection at `/api/query/`. See the curl examples printed by `create_local.sh`.
+The same file also configures a read-only `QUERY` connection at `/api/query/`. See the curl examples printed by `create_local.sh`. Query parameters, paging, and `Prefer` are documented in [internal/server/README.md](internal/server/README.md).
 
 ## Architecture
 
-
-
 ### Where plugins plug in
 
-Auth plugins run once per request, before the handler builds context. Middleware wraps the handler (`PreRequest` after context is built, `PostRequest` immediately before the body is written). Data plugins own SQL. Cache stores are not HTTP plugins; they sit behind the `cache-*` middleware.
+Auth plugins run once per request, before the handler builds context. Middleware wraps the handler (`PreRequest` after context is built, `PostRequest` immediately before the body is written). Data plugins own SQL. Cache stores are not HTTP plugins. They sit behind the `cache-*` middleware. Content plugins parse and render bodies. Storage plugins keep uploaded bytes.
 
 ```mermaid
 flowchart LR
@@ -83,7 +76,7 @@ flowchart LR
 
     subgraph authLayer [Auth plugins]
         AuthJWT[jwt]
-        AuthOther["oidc, basic, apikey, awssigv4"]
+        AuthOther["jwtsession, basic, apikey, dbsession, oidc, awssigv4"]
     end
 
     subgraph mwLayer [Middleware plugins]
@@ -105,13 +98,11 @@ flowchart LR
     CacheStore --> KV[("Redis, SQL, LRU, Memcached")]
 ```
 
-
-
 HTTP routes live in `[internal/server/server.go](internal/server/server.go)` (`SetupRouter`). Plugin maps are filled by `[LoadPlugins](internal/server/plugin_lifecycle.go)`.
 
 ### Request lifecycle
 
-The order is fixed. The sequence below is the table handler in `[internal/server/table.go](internal/server/table.go)`. RPC and `QUERY` share auth, context, and middleware; schema skips auth.
+The order is fixed. The sequence below is the table handler in `[internal/server/table.go](internal/server/table.go)`. RPC and `QUERY` share auth, context, and middleware. Schema skips auth.
 
 ```mermaid
 sequenceDiagram
@@ -150,13 +141,11 @@ sequenceDiagram
     end
 ```
 
-
-
-When `PreRequest` returns a non-nil status, the server writes that status immediately and skips both the handler and `PostRequest`. `PostRequest` cannot change the body; it can only add headers. `response.status` in the context overrides the handler status after `PostRequest` returns.
+When `PreRequest` returns a non-nil status, the server writes that status immediately and skips both the handler and `PostRequest`. `PostRequest` cannot change the body. It can only add headers. `response.status` in the context overrides the handler status after `PostRequest` returns.
 
 ### How plugins are loaded
 
-`easyrest-server` tries an in-process factory first (the "preserved" map registered in `[cmd/server/main.go](cmd/server/main.go)`). `easyrest-gateway` has an empty preserved map, so every plugin is an executable.
+`easyrest-server` tries an in-process factory first (the preserved map registered in `[cmd/server/main.go](cmd/server/main.go)`, plus content and storage factories registered by the server package). `easyrest-gateway` does not register data, auth, or middleware factories. It does keep the shared content and storage factories. See [Distributions](#distributions-and-deployment).
 
 ```mermaid
 flowchart TD
@@ -164,35 +153,29 @@ flowchart TD
     Kind -->|data| DataKey["URI scheme, e.g. sqlite"]
     Kind -->|auth| AuthKey["config key, e.g. jwt"]
     Kind -->|middleware| MwKey["config key, e.g. ratelimit"]
+    Kind -->|content| ContentKey["content_plugins key"]
+    Kind -->|storage| StorageKey["storage plugin field"]
     DataKey --> PathSet{path set in YAML?}
     AuthKey --> PathSet
     MwKey --> PathSet
+    ContentKey --> PathSet
+    StorageKey --> PathSet
     PathSet -->|yes| External[Start subprocess]
     PathSet -->|no| Preserved{Preserved factory?}
-    Preserved -->|yes, server only| InProcess[Construct in-process]
+    Preserved -->|yes| InProcess[Construct in-process]
     Preserved -->|no| Search[Search PATH, cwd, executable dir]
     Search --> OsArch["Also try name-GOOS-GOARCH"]
     OsArch --> External
     External --> Handshake[go-plugin handshake]
-    Handshake --> Dispense["Dispense db, query, auth, or middleware"]
+    Handshake --> Dispense["Dispense one RPC key"]
     Dispense --> InitCall["InitConnection or Init"]
     InProcess --> InitCall
     InitCall --> PluginMap[Atomic plugin map]
 ```
 
+Search and handshake: `[internal/server/plugin_load.go](internal/server/plugin_load.go)`. Names, RPC keys, and a `main` for each family are in [plugin/README.md](plugin/README.md#how-the-server-finds-a-binary).
 
-
-Search and handshake: `[internal/server/plugin_load.go](internal/server/plugin_load.go)`. Default executable names:
-
-
-| Family     | Config source            | Binary name                 |
-| ---------- | ------------------------ | --------------------------- |
-| Data       | URI scheme               | `easyrest-plugin-<scheme>`  |
-| Auth       | `auth_plugins` key       | `easyrest-auth-<key>`       |
-| Middleware | `middleware_plugins` key | `easyrest-middleware-<key>` |
-
-
-A non-empty `path` always forces the subprocess path, even when a preserved factory exists. RPC service keys are `"db"`, `"query"`, `"auth"`, and `"middleware"`.
+A non-empty `path` always forces the subprocess path, even when a preserved factory exists.
 
 ### Context round-trip
 
@@ -220,244 +203,92 @@ flowchart TD
     Apply --> Resp[HTTP response]
 ```
 
-
-
 `erctx.claims_sub` is the flattened form (dots and dashes become underscores). `request.claims.sub` walks the nested map. Flattening drops values that contain `;` or `--`.
 
-Postgres and MySQL copy inbound keys (claims, headers, prefer, timezone, and similar) into the session. They skip `response.*`, `cache.*`, hook names `db.pre-request` / `db.post-request`, and any key that starts with `_`. A leading underscore is middleware-to-middleware state for that request. Those keys stay on pluginCtx. HTTP handlers read `response.header.*` from there. SQL can set `response.headers` during the query; harvest is unchanged.
+Postgres and MySQL copy inbound keys (claims, headers, prefer, timezone, and similar) into the session. They skip `response.*`, `cache.*`, hook names `db.pre-request` / `db.post-request`, and any key that starts with `_`. A leading underscore is middleware-to-middleware state for that request. Those keys stay on the context map. HTTP handlers read `response.header.*` from there. SQL can set `response.headers` during the query. Harvest still copies that value back.
 
-Postgres and MySQL harvest `response.header.*`, `response.headers` (PostgREST JSON array), `response.status`, and `cache.invalidate`. SQLite does not. `QUERY` never returns context, so it cannot harvest either. Example SQL: `[schemas/postgres.sql](schemas/postgres.sql)`, `[schemas/mysql.sql](schemas/mysql.sql)`.
-
-## API
-
-
-| Method                        | Path                    | Plugin                                      | Auth                                   |
-| ----------------------------- | ----------------------- | ------------------------------------------- | -------------------------------------- |
-| `GET`                         | `/api/{db}/`            | `DBPlugin.GetSchema`                        | none                                   |
-| `QUERY`                       | `/api/{db}/`            | `DBQueryPlugin.QueryCall`                   | yes, scope `read`                      |
-| `POST`                        | `/api/{db}/rpc/{func}/` | `DBPlugin.CallFunction`                     | yes, scope `{func}-write`              |
-| `GET` `POST` `PATCH` `DELETE` | `/api/{db}/{table}/`    | `TableGet` / `Create` / `Update` / `Delete` | yes, `{table}-read` or `{table}-write` |
-| `GET`                         | `/health`               | none                                        | none                                   |
-
-
-`{db}` is the key under `plugins:` (lowercased). A connection with `use_query: true` only serves `QUERY`; table CRUD and schema are unavailable for that name.
-
-`QUERY` is experimental. Give it a dedicated connection and a database user that can only `SELECT`. The plugin opens a read-only transaction, but the body is still raw SQL.
-
-Schema responses are cached per connection. A cache hit returns immediately and skips middleware.
-
-### Select, aliases, aggregates
-
-```
-GET /api/app/users/?select=id,name
-GET /api/app/users/?select=username:name
-GET /api/app/orders/?select=total:amount.sum(),order_date
-GET /api/app/users/?select=count()
-```
-
-Allowed functions: `count`, `sum`, `avg`, `min`, `max`. Non-aggregated select fields become `GROUP BY`. Identifiers must match `[A-Za-z_][A-Za-z0-9_]*`.
-
-### Filters and ordering
-
-`where.<op>.<field>=value`, optional `not`:
-
-
-| Operator                         | SQL                        |
-| -------------------------------- | -------------------------- |
-| `eq` `neq` `lt` `lte` `gt` `gte` | `=` `!=` `<` `<=` `>` `>=` |
-| `like` `ilike` `is` `in`         | `LIKE` `ILIKE` `IS` `IN`   |
-
-
-```
-GET /api/app/users/?where.eq.city=Berlin
-GET /api/app/users/?where.gt.age=40
-GET /api/app/users/?where.not.eq.name=Alice
-GET /api/app/users/?where.in.id=1,2,3
-GET /api/app/users/?where.eq.name=request.claims.sub
-```
-
-`ordering` is a comma-separated list of plain identifiers. The query language has no `ASC`/`DESC` token or any other way to set sort direction.
-
-### Pagination
-
-Default page size is `default_limit` (100 unless overridden per connection). `Prefer: page_size=N` (positive integer, space-separated like other Prefer tokens) replaces that default. Invalid, zero, or negative `page_size` is ignored.
-
-You can page with the `limit` and `offset` query parameters, or with the headers `Range-Unit: items` plus `Range: 0-9` (inclusive). When both are present, the headers win.
-
-JSON, CSV, and XML GET are one-shot. The page size comes from the first of these that is set: Range, `?limit=`, `page_size`, `default_limit`. Those responses include `Content-Range`, `Range-Unit: items`, and `Accept-Ranges: items`. An unsatisfiable range returns 416 with an empty JSON array.
-
-`GET` with `Accept: application/x-ndjson` (or `?format=ndjson`) streams matching rows as one JSON object per line. The server always repeats `TableGet` in chunks of `page_size` (or `default_limit` if Prefer did not set it), flushes headers as soon as the first page succeeds, flushes again after each page, and may fetch the next chunk while the current page is written. `?limit=` and Range do not disable paging: they cap how many rows are sent (`Range` also sets offset and still wins over query). The last `TableGet` uses `min(page size, remaining)`. The stream stops on a short page, when the cap is reached, or when the client disconnects. Pass `ordering` for a stable offset walk. A truncated last line means the stream failed after HTTP 200; the status cannot change once rows have been sent. First-page plugin errors stay HTTP 500 with no body. `WriteTimeout` is refreshed after each flushed page so a long export is not killed by the total response timer. The `QUERY` method is unchanged.
-
-NDJSON responses do not send a `Content-Range` header, even when `limit` or Range caps the total. Instead, after the body they send two HTTP trailers: `X-Content-Range` (`start-end/*`, same arithmetic as JSON `Content-Range`) and `Server-Timing` with the summed `TableGet` time. The `Server-Timing` header at the top of the response still covers only the first page. Go's HTTP/2 stack cannot send `Content-Range` as a trailer, so the trailer name is `X-Content-Range`. Clients that hide HTTP/1.1 trailers should use HTTP/2 or inspect declared `Trailer` names.
-
-### Formats
-
-JSON is the default. Choose CSV, XML, form encoding, or NDJSON with `Accept` or `?format=json|xml|csv|ndjson`. Request bodies accept the same `Content-Type` set as JSON, CSV, XML, and form encoding. `Server-Timing: db;dur=...` reports plugin time (NDJSON: first page in the header, total in the trailer).
-
-### Prefer
-
-`Prefer: timezone=UTC tx=rollback page_size=50`
-
-- `timezone` is used when formatting timestamps and is stored on the context.
-- `tx` is `commit` or `rollback`. It is honored only when the connection's `db_tx_end` ends in `-allow-override`.
-- `page_size` sets the NDJSON `TableGet` chunk size. On JSON/CSV/XML GET it acts as the `limit` when Range and a positive `?limit=` are absent.
-
-The applied values are echoed in `Preference-Applied`. Other `Prefer` tokens are passed through as `ctx["prefer"]`.
-
-YAML `db_tx_end` defaults to `commit` (env-defined `ER_DB_*` connections default to `commit-allow-override`). Valid values: `commit`, `commit-allow-override`, `rollback`, `rollback-allow-override`.
-
-### Auth and scopes
-
-Plugins are tried in a fixed order: `jwt`, `basic`, `apikey`, `oidc`, `awssigv4`, then any other names alphabetically. The first success wins. Claims are cached when `token_cache_ttl` is positive (keyed on the `Authorization` header).
-
-If every plugin fails and `anon_claims` is set, the request continues with those claims and an empty user id. Without `anon_claims`, the response is 401.
-
-`check_scope` (default on) requires a `scope` claim. A claim of `read` or `write` satisfies any required scope that ends with that word (`users-read`, `orders-write`). Per-table `public` lists skip the scope check but still go through `Authenticate`, so unauthenticated public access needs `anon_claims`.
-
-`exclude` hides objects from the API. `allow` is an allow-list: when non-empty, only those tables or functions exist.
-
-## Plugin model
-
-Contracts live in `[plugin/plugin.go](plugin/plugin.go)`. A binary may register any subset of the four RPC keys.
-
-```go
-type DBPlugin interface {
-    InitConnection(uri string) error
-    TableGet(userID, table string, selectFields []string, where map[string]any,
-        ordering, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, map[string]any, error)
-    TableCreate(userID, table string, data []map[string]any, ctx map[string]any) ([]map[string]any, map[string]any, error)
-    TableUpdate(userID, table string, data map[string]any, where map[string]any, ctx map[string]any) (int, map[string]any, error)
-    TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, map[string]any, error)
-    CallFunction(userID, funcName string, data map[string]any, ctx map[string]any) (any, map[string]any, error)
-    GetSchema(ctx map[string]any) (any, map[string]any, error)
-}
-
-type DBQueryPlugin interface {
-    InitConnection(uri string) error
-    QueryCall(query string, ctx map[string]any) ([]map[string]any, error)
-}
-
-type AuthPlugin interface {
-    Init(settings map[string]any) (map[string]any, error) // Swagger 2.0 security definition
-    Authenticate(headers map[string]string, method, path, query string) (map[string]any, error)
-}
-
-type MiddlewarePlugin interface {
-    Init(settings map[string]any) error
-    PreRequest(dbKey string, ctx map[string]any) (map[string]any, *int, error)
-    PostRequest(dbKey string, ctx map[string]any) (map[string]string, error)
-}
-```
-
-A nil returned context map means "keep the caller's map". A non-nil map replaces it.
-
-### Built-in vs external
-
-
-|            | `easyrest-server`                                                         | `easyrest-gateway`               |
-| ---------- | ------------------------------------------------------------------------- | -------------------------------- |
-| Data       | sqlite, postgres, mysql (DB + Query)                                      | external `easyrest-plugin-*`     |
-| Auth       | jwt, oidc, basic, apikey, awssigv4                                        | external `easyrest-auth-*`       |
-| Middleware | ratelimit, dbqueryhook, cache-{redis,postgres,mysql,sqlite,memcached,lru} | external `easyrest-middleware-*` |
-
-
-`basic` and `apikey` have no `cmd/` binary; they exist only as preserved plugins inside `easyrest-server`.
-
-### First-party plugins
-
-Settings are the `settings:` map in YAML (auth and middleware) or URI query parameters (data). Read `Init` / `InitConnection` in the package for the full table.
-
-
-| Plugin                    | Package                                                                                                          | Role                                                                                                                                            |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| sqlite / postgres / mysql | `[plugins/data/sqlite](plugins/data/sqlite)`, `[postgres](plugins/data/postgres)`, `[mysql](plugins/data/mysql)` | CRUD, schema, optional `QUERY`. Postgres URI scheme is `postgres://` (not `postgresql://`).                                                     |
-| jwt / oidc                | `[plugins/auth/jwt](plugins/auth/jwt)`                                                                           | HMAC JWT, or OIDC userinfo. Empty `jwt_secret` decodes without verifying the signature.                                                         |
-| basic / apikey / awssigv4 | `[plugins/auth/basic](plugins/auth/basic)`, `[apikey](plugins/auth/apikey)`, `[awssigv4](plugins/auth/awssigv4)` | Header auth. basic and apikey always set `scope: "read write"`.                                                                                 |
-| ratelimit                 | `[plugins/middleware/ratelimit](plugins/middleware/ratelimit)`                                                   | Fixed window. Keys: `global`, `ip`, `cookie`. Requests over the limit get 429 with `Retry-After`.                                               |
-| dbqueryhook               | `[plugins/middleware/dbqueryhook](plugins/middleware/dbqueryhook)`                                               | Sets `db.pre-request` / `db.post-request` from `by_type` and `by_key`. Postgres runs `SELECT name()`, MySQL `CALL name()`, SQLite ignores them. |
-| cache-*                   | `[plugins/middleware/cache](plugins/middleware/cache)`                                                           | Revision UUID at `etag:<dbKey>:<table>`. Response `ETag` is a quoted RFC 9110 tag `rev:major.minor:fp` (plugin `0.19` + 16-hex SHA-256 of the Vary fingerprint). Strong for buffered JSON/XML/CSV; weak (`W/"…"`) for NDJSON, `Range`, and writes. `Resource-Version` is the UUID only. GET/HEAD `If-None-Match` uses weak comparison (304). Lost-update: `If-Resource-Version`, else weak `If-Match: W/"<rev>"`, else strong `If-Match` vs the request representation ETag. Vary: `Accept`, `Content-Type`, `Prefer`, `Range` (not `Accept-Language`). Unquoted ETags no longer 304. Schema and `QUERY` are not cached. |
-
-
-Cache backends implement `cache.Store` (`InitConnection`, `Set`, `Get`). SQL-backed stores share `[plugins/data/sqlcache](plugins/data/sqlcache)` and create an `easyrest_cache` table.
+SQLite does not inject or harvest. `QUERY` never returns context, so it cannot harvest either. Dialect details and example SQL: [Postgres](plugins/data/postgres/README.md), [MySQL](plugins/data/mysql/README.md), [SQLite](plugins/data/sqlite/README.md).
 
 ## Configuration
 
-Flags write `ER_*` environment variables, then `[config.Load](internal/config/config.go)` builds defaults from the environment and overlays the YAML file (`--config` / `ER_CONFIG_FILE`). Fields present in YAML win.
+`server.SetupApplication` loads defaults, then each `-config` file in order, then a YAML overlay from the flags that were actually passed. A field absent from a later document keeps its previous value. `SIGHUP` repeats that with the same files and overlay.
+
+A file that matches the quickstart shape:
 
 ```yaml
-port: 8080
-access_log: true
-check_scope: true
-token_user_search: sub          # claim used as user id
-default_limit: 100
-default_timezone: GMT
-token_cache_ttl: 0              # seconds; <=0 disables the claims cache
-anon_claims:                    # used when every auth plugin fails
-  role: anonymous
-  sub: 0
-
+port: "8080"
 auth_plugins:
   jwt:
     settings:
       jwt_secret: "change-me"
-
-global_request_middlewares:
-  - ratelimit
-
-middleware_plugins:
-  ratelimit:
-    settings:
-      limit: 100
-      period: 1m
-      key: ip
-  cache-redis:
-    settings:
-      uri: redis://localhost:6379/0
-      ttl: 24h
-
 plugins:
-  app:
-    uri: postgres://user:pass@localhost:5432/app?sslmode=disable
-    title: App API
-    db_tx_end: commit-allow-override
-    request_middlewares: [cache-redis]
-    public:
-      table: [status]
-    exclude:
-      table: [schema_migrations]
-
-cors:
-  enabled: true
-  origins: ["*"]
-  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"]
-  headers: ["Content-Type", "Authorization", "Accept", "Prefer", "If-Match", "If-None-Match", "If-Resource-Version", "Range", "Range-Unit"]
-  max_age: 86400
-
-# server: timeouts, HTTP/2, max_body_size, trusted_proxy_mode — see Config.Server
-
-otel:
-  enabled: false
-  endpoint: localhost:4317
-  protocol: otlp                # otlp | otlphttp | zipkin (deprecated)
-  service_name: easyrest-server
+  crud:
+    uri: sqlite:///var/lib/easyrest/local.db
 ```
 
-If `auth_plugins` is omitted, Load synthesizes a `jwt` plugin from `ER_TOKEN_SECRET`. There is no top-level `token_secret` YAML key.
+Every field, including `application`, `internal_rpc`, CORS, OpenTelemetry, TLS, and `server:` timeouts, is in [internal/config/README.md](internal/config/README.md). Flags are `-config` (repeatable), `-port`, `-access-log`, and `-plugin-log`.
 
-Additional connection files: `plugin_configs: [./more.yaml]` (YAML documents with a `name:` field) and `ER_DB_<NAME>=sqlite://./file.db`. `ER_USE_QUERY_<NAME>=1` marks that connection as `QUERY`-only.
+## Plugins
 
-The complete struct, including the `server:` HTTP/2 and trusted-proxy fields, is `[internal/config/config.go](internal/config/config.go)`. Environment variables use the `ER_` prefix (`ER_PORT`, `ER_CHECK_SCOPE=1`, `ER_ACCESSLOG=1`, `ER_ANON_CLAIMS`, `ER_TLS_CERT_FILE`, …).
+Settings and a YAML example live next to each plugin. The contract for a new binary is [plugin/README.md](plugin/README.md).
 
-Useful flags: `--config`, `--port`, `--version`, `--access-log`, `--enable-plugin-log`, `--timezone`, `--tls-cert-file`, `--tls-key-file`, `--cors-enabled`. Full list: `[internal/cli/cli.go](internal/cli/cli.go)`.
+Auth:
+
+- [jwt and oidc](plugins/auth/jwt/README.md)
+- [jwtsession](plugins/auth/jwtsession/README.md)
+- [basic](plugins/auth/basic/README.md)
+- [apikey](plugins/auth/apikey/README.md)
+- [dbsession](plugins/auth/dbsession/README.md)
+- [awssigv4](plugins/auth/awssigv4/README.md)
+
+Data:
+
+- [sqlite](plugins/data/sqlite/README.md)
+- [postgres](plugins/data/postgres/README.md)
+- [mysql](plugins/data/mysql/README.md)
+
+Cache stores, used by the cache middleware:
+
+- [redis](plugins/data/redis/README.md)
+- [memcached](plugins/data/memcached/README.md)
+- [lru](plugins/data/lru/README.md)
+- [sqlcache](plugins/data/sqlcache/README.md)
+
+Middleware:
+
+- [cache](plugins/middleware/cache/README.md)
+- [ratelimit](plugins/middleware/ratelimit/README.md)
+- [dbqueryhook](plugins/middleware/dbqueryhook/README.md)
+- [response_headers](plugins/middleware/responseheaders/README.md)
+
+Content:
+
+- [json](plugins/content/json/README.md)
+- [ndjson](plugins/content/ndjson/README.md)
+- [xml](plugins/content/xml/README.md)
+- [csv](plugins/content/csv/README.md)
+- [form](plugins/content/form/README.md)
+- [swaggerui](plugins/content/swaggerui/README.md)
+- [yaml](cmd/content-yaml/README.md)
+
+Storage:
+
+- [local](plugins/storage/local/README.md)
+- [memory](plugins/storage/memory/README.md)
+- [s3](plugins/storage/s3/README.md)
+- [dbglob](plugins/storage/dbglob/README.md)
+- [static](plugins/storage/static/README.md)
+
+`basic`, `apikey`, `jwtsession`, and `dbsession` have no `cmd/` binary. They exist only as preserved plugins inside `easyrest-server`.
 
 ## Distributions and deployment
 
+| Binary | What you get |
+| --- | --- |
+| `easyrest-server` | HTTP core, sqlite/postgres/mysql, seven auth plugins (jwt, jwtsession, oidc, basic, apikey, dbsession, awssigv4), ratelimit, dbqueryhook, response_headers, six cache middlewares, YAML content, and S3 storage. PGO profile at `[cmd/server/default.pgo](cmd/server/default.pgo)` is picked up automatically. |
+| `easyrest-gateway` | The same HTTP core. Content plugins json, ndjson, xml, csv, form, and html, plus storage local, memory, dbglob, and static, are still in-process. Data, auth, middleware, YAML, and S3 are external binaries on `PATH` or via `path:`. |
 
-| Binary             | What you get                                                                                                                                                                                                    |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `easyrest-server`  | HTTP core + built-in sqlite/postgres/mysql, all five auth plugins, ratelimit, dbqueryhook, six cache middlewares. PGO profile at `[cmd/server/default.pgo](cmd/server/default.pgo)` is picked up automatically. |
-| `easyrest-gateway` | HTTP core only. Put plugin binaries on `PATH` or set `path:`.                                                                                                                                                   |
-
+Both binaries share those content and storage factories because they live in the server package. `easyrest-server` adds the rest in `[cmd/server/main.go](cmd/server/main.go)`.
 
 Release tags publish `easyrest-server-{linux,darwin}-{amd64,arm64}` and `easyrest-gateway-…`, plus a multi-arch image:
 
@@ -469,56 +300,18 @@ docker run --rm -p 8080:8080 -v $PWD/config.yaml:/config.yaml \
 
 The image is distroless, runs as non-root, and contains only `easyrest-server` (`[Dockerfile](Dockerfile)`).
 
-TLS (`tls_enabled` / cert and key files) serves HTTP/2. Without TLS the server speaks h2c. `SIGHUP` reloads YAML and restarts plugins; `SIGINT`/`SIGTERM` shut down gracefully.
+TLS (`tls_enabled`, or both cert and key files) serves HTTP/2. Without TLS the server speaks h2c. `SIGHUP` reloads the same config files, restarts plugins, and rebuilds the chi router. `SIGINT`/`SIGTERM` shut down gracefully.
 
 Optional pprof on `easyrest-server` only: `ER_PPROF_ADDR=:6060`.
 
-A full MySQL + Postgres + Redis + Memcached stack for load tests lives in `[pgo/docker-compose.yml](pgo/docker-compose.yml)`.
-
-## Writing a plugin
-
-Build a binary, register one RPC key, serve with `easyrest.Handshake`.
-
-```go
-package main
-
-import (
-    hplugin "github.com/hashicorp/go-plugin"
-    easyrest "github.com/onegreyonewhite/easyrest/plugin"
-)
-
-type Guard struct{}
-
-func (Guard) Init(map[string]any) error { return nil }
-
-func (Guard) PreRequest(dbKey string, ctx map[string]any) (map[string]any, *int, error) {
-    return ctx, nil, nil
-}
-
-func (Guard) PostRequest(dbKey string, ctx map[string]any) (map[string]string, error) {
-    return nil, nil
-}
-
-func main() {
-    hplugin.Serve(&hplugin.ServeConfig{
-        HandshakeConfig: easyrest.Handshake,
-        Plugins: map[string]hplugin.Plugin{
-            "middleware": &easyrest.MiddlewarePluginPlugin{Impl: Guard{}},
-        },
-    })
-}
-```
-
-Auth plugins register `"auth"` with `AuthPluginPlugin` and implement `Init` + `Authenticate(headers, method, path, query)`. Data plugins register `"db"` and/or `"query"`. A custom ETag backend implements `cache.Store` and is wrapped with `cache.New(store)` as a middleware plugin; `[cmd/middleware-cache-redis/main.go](cmd/middleware-cache-redis/main.go)` is a complete example.
-
-Name the binary for auto-discovery (`easyrest-middleware-guard` for `middleware_plugins.guard`) or set `path:`.
+A full MySQL + Postgres + Redis + Memcached stack for load tests lives in `[pgo/docker-compose.yml](pgo/docker-compose.yml)`. Details are in [pgo/README.md](pgo/README.md).
 
 ## Development
 
 ```bash
 make            # all cmd/ binaries -> bin/easyrest-<dirname>
 make server     # bin/easyrest-server (PGO auto if default.pgo exists)
-make test       # go test ./... with coverage; needs plugin-sqlite + auth-jwt on PATH
+make test       # go test ./... with coverage; needs plugin-sqlite, auth-jwt, and content-yaml on PATH
 make bench
 ```
 

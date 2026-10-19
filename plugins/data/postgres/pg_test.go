@@ -103,6 +103,174 @@ func TestConvertPlaceholders(t *testing.T) {
 	}
 }
 
+func TestTableGet_ExactCount(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	ctx := map[string]any{
+		"timezone": "UTC",
+		"prefer":   map[string]any{"count": "exact"},
+	}
+	where := map[string]any{"status": map[string]any{"=": "active"}}
+	settings := map[string]string{"response.status": "201"}
+	preferJSON, err := json.Marshal(map[string]any{"count": "exact"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mock.ExpectBegin()
+	expectApplyPluginContext(mock, "prefer", string(preferJSON), "timezone", "UTC")
+	mock.ExpectQuery(`SELECT count(*) FROM (SELECT id, name FROM users WHERE status = $1) AS er_count`).
+		WithArgs("active").
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(8)))
+	mock.ExpectQuery(`SELECT id, name FROM users WHERE status = $1 LIMIT 1`).
+		WithArgs("active").
+		WillReturnRows(pgxmock.NewRows([]string{"id", "name"}).AddRow(1, "Ada"))
+	expectResponseHarvest(mock, settings)
+	mock.ExpectCommit()
+
+	rows, out, err := plugin.TableGet("u", "users", []string{"id", "name"}, where, nil, nil, 1, 0, ctx)
+	if err != nil {
+		t.Fatalf("TableGet: %v", err)
+	}
+	if len(rows) != 1 || rows[0]["name"] != "Ada" {
+		t.Fatalf("page: %#v", rows)
+	}
+	if out["total"] != int64(8) {
+		t.Fatalf("total = %#v, want 8", out["total"])
+	}
+	if out["timezone"] != "UTC" {
+		t.Fatalf("timezone dropped: %#v", out)
+	}
+	if out["response.status"] != "201" {
+		t.Fatalf("harvest dropped: %#v", out)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestPostgresPlanRows(t *testing.T) {
+	n, err := postgresPlanRows([]byte(`[{"Plan":{"Node Type":"Seq Scan","Plan Rows":10.6}}]`))
+	if err != nil || n != 11 {
+		t.Fatalf("Plan Rows 10.6 -> %d, %v", n, err)
+	}
+	if _, err := postgresPlanRows([]byte(`[{"Plan":{"Node Type":"Seq Scan"}}]`)); err == nil {
+		t.Fatal("missing Plan Rows must fail")
+	}
+}
+
+func TestTableGet_PlannedCount(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	ctx := map[string]any{
+		"timezone": "UTC",
+		"prefer":   map[string]any{"count": "planned"},
+	}
+	where := map[string]any{"status": map[string]any{"=": "active"}}
+	preferJSON, err := json.Marshal(map[string]any{"count": "planned"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mock.ExpectBegin()
+	expectApplyPluginContext(mock, "prefer", string(preferJSON), "timezone", "UTC")
+	mock.ExpectQuery(`EXPLAIN (FORMAT JSON) SELECT id, name FROM users WHERE status = $1`).
+		WithArgs("active").
+		WillReturnRows(pgxmock.NewRows([]string{"QUERY PLAN"}).AddRow(`[{"Plan":{"Node Type":"Seq Scan","Plan Rows":10.6}}]`))
+	mock.ExpectQuery(`SELECT id, name FROM users WHERE status = $1 LIMIT 1`).
+		WithArgs("active").
+		WillReturnRows(pgxmock.NewRows([]string{"id", "name"}).AddRow(1, "Ada"))
+	expectEmptyResponseHarvest(mock)
+	mock.ExpectCommit()
+
+	rows, out, err := plugin.TableGet("u", "users", []string{"id", "name"}, where, nil, nil, 1, 0, ctx)
+	if err != nil {
+		t.Fatalf("TableGet: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("page: %#v", rows)
+	}
+	if out["total"] != int64(11) {
+		t.Fatalf("total = %#v, want rounded Plan Rows 11", out["total"])
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestTableGet_EstimatedCountBelowMax(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	ctx := map[string]any{
+		"timezone":    "UTC",
+		"db_max_rows": 10000,
+		"prefer":      map[string]any{"count": "estimated"},
+	}
+	where := map[string]any{"status": map[string]any{"=": "active"}}
+	preferJSON, err := json.Marshal(map[string]any{"count": "estimated"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mock.ExpectBegin()
+	expectApplyPluginContext(mock, "db_max_rows", "10000", "prefer", string(preferJSON), "timezone", "UTC")
+	mock.ExpectQuery(`EXPLAIN (FORMAT JSON) SELECT id, name FROM users WHERE status = $1`).
+		WithArgs("active").
+		WillReturnRows(pgxmock.NewRows([]string{"QUERY PLAN"}).AddRow(`[{"Plan":{"Node Type":"Seq Scan","Plan Rows":10}}]`))
+	mock.ExpectQuery(`SELECT count(*) FROM (SELECT id, name FROM users WHERE status = $1) AS er_count`).
+		WithArgs("active").
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(8)))
+	mock.ExpectQuery(`SELECT id, name FROM users WHERE status = $1 LIMIT 1`).
+		WithArgs("active").
+		WillReturnRows(pgxmock.NewRows([]string{"id", "name"}).AddRow(1, "Ada"))
+	expectEmptyResponseHarvest(mock)
+	mock.ExpectCommit()
+
+	_, out, err := plugin.TableGet("u", "users", []string{"id", "name"}, where, nil, nil, 1, 0, ctx)
+	if err != nil {
+		t.Fatalf("TableGet: %v", err)
+	}
+	if out["total"] != int64(8) {
+		t.Fatalf("total = %#v, want exact 8 when plan is below db_max_rows", out["total"])
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestTableGet_EstimatedCountAtMax(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	ctx := map[string]any{
+		"timezone":    "UTC",
+		"db_max_rows": 10000,
+		"prefer":      map[string]any{"count": "estimated"},
+	}
+	where := map[string]any{"status": map[string]any{"=": "active"}}
+	preferJSON, err := json.Marshal(map[string]any{"count": "estimated"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mock.ExpectBegin()
+	expectApplyPluginContext(mock, "db_max_rows", "10000", "prefer", string(preferJSON), "timezone", "UTC")
+	mock.ExpectQuery(`EXPLAIN (FORMAT JSON) SELECT id, name FROM users WHERE status = $1`).
+		WithArgs("active").
+		WillReturnRows(pgxmock.NewRows([]string{"QUERY PLAN"}).AddRow(`[{"Plan":{"Node Type":"Seq Scan","Plan Rows":10000}}]`))
+	mock.ExpectQuery(`SELECT id, name FROM users WHERE status = $1 LIMIT 1`).
+		WithArgs("active").
+		WillReturnRows(pgxmock.NewRows([]string{"id", "name"}).AddRow(1, "Ada"))
+	expectEmptyResponseHarvest(mock)
+	mock.ExpectCommit()
+
+	_, out, err := plugin.TableGet("u", "users", []string{"id", "name"}, where, nil, nil, 1, 0, ctx)
+	if err != nil {
+		t.Fatalf("TableGet: %v", err)
+	}
+	if out["total"] != int64(10000) {
+		t.Fatalf("total = %#v, want planned 10000 at the threshold", out["total"])
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
 func TestTableGet(t *testing.T) {
 	plugin, mock := newTestPlugin(t)
 	selectFields := []string{"id", "name"}
@@ -698,7 +866,7 @@ func TestResolveLocationCacheBounded(t *testing.T) {
 		"America/New_York", "Europe/London", "Asia/Tokyo", "Australia/Sydney",
 		"America/Los_Angeles", "Europe/Berlin", "Asia/Singapore", "Pacific/Auckland",
 	}
-	for i := 0; i < maxTimezoneCacheSize+10; i++ {
+	for i := range maxTimezoneCacheSize + 10 {
 		tz := zones[i%len(zones)]
 		plugin.resolveLocation(map[string]any{"timezone": tz})
 	}

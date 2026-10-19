@@ -12,7 +12,7 @@ const (
 )
 
 // Version is the plugin version.
-var Version = "v0.20.0"
+var Version = "v0.21.0"
 
 // DBPlugin – interface for DB access plugins.
 // Methods that take ctx may return an updated context map. A nil returned ctx
@@ -142,19 +142,20 @@ type QueryCallResponse struct {
 // --- AuthPlugin ---
 // AuthPlugin defines the interface for authentication plugins.
 type AuthPlugin interface {
-	Init(settings map[string]any) (map[string]any, error) // Returns Swagger 2.0 security definition and error
+	Init(settings map[string]any, host HostRPC) (AuthInfo, error)
 	Authenticate(headers map[string]string, method string, path string, query string) (map[string]any, error)
 }
 
 // AuthInitRequest holds the settings for authentication plugin initialization.
 type AuthInitRequest struct {
 	Settings map[string]any
+	Host     HostRPC
 }
 
 // AuthInitResponse indicates success or error during authentication plugin initialization.
 type AuthInitResponse struct {
-	Schema map[string]any // Swagger 2.0 security definition
-	Error  string
+	Info  AuthInfo
+	Error string
 }
 
 // AuthAuthenticateRequest holds the data for authentication.
@@ -175,7 +176,7 @@ type AuthAuthenticateResponse struct {
 
 // MiddlewarePlugin defines the interface for request middleware plugins.
 type MiddlewarePlugin interface {
-	Init(settings map[string]any) error
+	Init(settings map[string]any, host HostRPC) (MiddlewareInfo, error)
 	PreRequest(dbKey string, ctx map[string]any) (map[string]any, *int, error)
 	PostRequest(dbKey string, ctx map[string]any) (map[string]string, error)
 }
@@ -183,10 +184,12 @@ type MiddlewarePlugin interface {
 // MiddlewareInitRequest holds the settings for middleware plugin initialization.
 type MiddlewareInitRequest struct {
 	Settings map[string]any
+	Host     HostRPC
 }
 
 // MiddlewareInitResponse indicates success or error during middleware plugin initialization.
 type MiddlewareInitResponse struct {
+	Info  MiddlewareInfo
 	Error string
 }
 

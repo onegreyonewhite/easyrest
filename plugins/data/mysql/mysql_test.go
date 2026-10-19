@@ -21,12 +21,12 @@ import (
 // fakeRows implements the rowScanner interface for scanRows testing.
 type fakeRows struct {
 	cols []string
-	data [][]interface{}
+	data [][]any
 	i    int
 	err  error
 }
 
-func newFakeRows(cols []string, data [][]interface{}) *fakeRows {
+func newFakeRows(cols []string, data [][]any) *fakeRows {
 	return &fakeRows{cols: cols, data: data, i: 0}
 }
 
@@ -42,7 +42,7 @@ func (r *fakeRows) Next() bool {
 	return false
 }
 
-func (r *fakeRows) Scan(dest ...interface{}) error {
+func (r *fakeRows) Scan(dest ...any) error {
 	if r.i-1 >= len(r.data) {
 		return errors.New("no row to scan")
 	}
@@ -51,7 +51,7 @@ func (r *fakeRows) Scan(dest ...interface{}) error {
 		return fmt.Errorf("expected %d columns, got %d", len(row), len(dest))
 	}
 	for i, v := range row {
-		ptr, ok := dest[i].(*interface{})
+		ptr, ok := dest[i].(*any)
 		if !ok {
 			return fmt.Errorf("expected *interface{} at column %d", i)
 		}
@@ -155,7 +155,7 @@ func TestInjectContext(t *testing.T) {
 	}
 	defer conn.Close()
 
-	ctxData := map[string]interface{}{
+	ctxData := map[string]any{
 		"token":    "secret",
 		"timezone": "UTC",
 	}
@@ -224,7 +224,7 @@ func TestInjectContextNil(t *testing.T) {
 func TestScanRows(t *testing.T) {
 	cols := []string{"id", "name", "created_at"}
 	now := time.Date(2025, 3, 7, 15, 30, 0, 0, time.UTC)
-	rowsData := [][]interface{}{
+	rowsData := [][]any{
 		{1, []byte("Alice"), now},
 	}
 	fr := newFakeRows(cols, rowsData)
@@ -280,12 +280,192 @@ ORDER BY SPECIFIC_NAME, ORDINAL_POSITION;`)).
 	}
 }
 
+func TestTableGet_ExactCount(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	defer plugin.db.Close()
+
+	ctx := map[string]any{
+		"timezone": "UTC",
+		"prefer":   map[string]any{"count": "exact"},
+	}
+	where := map[string]any{"status": "active"}
+	settings := map[string]string{"response.status": "201"}
+	setSQL := "SET @erctx_prefer_count = ?, @request_prefer_count = ?, @erctx_timezone = ?, @request_timezone = ?, time_zone = ?"
+
+	mock.ExpectExec(regexp.QuoteMeta(setSQL)).
+		WithArgs("exact", "exact", "UTC", "UTC", "UTC").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT count(*) FROM (SELECT id, name FROM users WHERE status = ?) AS er_count")).
+		WithArgs("active").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(int64(8)))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, name FROM users WHERE status = ? LIMIT 1")).
+		WithArgs("active").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name"}).AddRow(1, "Ada"))
+	expectResponseHarvestQuery(mock, settings)
+	mock.ExpectCommit()
+	expectClearResponseSettings(mock, settings)
+
+	rows, out, err := plugin.TableGet("u", "users", []string{"id", "name"}, where, nil, nil, 1, 0, ctx)
+	if err != nil {
+		t.Fatalf("TableGet: %v", err)
+	}
+	if len(rows) != 1 || rows[0]["name"] != "Ada" {
+		t.Fatalf("page: %#v", rows)
+	}
+	if out["total"] != int64(8) {
+		t.Fatalf("total = %#v, want 8", out["total"])
+	}
+	if out["timezone"] != "UTC" {
+		t.Fatalf("timezone dropped: %#v", out)
+	}
+	if out["response.status"] != "201" {
+		t.Fatalf("harvest dropped: %#v", out)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestMySQLExaminedRows(t *testing.T) {
+	n, err := mysqlExaminedRows([]byte(`{"query_block":{"table":{"rows_examined_per_scan":10.6}}}`))
+	if err != nil || n != 11 {
+		t.Fatalf("single table -> %d, %v", n, err)
+	}
+	n, err = mysqlExaminedRows([]byte(`{"query_block":{"nested_loop":[{"table":{"rows_examined_per_scan":10}},{"table":{"rows_examined_per_scan":4}}]}}`))
+	if err != nil || n != 4 {
+		t.Fatalf("join last table -> %d, %v", n, err)
+	}
+	if _, err := mysqlExaminedRows([]byte(`{"query_block":{"select_id":1}}`)); err == nil {
+		t.Fatal("missing rows_examined_per_scan must fail")
+	}
+}
+
+func TestTableGet_PlannedCount(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	defer plugin.db.Close()
+
+	ctx := map[string]any{
+		"timezone": "UTC",
+		"prefer":   map[string]any{"count": "planned"},
+	}
+	where := map[string]any{"status": "active"}
+	setSQL := "SET @erctx_prefer_count = ?, @request_prefer_count = ?, @erctx_timezone = ?, @request_timezone = ?, time_zone = ?"
+
+	mock.ExpectExec(regexp.QuoteMeta(setSQL)).
+		WithArgs("planned", "planned", "UTC", "UTC", "UTC").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("EXPLAIN FORMAT=JSON SELECT id, name FROM users WHERE status = ?")).
+		WithArgs("active").
+		WillReturnRows(sqlmock.NewRows([]string{"EXPLAIN"}).AddRow(`{"query_block":{"table":{"rows_examined_per_scan":10.6}}}`))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, name FROM users WHERE status = ? LIMIT 1")).
+		WithArgs("active").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name"}).AddRow(1, "Ada"))
+	expectEmptyResponseHarvest(mock)
+	mock.ExpectCommit()
+	expectClearResponseSettings(mock, nil)
+
+	rows, out, err := plugin.TableGet("u", "users", []string{"id", "name"}, where, nil, nil, 1, 0, ctx)
+	if err != nil {
+		t.Fatalf("TableGet: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("page: %#v", rows)
+	}
+	if out["total"] != int64(11) {
+		t.Fatalf("total = %#v, want rounded rows_examined_per_scan 11", out["total"])
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestTableGet_EstimatedCountBelowMax(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	defer plugin.db.Close()
+
+	ctx := map[string]any{
+		"timezone":    "UTC",
+		"db_max_rows": 10000,
+		"prefer":      map[string]any{"count": "estimated"},
+	}
+	where := map[string]any{"status": "active"}
+	setSQL := "SET @erctx_db_max_rows = ?, @request_db_max_rows = ?, @erctx_prefer_count = ?, @request_prefer_count = ?, @erctx_timezone = ?, @request_timezone = ?, time_zone = ?"
+
+	mock.ExpectExec(regexp.QuoteMeta(setSQL)).
+		WithArgs("10000", "10000", "estimated", "estimated", "UTC", "UTC", "UTC").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("EXPLAIN FORMAT=JSON SELECT id, name FROM users WHERE status = ?")).
+		WithArgs("active").
+		WillReturnRows(sqlmock.NewRows([]string{"EXPLAIN"}).AddRow(`{"query_block":{"table":{"rows_examined_per_scan":10}}}`))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT count(*) FROM (SELECT id, name FROM users WHERE status = ?) AS er_count")).
+		WithArgs("active").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(int64(8)))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, name FROM users WHERE status = ? LIMIT 1")).
+		WithArgs("active").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name"}).AddRow(1, "Ada"))
+	expectEmptyResponseHarvest(mock)
+	mock.ExpectCommit()
+	expectClearResponseSettings(mock, nil)
+
+	_, out, err := plugin.TableGet("u", "users", []string{"id", "name"}, where, nil, nil, 1, 0, ctx)
+	if err != nil {
+		t.Fatalf("TableGet: %v", err)
+	}
+	if out["total"] != int64(8) {
+		t.Fatalf("total = %#v, want exact 8 when the estimate is below db_max_rows", out["total"])
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestTableGet_EstimatedCountAtMax(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	defer plugin.db.Close()
+
+	ctx := map[string]any{
+		"timezone":    "UTC",
+		"db_max_rows": 10000,
+		"prefer":      map[string]any{"count": "estimated"},
+	}
+	where := map[string]any{"status": "active"}
+	setSQL := "SET @erctx_db_max_rows = ?, @request_db_max_rows = ?, @erctx_prefer_count = ?, @request_prefer_count = ?, @erctx_timezone = ?, @request_timezone = ?, time_zone = ?"
+
+	mock.ExpectExec(regexp.QuoteMeta(setSQL)).
+		WithArgs("10000", "10000", "estimated", "estimated", "UTC", "UTC", "UTC").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("EXPLAIN FORMAT=JSON SELECT id, name FROM users WHERE status = ?")).
+		WithArgs("active").
+		WillReturnRows(sqlmock.NewRows([]string{"EXPLAIN"}).AddRow(`{"query_block":{"table":{"rows_examined_per_scan":10000}}}`))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, name FROM users WHERE status = ? LIMIT 1")).
+		WithArgs("active").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name"}).AddRow(1, "Ada"))
+	expectEmptyResponseHarvest(mock)
+	mock.ExpectCommit()
+	expectClearResponseSettings(mock, nil)
+
+	_, out, err := plugin.TableGet("u", "users", []string{"id", "name"}, where, nil, nil, 1, 0, ctx)
+	if err != nil {
+		t.Fatalf("TableGet: %v", err)
+	}
+	if out["total"] != int64(10000) {
+		t.Fatalf("total = %#v, want planned 10000 at the threshold", out["total"])
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
 func TestTableGetGroupByOrderingLimitOffset(t *testing.T) {
 	plugin, mock := newTestPlugin(t)
 	defer plugin.db.Close()
 
 	sf := []string{"id", "name"}
-	where := map[string]interface{}{
+	where := map[string]any{
 		"status": "active",
 		"name":   map[string]any{"ILIKE": "JoHn%"},
 	}
@@ -325,7 +505,7 @@ func TestTableGetTimeMidnight(t *testing.T) {
 	defer plugin.db.Close()
 
 	sf := []string{"id", "created_at"}
-	where := map[string]interface{}{
+	where := map[string]any{
 		"dummy": "val",
 	}
 	expQ := "SELECT id, created_at FROM users WHERE dummy = ?"
@@ -358,10 +538,10 @@ func TestTableCreateWithContext(t *testing.T) {
 	plugin, mock := newTestPlugin(t)
 	defer plugin.db.Close()
 
-	data := []map[string]interface{}{
+	data := []map[string]any{
 		{"id": 1, "info": "info", "name": "erctx.claim"},
 	}
-	ctxData := map[string]interface{}{
+	ctxData := map[string]any{
 		"claim": "Alice",
 		"foo":   123,
 	}
@@ -429,7 +609,7 @@ func TestCallFunctionRollbackOnError(t *testing.T) {
 		},
 	}
 
-	data := map[string]interface{}{
+	data := map[string]any{
 		"param": "value",
 	}
 	mock.ExpectBegin()
@@ -460,7 +640,7 @@ func TestCallFunctionFunction(t *testing.T) {
 			},
 		},
 	}
-	data := map[string]interface{}{
+	data := map[string]any{
 		"p": "hello",
 	}
 	rows := sqlmock.NewRows([]string{"result"}).AddRow("world")
@@ -577,7 +757,7 @@ func TestCallFunctionProcedure(t *testing.T) {
 			},
 		},
 	}
-	data := map[string]interface{}{
+	data := map[string]any{
 		"p1": "hello",
 	}
 	mock.ExpectBegin()
@@ -612,17 +792,17 @@ func TestTableUpdateWithContext2(t *testing.T) {
 	defer plugin.db.Close()
 
 	// The data to update
-	data := map[string]interface{}{
+	data := map[string]any{
 		"note": "SomeNote",
 		"qty":  42,
 	}
 	// The where clause
-	where := map[string]interface{}{
-		"id":     map[string]interface{}{"=": 1},
+	where := map[string]any{
+		"id":     map[string]any{"=": 1},
 		"region": map[string]any{"ILIKE": "EaSt"}, // Add ILIKE
 	}
 	// ctx has keys in random order: "xxx", "abc"
-	ctxData := map[string]interface{}{
+	ctxData := map[string]any{
 		"xxx": "111",
 		"abc": "222",
 	}
@@ -683,11 +863,11 @@ func TestTableDeleteWithContext2(t *testing.T) {
 	plugin, mock := newTestPlugin(t)
 	defer plugin.db.Close()
 
-	where := map[string]interface{}{
-		"status": map[string]interface{}{"=": "old"},
+	where := map[string]any{
+		"status": map[string]any{"=": "old"},
 		"tag":    map[string]any{"ILIKE": "DeLeTeMe"}, // Add ILIKE
 	}
-	ctxData := map[string]interface{}{
+	ctxData := map[string]any{
 		"ccc": "111",
 		"aaa": "222",
 	}
@@ -1116,7 +1296,7 @@ func TestMysqlQueryCall(t *testing.T) {
 	})
 
 	t.Run("with context", func(t *testing.T) {
-		ctxData := map[string]interface{}{
+		ctxData := map[string]any{
 			"claims_sub": "sub_value",
 		}
 		setQuery := regexp.QuoteMeta("SET @erctx_claims_sub = ?, @request_claims_sub = ?")

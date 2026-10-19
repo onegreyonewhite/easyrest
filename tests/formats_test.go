@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/onegreyonewhite/easyrest/internal/config"
 	"github.com/onegreyonewhite/easyrest/internal/server"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
@@ -236,15 +235,12 @@ func TestTrustedProxyHeaderMode(t *testing.T) {
 	defer server.StopPlugins()
 	insertUser(t, dbPath, "Alice", "")
 
-	os.Setenv("ER_DB_TEST", "sqlite://"+dbPath)
-	os.Setenv("ER_CHECK_SCOPE", "0")
-	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
-	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
-	os.Setenv("ER_ACCESSLOG", "1")
-	os.Setenv("ER_SERVER_TRUSTED_PROXY_MODE", "header")
-	os.Setenv("ER_SERVER_TRUSTED_PROXY_HEADER", "X-Real-IP")
-	cfg := config.Load()
-	server.SetConfig(cfg)
+	applyTestConfig(t, testSQLiteYAML("sqlite://"+dbPath, false, `
+access_log: true
+server:
+  trusted_proxy_mode: header
+  trusted_proxy_header: X-Real-IP
+`))
 	router := server.SetupRouter()
 	tokenStr := generateToken(t)
 
@@ -265,15 +261,12 @@ func TestTrustedProxyXFFCountMode(t *testing.T) {
 	defer server.StopPlugins()
 	insertUser(t, dbPath, "Alice", "")
 
-	os.Setenv("ER_DB_TEST", "sqlite://"+dbPath)
-	os.Setenv("ER_CHECK_SCOPE", "0")
-	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
-	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
-	os.Setenv("ER_ACCESSLOG", "1")
-	os.Setenv("ER_SERVER_TRUSTED_PROXY_MODE", "xff_count")
-	os.Setenv("ER_SERVER_TRUSTED_PROXY_COUNT", "1")
-	cfg := config.Load()
-	server.SetConfig(cfg)
+	applyTestConfig(t, testSQLiteYAML("sqlite://"+dbPath, false, `
+access_log: true
+server:
+  trusted_proxy_mode: xff_count
+  trusted_proxy_count: 1
+`))
 	router := server.SetupRouter()
 	tokenStr := generateToken(t)
 
@@ -296,8 +289,7 @@ func TestRPCScopeForbidden(t *testing.T) {
 	}
 	defer server.StopPlugins()
 
-	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
-	server.ReloadConfig()
+	applyTestConfig(t, testSecretYAML(true))
 	router := server.SetupRouter()
 
 	cfg := server.GetConfig()

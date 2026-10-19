@@ -1,0 +1,330 @@
+port: "8080"
+access_log: true
+check_scope: true
+token_user_search: sub
+
+cors:
+  enabled: true
+  origins: ["*"]
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+  headers: ["Content-Type", "Authorization", "Accept", "Prefer", "If-Match", "If-None-Match", "If-Resource-Version", "Range", "Range-Unit"]
+  max_age: 86400
+
+content_plugins:
+  yaml: {}
+
+auth_plugins:
+  jwt:
+    settings:
+      jwt_secret: dev-only-change-me
+      token_type: Bearer
+      token_endpoint: https://idp.example/oauth/token
+      authorization_endpoint: https://idp.example/oauth/authorize
+      flow: accessCode
+
+middleware_plugins:
+  security_headers:
+    plugin: response_headers
+    settings:
+      on_conflict: skip
+      headers:
+        X-Content-Type-Options: nosniff
+        Referrer-Policy: strict-origin-when-cross-origin
+  cache_public:
+    plugin: response_headers
+    settings:
+      on_conflict: overwrite
+      headers:
+        Cache-Control: "public, max-age=60"
+  cache_private:
+    plugin: response_headers
+    settings:
+      on_conflict: overwrite
+      headers:
+        Cache-Control: "private, no-store"
+  dbqueryhook:
+    settings:
+      by_key:
+        commerce:
+          pre_request: shop.pre_request
+  cache-postgres:
+    settings:
+      uri: postgres://shop_conn:shop_conn@postgres:5432/shop?sslmode=disable&autoCleanup=true
+      ttl: 24h
+
+storage_plugins:
+  product_images:
+    plugin: s3
+    settings:
+      endpoint: http://minio:9000
+      region: us-east-1
+      bucket: shop
+      prefix: products
+      access_key: minio
+      secret_key: minio-secret
+      path_style: true
+      public_base: https://localhost/cdn
+
+plugins:
+  # GET reads emit request_middlewares. Writes emit the API middleware list.
+  catalog:
+    uri: mysql://shop:shop@mysql:3306/catalog?parseTime=true
+    internal: true
+    title: Catalog
+    request_middlewares: [security_headers, cache_public, cache-postgres]
+  commerce:
+    uri: postgres://shop_conn:shop_conn@postgres:5432/shop?sslmode=disable&search_path=shop
+    internal: true
+    title: Commerce
+    db_tx_end: commit-allow-override
+    request_middlewares: [security_headers, cache_private, dbqueryhook, cache-postgres]
+
+application:
+  version: catalog
+  auth: jwt
+  source: catalog
+  storage: product_images
+  parsers: [json, yaml]
+  renderers: [json, yaml]
+  api:
+    catalog:
+      auth: []
+      middlewares: [security_headers, cache_public, cache-postgres]
+      endpoints:
+        categories:
+          table: categories
+          public: true
+          description: Public category list and category. No token.
+          actions:
+            list:
+              fields: [id, parent_id, slug, name, position]
+            retrieve: {}
+          filters:
+            parent_id:
+              op: eq
+        products:
+          table: products
+          public: true
+          description: Public product list and product. No token.
+          storage: product_images
+          filters:
+            category_id:
+              op: eq
+            status:
+              op: eq
+            q:
+              field: name
+              op: ilike
+            min_price:
+              field: price_cents
+              op: gte
+            max_price:
+              field: price_cents
+              op: lte
+          actions:
+            list:
+              fields: [id, category_id, sku, name, price_cents, stock, status, image]
+              renderers: [json, csv, ndjson, xml, yaml]
+              extra_fields:
+                image:
+                  type: string
+                  format: binary
+            retrieve:
+              extra_fields:
+                image:
+                  type: string
+                  format: binary
+        category_products:
+          url: categories/{category_id}/products
+          table: products
+          public: true
+          description: Products in one category. No token.
+          storage: product_images
+          actions:
+            list:
+              fields: [id, category_id, sku, name, price_cents, stock, status, image]
+              extra_fields:
+                image:
+                  type: string
+                  format: binary
+            retrieve:
+              extra_fields:
+                image:
+                  type: string
+                  format: binary
+    v1:
+      auth: [jwt]
+      middlewares: [security_headers, cache_private, dbqueryhook, cache-postgres]
+      endpoints:
+        manage_categories:
+          url: manage-categories
+          table: categories
+          required_scopes: [categories-write]
+          description: Staff category writes.
+          actions:
+            create: {}
+            update: {}
+            destroy: {}
+        manage_products:
+          url: manage-products
+          table: products
+          required_scopes: [products-write]
+          storage: product_images
+          description: Staff product writes. Image bytes go to MinIO.
+          actions:
+            create:
+              extra_fields:
+                image:
+                  type: string
+                  format: binary
+            update:
+              extra_fields:
+                image:
+                  type: string
+                  format: binary
+            destroy: {}
+        me:
+          url: me
+          source: commerce
+          description: The signed-in shopper's open cart.
+          actions:
+            placeholder: {}
+          state_actions:
+            cart:
+              func: shop.my_cart
+              post: true
+              required_scopes: [carts-read, carts-write]
+              fields:
+                id:
+                  type: string
+                  readOnly: true
+                status:
+                  type: string
+                  readOnly: true
+                error:
+                  type: string
+                  readOnly: true
+        carts:
+          source: commerce
+          table: carts
+          required_scopes: [carts-read]
+          actions:
+            list:
+              fields: [id, owner, status, created_at]
+            retrieve:
+              fields: [id, owner, status, created_at]
+          detail_actions:
+            checkout:
+              func: shop.checkout
+              required_scopes: [carts-write]
+              fields:
+                order_id:
+                  type: string
+                  readOnly: true
+                status:
+                  type: string
+                  readOnly: true
+                total_cents:
+                  type: integer
+                  readOnly: true
+                error:
+                  type: string
+                  readOnly: true
+        cart_items:
+          url: carts/{cart_id}/items
+          source: commerce
+          table: shop.add_item
+          required_scopes: [carts-read]
+          actions:
+            list:
+              table: cart_items
+              fields: [id, cart_id, product_id, sku, title, unit_price, quantity]
+            retrieve:
+              table: cart_items
+              fields: [id, cart_id, product_id, sku, title, unit_price, quantity]
+            update:
+              table: cart_items
+              required_scopes: [carts-write]
+              fields: [quantity]
+            destroy:
+              table: cart_items
+              required_scopes: [carts-write]
+            create:
+              type: func
+              required_scopes: [carts-write]
+              renderers: [json]
+              fields: [product_id, quantity, sku, title, unit_price]
+        orders:
+          source: commerce
+          table: orders
+          required_scopes: [orders-read]
+          filters:
+            status:
+              op: eq
+          actions:
+            list:
+              fields: [id, owner, status, total_cents, created_at]
+            retrieve:
+              fields: [id, owner, status, total_cents, created_at]
+          detail_actions:
+            pay:
+              func: shop.pay_order
+              required_scopes: [orders-write]
+              fields:
+                order_id:
+                  type: string
+                  readOnly: true
+                status:
+                  type: string
+                  readOnly: true
+                error:
+                  type: string
+                  readOnly: true
+            ship:
+              func: shop.ship_order
+              required_scopes: [orders-manage]
+              fields:
+                order_id:
+                  type: string
+                  readOnly: true
+                status:
+                  type: string
+                  readOnly: true
+                error:
+                  type: string
+                  readOnly: true
+            cancel:
+              func: shop.cancel_order
+              required_scopes: [orders-write]
+              fields:
+                order_id:
+                  type: string
+                  readOnly: true
+                status:
+                  type: string
+                  readOnly: true
+                error:
+                  type: string
+                  readOnly: true
+        order_items:
+          url: orders/{order_id}/items
+          source: commerce
+          table: order_items
+          required_scopes: [orders-read]
+          actions:
+            list:
+              fields: [id, order_id, product_id, sku, title, unit_price, quantity]
+            retrieve:
+              fields: [id, order_id, product_id, sku, title, unit_price, quantity]
+        inventory:
+          source: commerce
+          table: inventory
+          required_scopes: [inventory-read]
+          actions:
+            list:
+              fields: [id, available]
+            retrieve:
+              fields: [id, available]
+            update:
+              required_scopes: [inventory-write]
+              fields: [available]

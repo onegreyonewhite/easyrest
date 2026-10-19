@@ -44,12 +44,8 @@ func setupCacheMiddlewareIntegration(t *testing.T) (http.Handler, *countingTable
 	}
 
 	dbPath := setupTestDB(t)
-	os.Setenv("ER_DB_TEST", "sqlite://"+dbPath)
-	os.Setenv("ER_CHECK_SCOPE", "0")
-	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
-	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
-
-	cfg := config.Load()
+	applyTestConfig(t, testSQLiteYAML("sqlite://"+dbPath, false, ""))
+	cfg := server.GetConfig()
 	cfg.MiddlewarePlugins = map[string]config.MiddlewareConfig{
 		"cache-lru": {Settings: map[string]any{"ttl": "24h"}},
 	}
@@ -449,12 +445,8 @@ func TestCacheMiddleware_RPCInvalidation(t *testing.T) {
 	defer os.Remove(dbPath)
 	insertUser(t, dbPath, "Alice", "")
 
-	os.Setenv("ER_DB_TEST", "sqlite://"+dbPath)
-	os.Setenv("ER_CHECK_SCOPE", "0")
-	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
-	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
-
-	cfg := config.Load()
+	applyTestConfig(t, testSQLiteYAML("sqlite://"+dbPath, false, ""))
+	cfg := server.GetConfig()
 	cfg.CheckScope = false
 	cfg.MiddlewarePlugins = map[string]config.MiddlewareConfig{
 		"cache-lru": {

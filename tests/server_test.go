@@ -24,31 +24,26 @@ import (
 
 // TestConfigLoad checks coverage for config.Load().
 func TestConfigLoad(t *testing.T) {
-	// Set some environment variables to see if they load properly.
-	os.Setenv("ER_PORT", "9999")
-	os.Setenv("ER_CHECK_SCOPE", "0")
-	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
-	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
-	os.Setenv("ER_NO_PLUGIN_LOG", "0")
-	os.Setenv("ER_ACCESSLOG", "1")
-	os.Setenv("ER_DEFAULT_TIMEZONE", "America/New_York")
-
-	defer func() {
-		os.Unsetenv("ER_PORT")
-		os.Unsetenv("ER_CHECK_SCOPE")
-		os.Unsetenv("ER_TOKEN_SECRET")
-		os.Unsetenv("ER_TOKEN_USER_SEARCH")
-		os.Unsetenv("ER_NO_PLUGIN_LOG")
-		os.Unsetenv("ER_ACCESSLOG")
-		os.Unsetenv("ER_DEFAULT_TIMEZONE")
-	}()
-
-	cfg := config.Load()
+	cfg, err := config.Load(nil, `
+port: "9999"
+check_scope: false
+plugin_log: true
+access_log: true
+token_user_search: sub
+default_timezone: America/New_York
+auth_plugins:
+  jwt:
+    settings:
+      jwt_secret: mytestsecret
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if cfg.Port != "9999" {
 		t.Errorf("Expected port 9999, got %s", cfg.Port)
 	}
 	if cfg.CheckScope {
-		t.Errorf("Expected CheckScope = false when ER_CHECK_SCOPE=0, got true")
+		t.Errorf("Expected CheckScope = false, got true")
 	}
 	jwtPlugin := cfg.AuthPlugins["jwt"]
 	secret := jwtPlugin.Settings["jwt_secret"]
@@ -58,8 +53,8 @@ func TestConfigLoad(t *testing.T) {
 	if cfg.TokenUserSearch != "sub" {
 		t.Errorf("Expected TokenUserSearch = 'sub', got %s", cfg.TokenUserSearch)
 	}
-	if cfg.NoPluginLog {
-		t.Errorf("Expected NoPluginLog=false, got true")
+	if !cfg.PluginLog {
+		t.Errorf("Expected PluginLog=true, got false")
 	}
 	if !cfg.AccessLogOn {
 		t.Errorf("Expected AccessLogOn=true, got false")
@@ -252,9 +247,6 @@ func TestBuildPluginContext(t *testing.T) {
 	ctx := context.WithValue(context.Background(), server.TokenClaimsKey, claims)
 	req = req.WithContext(ctx)
 
-	os.Setenv("ER_DEFAULT_TIMEZONE", "GMT") // fallback if not found in Prefer
-	defer os.Unsetenv("ER_DEFAULT_TIMEZONE")
-
 	got := server.BuildPluginContext(req)
 	if got["timezone"] != "America/Los_Angeles" {
 		t.Errorf("Expected timezone='America/Los_Angeles', got %v", got["timezone"])
@@ -388,24 +380,13 @@ func TestAccessLogMiddleware(t *testing.T) {
 // TestRun is tricky to fully cover since it blocks. We'll do a minimal test to ensure it doesn't panic.
 func TestRunMinimal(t *testing.T) {
 	// We'll set up environment so it doesn't block.
-	os.Setenv("ER_PORT", "9998")
-	os.Setenv("ER_CHECK_SCOPE", "0")
 	defer server.StopPlugins()
-	defer func() {
-		os.Unsetenv("ER_PORT")
-		os.Unsetenv("ER_CHECK_SCOPE")
-	}()
+	applyTestConfig(t, "port: \"9998\"\ncheck_scope: false\n")
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		// This will call ListenAndServe, which blocks. We can rely on timeouts or external interruption.
-		// Typically we'd skip coverage here or you can mock net.Listen to forcibly break out.
-		// We'll do a quick sleep then kill it.
-		defer func() {
-			// not a real approach for coverage but an example
-		}()
-		server.Run(config.Load())
+		server.Run()
 	}()
 	time.Sleep(200 * time.Millisecond)
 	// We can't easily check coverage further. We kill the goroutine by exiting the test.
@@ -413,19 +394,22 @@ func TestRunMinimal(t *testing.T) {
 
 // TestLoadPlugins tries to cover LoadPlugins by messing with environment variables.
 func TestLoadPlugins(t *testing.T) {
-	// We'll set environment for a non-existent plugin type: e.g., "xyz"
-	os.Setenv("ER_DB_NONEXIST", "xyz://somewhere")
-	defer os.Unsetenv("ER_DB_NONEXIST")
+	if err := server.SetupApplication(`
+plugins:
+  bad:
+    uri: justbad
+`, nil); err == nil || !strings.Contains(err.Error(), "uri") {
+		t.Fatalf("uri without scheme: %v", err)
+	}
 
-	// We'll also set environment for an invalid format
-	os.Setenv("ER_DB_BAD", "justbad")
-	defer os.Unsetenv("ER_DB_BAD")
-
-	// We'll set environment for a known (but not installed) plugin type "sqlite"
-	os.Setenv("ER_DB_TEST", "sqlite://test.db")
-	defer os.Unsetenv("ER_DB_TEST")
-
-	// Reset dbPlugins and call LoadPlugins
+	// A URI with a scheme still reaches plugin loading, even when the binary is missing.
+	applyTestConfig(t, `
+plugins:
+  nonexist:
+    uri: xyz://somewhere
+  test:
+    uri: sqlite://test.db
+`)
 	server.LoadPlugins()
 	defer server.StopPlugins()
 	// We expect it to attempt to look up easyrest-plugin-xyz and easyrest-plugin-sqlite
@@ -451,10 +435,7 @@ func TestLoadPlugins(t *testing.T) {
 // TestRPCHandler covers the rpcHandler function by sending a POST request with JSON data.
 func TestRPCHandler(t *testing.T) {
 	// We set up environment so it won't find a real plugin, but we can at least cover error paths.
-	os.Setenv("ER_DB_TEST", "sqlite://:memory:")
-	defer os.Unsetenv("ER_DB_TEST")
-
-	server.ReloadConfig()
+	applyTestConfig(t, testSQLiteYAML("sqlite://:memory:", false, ""))
 	defer server.StopPlugins()
 
 	router := server.SetupRouter()
@@ -518,15 +499,9 @@ func TestInitOtel(t *testing.T) {
 	}
 
 	cfg.Protocol = "zipkin"
-	cfg.Endpoint = "http://localhost:9411/api/v2/spans"
-	shutdown, err = server.InitOtel(cfg)
-	if err != nil {
-		t.Errorf("initOtel failed for zipkin: %v", err)
-	}
-	if shutdown != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = shutdown(ctx)
+	_, err = server.InitOtel(cfg)
+	if err == nil {
+		t.Errorf("Expected error for zipkin protocol in initOtel")
 	}
 
 	cfg.Protocol = "unknown"
@@ -538,24 +513,26 @@ func TestInitOtel(t *testing.T) {
 
 // New smoke-test: Run with Otel.Enabled=true
 func TestRunWithOtelEnabled(t *testing.T) {
-	cfg := config.Load()
-	cfg.Otel.Enabled = true
-	cfg.Otel.Protocol = "otlphttp"
-	cfg.Otel.Endpoint = "localhost:4318"
-	cfg.Otel.ServiceName = "test-service"
-	cfg.Port = "9997"
-	cfg.AccessLogOn = false
-	cfg.TLSEnabled = false
-	cfg.Server.ReadTimeout = time.Second
-	cfg.Server.WriteTimeout = time.Second
-	cfg.Server.IdleTimeout = time.Second
-	cfg.Server.ReadHeaderTimeout = time.Second
-	cfg.Server.KeepAlivePeriod = time.Second
+	applyTestConfig(t, `
+port: "9997"
+access_log: false
+otel:
+  enabled: true
+  protocol: otlphttp
+  endpoint: localhost:4318
+  service_name: test-service
+server:
+  read_timeout: 1s
+  write_timeout: 1s
+  idle_timeout: 1s
+  read_header_timeout: 1s
+  keep_alive_period: 1s
+`)
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		server.Run(cfg)
+		server.Run()
 	}()
 	time.Sleep(200 * time.Millisecond)
 	// Stop server through signal
@@ -657,9 +634,11 @@ func TestContextSubstitutionNumericTypes(t *testing.T) {
 }
 
 func TestCorsMiddleware(t *testing.T) {
-	os.Setenv("ER_CORS_ENABLED", "1")
-	defer os.Unsetenv("ER_CORS_ENABLED")
-	server.ReloadConfig()
+	applyTestConfig(t, `
+cors:
+  enabled: true
+  origins: ["*"]
+`)
 	defer server.StopPlugins()
 	router := server.SetupRouter()
 
@@ -743,11 +722,8 @@ func TestDecodeTokenWithoutValidation(t *testing.T) {
 }
 
 func TestReloadConfigConcurrentAccess(t *testing.T) {
-	os.Setenv("ER_CHECK_SCOPE", "0")
-	os.Setenv("ER_NO_PLUGIN_LOG", "1")
 	defer server.StopPlugins()
-
-	server.ReloadConfig()
+	applyTestConfig(t, "check_scope: false\n")
 	router := server.SetupRouter()
 
 	var wg sync.WaitGroup
@@ -755,7 +731,9 @@ func TestReloadConfigConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			server.ReloadConfig()
+			if err := server.SetupApplication("check_scope: false\n", nil); err != nil {
+				t.Errorf("reload: %v", err)
+			}
 		}()
 	}
 	for i := 0; i < 8; i++ {

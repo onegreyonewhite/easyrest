@@ -59,9 +59,9 @@ func buildSQLiteDSN(uri string, readOnly bool) (string, error) {
 	rest := strings.TrimPrefix(uri, "sqlite://")
 	path := rest
 	query := ""
-	if idx := strings.Index(rest, "?"); idx >= 0 {
-		path = rest[:idx]
-		query = rest[idx+1:]
+	if before, after, ok := strings.Cut(rest, "?"); ok {
+		path = before
+		query = after
 	}
 
 	cacheSize := defaultSQLiteCacheSize
@@ -229,7 +229,7 @@ func (s *sqlitePlugin) getPreparedStmt(query string, ctx context.Context) (*sql.
 	}
 
 	// If not in cache, create using singleflight to prevent races
-	v, err, _ := s.stmtGroup.Do(query, func() (interface{}, error) {
+	v, err, _ := s.stmtGroup.Do(query, func() (any, error) {
 		// Check cache again in case another goroutine has created it
 		if stmt, exists := s.preparedStmts.Get(query); exists {
 			return stmt, nil
@@ -423,12 +423,16 @@ func (s *sqlitePlugin) execPrepared(ctx context.Context, tx *sql.Tx, query strin
 func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, where map[string]any,
 	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, map[string]any, error) {
 
-	query, args, err := easyrest.BuildSelectQuery(table, selectFields, where, ordering, groupBy, limit, offset, easyrest.SelectOptions{
+	opts := easyrest.SelectOptions{
 		WhereRewriter:    convertILIKEtoLike,
 		OffsetNeedsLimit: true,
-	})
+	}
+	query, args, err := easyrest.BuildSelectQuery(table, selectFields, where, ordering, groupBy, limit, offset, opts)
 	if err != nil {
 		return nil, nil, err
+	}
+	if easyrest.CountPreference(ctx) != "" {
+		return s.tableGetWithTotal(userID, table, selectFields, where, groupBy, limit, ctx, query, args, opts)
 	}
 
 	ctxQuery := context.WithValue(backgroundCtx, userIDKey, userID)
@@ -447,6 +451,102 @@ func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, whe
 
 	result, err := scanResultRows(rows, limit)
 	return result, nil, err
+}
+
+func sqliteStatTotal(stat string) (int64, bool) {
+	stat = strings.TrimSpace(stat)
+	if stat == "" {
+		return 0, false
+	}
+	field := stat
+	if i := strings.IndexAny(stat, " \t"); i >= 0 {
+		field = stat[:i]
+	}
+	n, err := strconv.ParseInt(field, 10, 64)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+func (s *sqlitePlugin) plannedRows(ctx context.Context, table string) (int64, bool, error) {
+	stat, err := s.sqliteStat(ctx, `SELECT stat FROM sqlite_stat1 WHERE tbl = ? AND idx IS NULL`, table)
+	if errors.Is(err, sql.ErrNoRows) {
+		stat, err = s.sqliteStat(ctx, `SELECT stat FROM sqlite_stat1 WHERE tbl = ? LIMIT 1`, table)
+	}
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) || strings.Contains(err.Error(), "no such table") {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	n, ok := sqliteStatTotal(stat)
+	return n, ok, nil
+}
+
+func (s *sqlitePlugin) sqliteStat(ctx context.Context, query, table string) (string, error) {
+	var stat string
+	err := s.db.QueryRowContext(ctx, query, table).Scan(&stat)
+	return stat, err
+}
+
+func (s *sqlitePlugin) tableGetWithTotal(userID, table string, selectFields []string, where map[string]any, groupBy []string, limit int, ctx map[string]any, pageQuery string, pageArgs []any, opts easyrest.SelectOptions) ([]map[string]any, map[string]any, error) {
+	mode := easyrest.CountPreference(ctx)
+	ctxQuery := context.WithValue(backgroundCtx, userIDKey, userID)
+	var planned int64
+	hasPlanned := false
+	if mode == "planned" || mode == "estimated" {
+		var err error
+		planned, hasPlanned, err = s.plannedRows(ctxQuery, table)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	var countSQL string
+	var countArgs []any
+	if mode == "exact" || (mode == "estimated" && hasPlanned && planned < int64(easyrest.CountMaxRows(ctx))) {
+		inner, cargs, err := easyrest.BuildSelectQuery(table, selectFields, where, nil, groupBy, 0, 0, opts)
+		if err != nil {
+			return nil, nil, err
+		}
+		countSQL = easyrest.CountSQL(inner)
+		countArgs = cargs
+	}
+	tx, err := s.db.BeginTx(ctxQuery, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	total, hasTotal, err := easyrest.CountFromEstimate(mode, planned, hasPlanned, easyrest.CountMaxRows(ctx), func() (int64, error) {
+		var n int64
+		if err := tx.QueryRowContext(ctxQuery, countSQL, countArgs...).Scan(&n); err != nil {
+			return 0, fmt.Errorf("failed to count rows: %w", err)
+		}
+		return n, nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	rows, err := tx.QueryContext(ctxQuery, pageQuery, pageArgs...)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	result, err := scanResultRows(rows, limit)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	if !hasTotal {
+		return result, nil, nil
+	}
+	return result, easyrest.WithTotal(ctx, total), nil
 }
 
 // TableCreate builds and executes an INSERT query.

@@ -3,17 +3,29 @@ package apikey
 import (
 	"fmt"
 	"strings"
+
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
 
 // APIKeyAuthPlugin implements the AuthPlugin interface for API Key authentication.
 type APIKeyAuthPlugin struct {
+	host       easyrest.HostRPC
 	validKeys  map[string]struct{} // Using a map for efficient lookup
 	headerName string
 }
 
 // Init initializes the APIKeyAuthPlugin.
 // It expects "keys" in settings as a []string and optionally "header_name" as string.
-func (p *APIKeyAuthPlugin) Init(settings map[string]any) (map[string]any, error) {
+func (p *APIKeyAuthPlugin) Init(settings map[string]any, host easyrest.HostRPC) (easyrest.AuthInfo, error) {
+	p.host = host
+	schema, err := p.initSettings(settings)
+	if err != nil {
+		return easyrest.AuthInfo{}, err
+	}
+	return easyrest.NewAuthInfo(schema), nil
+}
+
+func (p *APIKeyAuthPlugin) initSettings(settings map[string]any) (map[string]any, error) {
 	keysSetting, ok := settings["keys"]
 	if !ok {
 		return nil, fmt.Errorf("keys setting is required and must be a []string")

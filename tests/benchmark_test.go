@@ -34,8 +34,6 @@ func enableBenchJSON() {
 func setupTableGet1kBench(b *testing.B) (http.Handler, string) {
 	b.Helper()
 	log.SetOutput(io.Discard)
-	os.Setenv("ER_NO_PLUGIN_LOG", "1")
-
 	tmpFile, err := os.CreateTemp("", "benchdb-get-1k-*.db")
 	if err != nil {
 		b.Fatalf("Failed to create temporary DB: %v", err)
@@ -64,10 +62,7 @@ func setupTableGet1kBench(b *testing.B) (http.Handler, string) {
 		}
 	}
 
-	os.Setenv("ER_DB_TEST", sqliteBenchURI(dbPath))
-	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
 	secret := "mytestsecret"
-	os.Setenv("ER_TOKEN_SECRET", secret)
 
 	claims := jwt.MapClaims{
 		"sub":   "testuser",
@@ -86,7 +81,7 @@ func setupTableGet1kBench(b *testing.B) (http.Handler, string) {
 	server.PreservedAuthPlugins["jwt"] = func() easyrest.AuthPlugin {
 		return &jwtplugin.JWTAuthPlugin{}
 	}
-	server.ReloadConfig()
+	applyTestConfig(b, testSQLiteYAML(sqliteBenchURI(dbPath), true, ""))
 	cfg := server.GetConfig()
 	plugin := cfg.PluginMap["test"]
 	plugin.DefaultLimit = 100
@@ -148,8 +143,6 @@ func reportTTFB(b *testing.B, sum time.Duration, n int) {
 func BenchmarkTableGet(b *testing.B) {
 	// Disable logging
 	log.SetOutput(io.Discard)
-	os.Setenv("ER_NO_PLUGIN_LOG", "1")
-
 	// Create a temporary DB file
 	tmpFile, err := os.CreateTemp("", "benchdb-get-*.db")
 	if err != nil {
@@ -180,10 +173,7 @@ func BenchmarkTableGet(b *testing.B) {
 	}
 
 	// Set environment variables for the server
-	os.Setenv("ER_DB_TEST", sqliteBenchURI(dbPath))
-	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
 	secret := "mytestsecret"
-	os.Setenv("ER_TOKEN_SECRET", secret)
 
 	// Generate a JWT token with custom claims
 	claims := jwt.MapClaims{
@@ -204,7 +194,7 @@ func BenchmarkTableGet(b *testing.B) {
 	server.PreservedAuthPlugins["jwt"] = func() easyrest.AuthPlugin {
 		return &jwtplugin.JWTAuthPlugin{}
 	}
-	server.ReloadConfig()
+	applyTestConfig(b, testSQLiteYAML(sqliteBenchURI(dbPath), true, ""))
 	enableBenchJSON()
 	router := server.SetupRouter()
 
@@ -296,8 +286,6 @@ func BenchmarkTableGetNDJSON1k(b *testing.B) {
 func BenchmarkTableCreate(b *testing.B) {
 	// Disable logging
 	log.SetOutput(io.Discard)
-	os.Setenv("ER_NO_PLUGIN_LOG", "1")
-
 	// Create a temporary DB file
 	tmpFile, err := os.CreateTemp("", "benchdb-create-*.db")
 	if err != nil {
@@ -321,10 +309,7 @@ func BenchmarkTableCreate(b *testing.B) {
 	}
 
 	// Set environment variables for the server
-	os.Setenv("ER_DB_TEST", sqliteBenchURI(dbPath))
-	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
 	secret := "mytestsecret"
-	os.Setenv("ER_TOKEN_SECRET", secret)
 
 	// Generate a JWT token with custom claims
 	claims := jwt.MapClaims{
@@ -345,7 +330,7 @@ func BenchmarkTableCreate(b *testing.B) {
 	server.PreservedAuthPlugins["jwt"] = func() easyrest.AuthPlugin {
 		return &jwtplugin.JWTAuthPlugin{}
 	}
-	server.ReloadConfig()
+	applyTestConfig(b, testSQLiteYAML(sqliteBenchURI(dbPath), true, ""))
 	enableBenchJSON()
 	router := server.SetupRouter()
 
@@ -372,8 +357,6 @@ func BenchmarkTableCreate(b *testing.B) {
 func BenchmarkTableUpdate(b *testing.B) {
 	// Disable logging
 	log.SetOutput(io.Discard)
-	os.Setenv("ER_NO_PLUGIN_LOG", "1")
-
 	// Create a temporary DB file
 	tmpFile, err := os.CreateTemp("", "benchdb-update-*.db")
 	if err != nil {
@@ -407,10 +390,7 @@ func BenchmarkTableUpdate(b *testing.B) {
 	}
 
 	// Set environment variables for the server
-	os.Setenv("ER_DB_TEST", sqliteBenchURI(dbPath))
-	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
 	secret := "mytestsecret"
-	os.Setenv("ER_TOKEN_SECRET", secret)
 
 	// Generate a JWT token with custom claims
 	claims := jwt.MapClaims{
@@ -431,7 +411,7 @@ func BenchmarkTableUpdate(b *testing.B) {
 	server.PreservedAuthPlugins["jwt"] = func() easyrest.AuthPlugin {
 		return &jwtplugin.JWTAuthPlugin{}
 	}
-	server.ReloadConfig()
+	applyTestConfig(b, testSQLiteYAML(sqliteBenchURI(dbPath), true, ""))
 	enableBenchJSON()
 	router := server.SetupRouter()
 
@@ -628,13 +608,7 @@ func BenchmarkPlainSQLUpdate(b *testing.B) {
 func BenchmarkAuthenticate(b *testing.B) {
 	// Disable logging
 	log.SetOutput(io.Discard)
-	os.Setenv("ER_NO_PLUGIN_LOG", "1")
-
-	// Set environment variables for the server
-	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
 	secret := "mytestsecret"
-	os.Setenv("ER_TOKEN_SECRET", secret)
-
 	cfg := server.GetConfig()
 	cfg.AuthPlugins = map[string]config.AuthConfig{
 		"jwt": {
@@ -646,7 +620,6 @@ func BenchmarkAuthenticate(b *testing.B) {
 	server.PreservedAuthPlugins["jwt"] = func() easyrest.AuthPlugin {
 		return &jwtplugin.JWTAuthPlugin{}
 	}
-	server.ReloadConfig()
 	server.SetConfig(cfg)
 	server.LoadPlugins()
 
@@ -679,8 +652,6 @@ func BenchmarkAuthenticate(b *testing.B) {
 
 func BenchmarkQueryCall(b *testing.B) {
 	log.SetOutput(io.Discard)
-	os.Setenv("ER_NO_PLUGIN_LOG", "1")
-
 	tmpFile, err := os.CreateTemp("", "benchdb-query-*.db")
 	if err != nil {
 		b.Fatalf("Failed to create temporary DB: %v", err)
@@ -707,11 +678,7 @@ func BenchmarkQueryCall(b *testing.B) {
 	}
 	db.Close()
 
-	os.Setenv("ER_DB_TEST", sqliteBenchURI(dbPath))
-	os.Setenv("ER_USE_QUERY_TEST", "1")
-	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
 	secret := "mytestsecret"
-	os.Setenv("ER_TOKEN_SECRET", secret)
 
 	claims := jwt.MapClaims{
 		"sub":   "testuser",
@@ -730,7 +697,7 @@ func BenchmarkQueryCall(b *testing.B) {
 	server.PreservedAuthPlugins["jwt"] = func() easyrest.AuthPlugin {
 		return &jwtplugin.JWTAuthPlugin{}
 	}
-	server.ReloadConfig()
+	applyTestConfig(b, testSQLiteYAML(sqliteBenchURI(dbPath), true, "    use_query: true\n"))
 	enableBenchJSON()
 	router := server.SetupRouter()
 
@@ -747,6 +714,214 @@ func BenchmarkQueryCall(b *testing.B) {
 		router.ServeHTTP(rr, req)
 		if rr.Code != http.StatusOK {
 			b.Errorf("Expected status 200, got %d", rr.Code)
+			break
+		}
+	}
+}
+
+// setupRestOrdersBench builds a temp sqlite orders table, a JWT with
+// orders-read and orders-write, and the restapi v1 orders endpoint.
+// seed rows are inserted before the router starts. The returned db stays
+// open so a benchmark can insert more rows before b.ResetTimer.
+func setupRestOrdersBench(b *testing.B, seed int) (http.Handler, string, int64, *sql.DB) {
+	b.Helper()
+	log.SetOutput(io.Discard)
+
+	tmpFile, err := os.CreateTemp("", "benchdb-rest-orders-*.db")
+	if err != nil {
+		b.Fatalf("Failed to create temporary DB: %v", err)
+	}
+	dbPath := tmpFile.Name()
+	tmpFile.Close()
+	b.Cleanup(func() {
+		os.Remove(dbPath)
+		server.StopPlugins()
+	})
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		b.Fatalf("Failed to open sqlite DB: %v", err)
+	}
+	b.Cleanup(func() { db.Close() })
+
+	_, err = db.Exec(`CREATE TABLE orders (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		sku TEXT NOT NULL,
+		qty INTEGER NOT NULL
+	)`)
+	if err != nil {
+		b.Fatalf("Failed to create table: %v", err)
+	}
+	ids := insertBenchOrders(b, db, seed)
+	var firstID int64
+	if len(ids) > 0 {
+		firstID = ids[0]
+	}
+
+	secret := "mytestsecret"
+
+	claims := jwt.MapClaims{
+		"sub":   "testuser",
+		"exp":   time.Now().Add(time.Hour).Unix(),
+		"scope": "orders-read orders-write",
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenStr, err := token.SignedString([]byte(secret))
+	if err != nil {
+		b.Fatalf("Failed to sign token: %v", err)
+	}
+
+	server.PreservedDbPlugins["sqlite"] = func() easyrest.DBPlugin {
+		return sqlitePlugin.NewSqlitePlugin()
+	}
+	server.PreservedAuthPlugins["jwt"] = func() easyrest.AuthPlugin {
+		return &jwtplugin.JWTAuthPlugin{}
+	}
+	applyTestConfig(b, testSQLiteYAML(sqliteBenchURI(dbPath), true, ""))
+	cfg := server.GetConfig()
+	cfg.RestAPI = map[string]config.RestAPIApp{
+		"v1": {
+			Source: "test",
+			Endpoints: map[string]config.RestEndpoint{
+				"orders": {Table: "orders", PrimaryKey: "id"},
+			},
+		},
+	}
+	server.SetConfig(cfg)
+	enableBenchJSON()
+	return server.SetupRouter(), tokenStr, firstID, db
+}
+
+func insertBenchOrders(b *testing.B, db *sql.DB, n int) []int64 {
+	b.Helper()
+	if n == 0 {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		b.Fatalf("Failed to begin insert: %v", err)
+	}
+	stmt, err := tx.Prepare(`INSERT INTO orders (sku, qty) VALUES (?, ?)`)
+	if err != nil {
+		b.Fatalf("Failed to prepare insert: %v", err)
+	}
+	defer stmt.Close()
+	ids := make([]int64, n)
+	for i := 0; i < n; i++ {
+		res, err := stmt.Exec(fmt.Sprintf("bench-%d", i), i+1)
+		if err != nil {
+			b.Fatalf("Failed to insert order: %v", err)
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			b.Fatalf("Failed to read order id: %v", err)
+		}
+		ids[i] = id
+	}
+	if err := tx.Commit(); err != nil {
+		b.Fatalf("Failed to commit orders: %v", err)
+	}
+	return ids
+}
+
+func BenchmarkRestAPIList(b *testing.B) {
+	router, tokenStr, _, _ := setupRestOrdersBench(b, 10)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		req, err := http.NewRequest(http.MethodGet, "/restapi/v1/orders/", nil)
+		if err != nil {
+			b.Fatalf("Error creating request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+tokenStr)
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			b.Errorf("Expected status 200, got %d", rr.Code)
+			break
+		}
+	}
+}
+
+func BenchmarkRestAPICreate(b *testing.B) {
+	router, tokenStr, _, _ := setupRestOrdersBench(b, 0)
+	body := `{"sku":"bench","qty":1}`
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		req, err := http.NewRequest(http.MethodPost, "/restapi/v1/orders/", strings.NewReader(body))
+		if err != nil {
+			b.Fatalf("Error creating request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+tokenStr)
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+		if rr.Code != http.StatusCreated {
+			b.Errorf("Expected status 201, got %d", rr.Code)
+			break
+		}
+	}
+}
+
+func BenchmarkRestAPIRetrieve(b *testing.B) {
+	router, tokenStr, id, _ := setupRestOrdersBench(b, 1)
+	url := fmt.Sprintf("/restapi/v1/orders/%d/", id)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		req, err := http.NewRequest(http.MethodGet, url, nil)
+		if err != nil {
+			b.Fatalf("Error creating request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+tokenStr)
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			b.Errorf("Expected status 200, got %d", rr.Code)
+			break
+		}
+	}
+}
+
+func BenchmarkRestAPIUpdate(b *testing.B) {
+	router, tokenStr, id, _ := setupRestOrdersBench(b, 1)
+	url := fmt.Sprintf("/restapi/v1/orders/%d/", id)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		body := fmt.Sprintf(`{"qty":%d}`, i)
+		req, err := http.NewRequest(http.MethodPatch, url, strings.NewReader(body))
+		if err != nil {
+			b.Fatalf("Error creating request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+tokenStr)
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			b.Errorf("Expected status 200, got %d", rr.Code)
+			break
+		}
+	}
+}
+
+func BenchmarkRestAPIDelete(b *testing.B) {
+	router, tokenStr, _, db := setupRestOrdersBench(b, 0)
+	ids := insertBenchOrders(b, db, b.N)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		url := fmt.Sprintf("/restapi/v1/orders/%d/", ids[i])
+		req, err := http.NewRequest(http.MethodDelete, url, nil)
+		if err != nil {
+			b.Fatalf("Error creating request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+tokenStr)
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+		if rr.Code != http.StatusNoContent {
+			b.Errorf("Expected status 204, got %d", rr.Code)
 			break
 		}
 	}

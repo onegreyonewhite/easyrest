@@ -1,6 +1,7 @@
 package ratelimit
 
 import (
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 	"net/http"
 	"strconv"
 	"strings"
@@ -13,7 +14,7 @@ import (
 func mustInit(t *testing.T, settings map[string]any) *RateLimitPlugin {
 	t.Helper()
 	p := New()
-	if err := p.Init(settings); err != nil {
+	if _, err := p.Init(settings, easyrest.HostRPC{}); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 	return p
@@ -117,7 +118,7 @@ func TestInitErrors(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			p := New()
-			if err := p.Init(tc.settings); err == nil {
+			if _, err := p.Init(tc.settings, easyrest.HostRPC{}); err == nil {
 				t.Fatal("expected Init error")
 			}
 		})
@@ -291,7 +292,7 @@ func TestPreRequestConcurrent(t *testing.T) {
 	var okCount atomic.Int32
 	var wg sync.WaitGroup
 	wg.Add(n)
-	for i := 0; i < n; i++ {
+	for range n {
 		go func() {
 			defer wg.Done()
 			_, status, err := p.PreRequest("", ctx)

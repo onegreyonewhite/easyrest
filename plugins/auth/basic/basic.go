@@ -4,16 +4,28 @@ import (
 	"encoding/base64"
 	"fmt"
 	"strings"
+
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
 
 // BasicAuthPlugin implements the AuthPlugin interface for Basic HTTP authentication.
 type BasicAuthPlugin struct {
+	host     easyrest.HostRPC
 	userlist map[string]string
 }
 
 // Init initializes the BasicAuthPlugin.
 // It expects a "userlist" in settings as a map[string]string.
-func (p *BasicAuthPlugin) Init(settings map[string]any) (map[string]any, error) {
+func (p *BasicAuthPlugin) Init(settings map[string]any, host easyrest.HostRPC) (easyrest.AuthInfo, error) {
+	p.host = host
+	schema, err := p.initSettings(settings)
+	if err != nil {
+		return easyrest.AuthInfo{}, err
+	}
+	return easyrest.NewAuthInfo(schema), nil
+}
+
+func (p *BasicAuthPlugin) initSettings(settings map[string]any) (map[string]any, error) {
 	ul, ok := settings["userlist"].(map[string]string)
 	if !ok {
 		// Attempt to convert map[string]any to map[string]string if possible
@@ -35,10 +47,10 @@ func (p *BasicAuthPlugin) Init(settings map[string]any) (map[string]any, error) 
 	}
 	p.userlist = ul
 
-	// Return Swagger security definition for Basic Auth
+	// Return a Swagger 2.0 security definition. Swagger UI builds the
+	// username and password form only for type basic.
 	return map[string]any{
-		"type":   "http",
-		"scheme": "basic",
+		"type": "basic",
 	}, nil
 }
 

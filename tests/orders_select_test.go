@@ -89,15 +89,9 @@ func TestOrdersSelectSum(t *testing.T) {
 	insertOrder(t, dbPath, 3, "2023-03-02", 30.0)
 
 	// Set environment variables required for server operation.
-	os.Setenv("ER_DB_TEST", "sqlite://"+dbPath)
-	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
-	os.Setenv("ER_CHECK_SCOPE", "0") // disable scope checking for tests
 	secret := "mytestsecret"
-	os.Setenv("ER_TOKEN_SECRET", secret)
-
+	applyTestConfig(t, testSQLiteYAML("sqlite://"+dbPath, false, ""))
 	tokenStr := generateTestToken(t, secret, "read")
-
-	server.ReloadConfig()
 	router := server.SetupRouter()
 	// Perform the GET request.
 	req, err := http.NewRequest("GET", "/api/test/orders/?select=amount.sum()", nil)
@@ -147,15 +141,9 @@ func TestOrdersSelectGroupBy(t *testing.T) {
 	insertOrder(t, dbPath, 2, "2023-03-02", 15)
 	insertOrder(t, dbPath, 3, "2023-03-02", 25)
 
-	os.Setenv("ER_DB_TEST", "sqlite://"+dbPath)
-	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
-	os.Setenv("ER_CHECK_SCOPE", "0")
 	secret := "mytestsecret"
-	os.Setenv("ER_TOKEN_SECRET", secret)
-
+	applyTestConfig(t, testSQLiteYAML("sqlite://"+dbPath, false, ""))
 	tokenStr := generateTestToken(t, secret, "read")
-
-	server.ReloadConfig()
 	router := server.SetupRouter()
 	// Perform the GET request.
 	req, err := http.NewRequest("GET", "/api/test/orders/?select=total:amount.sum(),amount.avg(),order_date", nil)
@@ -222,15 +210,9 @@ func TestOrdersSelectCount(t *testing.T) {
 	insertOrder(t, dbPath, 3, "2023-03-02", 30)
 	insertOrder(t, dbPath, 4, "2023-03-02", 40)
 
-	os.Setenv("ER_DB_TEST", "sqlite://"+dbPath)
-	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
-	os.Setenv("ER_CHECK_SCOPE", "0")
 	secret := "mytestsecret"
-	os.Setenv("ER_TOKEN_SECRET", secret)
-
+	applyTestConfig(t, testSQLiteYAML("sqlite://"+dbPath, false, ""))
 	tokenStr := generateTestToken(t, secret, "read")
-
-	server.ReloadConfig()
 	router := server.SetupRouter()
 	// First query: without where clause.
 	req, err := http.NewRequest("GET", "/api/test/orders/?select=count()", nil)

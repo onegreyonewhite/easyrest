@@ -14,7 +14,9 @@ import (
 
 type countingDBPlugin struct {
 	fakeDBPlugin
-	gets int
+	gets    int
+	calls   int
+	schemas int
 }
 
 func (c *countingDBPlugin) TableGet(string, string, []string, map[string]any, []string, []string, int, int, map[string]any) ([]map[string]any, map[string]any, error) {
@@ -22,10 +24,24 @@ func (c *countingDBPlugin) TableGet(string, string, []string, map[string]any, []
 	return []map[string]any{{"id": 1}}, nil, nil
 }
 
+func (c *countingDBPlugin) CallFunction(string, string, map[string]any, map[string]any) (any, map[string]any, error) {
+	c.calls++
+	return nil, nil, nil
+}
+
+func (c *countingDBPlugin) GetSchema(map[string]any) (any, map[string]any, error) {
+	c.schemas++
+	return map[string]any{
+		"tables": map[string]any{},
+		"views":  map[string]any{},
+		"rpc":    map[string]any{},
+	}, nil, nil
+}
+
 type rejectAuthPlugin struct{}
 
-func (rejectAuthPlugin) Init(map[string]any) (map[string]any, error) {
-	return map[string]any{"type": "apiKey"}, nil
+func (rejectAuthPlugin) Init(map[string]any, easyrest.HostRPC) (easyrest.AuthInfo, error) {
+	return easyrest.NewAuthInfo(map[string]any{"type": "apiKey"}), nil
 }
 
 func (rejectAuthPlugin) Authenticate(map[string]string, string, string, string) (map[string]any, error) {
@@ -120,6 +136,143 @@ func TestTableRoutesChiDefault405Unaffected(t *testing.T) {
 		if strings.Contains(w.Body.String(), "Method not allowed") {
 			t.Fatalf("%s leaked table 405 body: %q", path, w.Body.String())
 		}
+	}
+}
+
+func TestTableRoutesInternalBeforeAuth(t *testing.T) {
+	router, db := setupTableRouter(t, &rejectAuthPlugin{}, "", nil)
+	cfg := GetConfig()
+	pluginCfg := cfg.PluginMap["test"]
+	pluginCfg.Internal = true
+	cfg.PluginMap["test"] = pluginCfg
+	SetConfig(cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/test/users/", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("internal plugin status: %d body=%q", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "DB plugin not found") {
+		t.Fatalf("internal plugin body: %q", w.Body.String())
+	}
+	if db.gets != 0 {
+		t.Fatalf("TableGet called %d times for an internal plugin", db.gets)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/test/rpc/hello/", strings.NewReader(`{}`))
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("internal rpc status: %d body=%q", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "DB plugin not found") {
+		t.Fatalf("internal rpc body: %q", w.Body.String())
+	}
+	if db.calls != 0 {
+		t.Fatalf("CallFunction called %d times for an internal plugin", db.calls)
+	}
+
+	req = httptest.NewRequest(http.MethodPut, "/api/test/users/", nil)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("internal PUT status: %d body=%q", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "Method not allowed") {
+		t.Fatalf("internal PUT leaked 405 body: %q", w.Body.String())
+	}
+}
+
+func TestTableRoutesInternalSchema(t *testing.T) {
+	router, db := setupTableRouter(t, &fakeAuthPlugin{}, "", nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/test/", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("public schema status: %d body=%q", w.Code, w.Body.String())
+	}
+	if db.schemas != 1 {
+		t.Fatalf("public schema calls: %d", db.schemas)
+	}
+
+	cfg := GetConfig()
+	pluginCfg := cfg.PluginMap["test"]
+	pluginCfg.Internal = true
+	cfg.PluginMap["test"] = pluginCfg
+	SetConfig(cfg)
+
+	req = httptest.NewRequest(http.MethodGet, "/api/test/", nil)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("cached internal schema status: %d body=%q", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "DB plugin not found") {
+		t.Fatalf("cached internal schema body: %q", w.Body.String())
+	}
+	if db.schemas != 1 {
+		t.Fatalf("GetSchema called again after internal: %d", db.schemas)
+	}
+}
+
+type countingQueryPlugin struct {
+	calls int
+}
+
+func (c *countingQueryPlugin) InitConnection(string) error { return nil }
+
+func (c *countingQueryPlugin) QueryCall(string, map[string]any) ([]map[string]any, error) {
+	c.calls++
+	return []map[string]any{{"n": 1}}, nil
+}
+
+func TestTableRoutesInternalQuery(t *testing.T) {
+	origDB := PreservedDbPlugins
+	origQuery := PreservedQueryPlugins
+	origAuth := PreservedAuthPlugins
+	origMW := PreservedMiddlewarePlugins
+	origCfg := GetConfig()
+	t.Cleanup(func() {
+		PreservedDbPlugins = origDB
+		PreservedQueryPlugins = origQuery
+		PreservedAuthPlugins = origAuth
+		PreservedMiddlewarePlugins = origMW
+		SetConfig(origCfg)
+		StopPlugins()
+	})
+
+	queryPlug := &countingQueryPlugin{}
+	PreservedDbPlugins = map[string]PreservedPluginFactory[easyrest.DBPlugin]{}
+	PreservedQueryPlugins = map[string]PreservedPluginFactory[easyrest.DBQueryPlugin]{
+		"sqlite": func() easyrest.DBQueryPlugin { return queryPlug },
+	}
+	PreservedAuthPlugins = map[string]PreservedPluginFactory[easyrest.AuthPlugin]{
+		"jwt": func() easyrest.AuthPlugin { return &rejectAuthPlugin{} },
+	}
+	PreservedMiddlewarePlugins = map[string]PreservedPluginFactory[easyrest.MiddlewarePlugin]{}
+	SetConfig(config.Config{
+		PluginMap: map[string]config.PluginConfig{
+			"test": {Uri: "sqlite://memory", UseQuery: true, Internal: true},
+		},
+		AuthPlugins: map[string]config.AuthConfig{
+			"jwt": {Settings: map[string]any{}},
+		},
+	})
+	router := SetupRouter()
+
+	req := httptest.NewRequest("QUERY", "/api/test/", strings.NewReader("select 1"))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("internal query status: %d body=%q", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "DB plugin not found") {
+		t.Fatalf("internal query body: %q", w.Body.String())
+	}
+	if queryPlug.calls != 0 {
+		t.Fatalf("QueryCall called %d times for an internal plugin", queryPlug.calls)
 	}
 }
 

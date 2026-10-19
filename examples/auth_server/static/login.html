@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Sign in</title>
+  <style>body{background:#fff;color:#111;font:16px sans-serif;margin:2rem} label,button{display:block;margin:.5rem 0}</style>
+</head>
+<body>
+  <h1>Sign in</h1>
+  <p>Dev accounts: admin@example.com, alice@example.com, bob@example.com. The password matches the name. Bob is disabled.</p>
+  <form id="login" method="post" action="/restapi/v1/login/">
+    <label>Email or username <input name="email" type="text" autocomplete="username" required></label>
+    <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+    <input type="hidden" name="next" id="next">
+    <button type="submit">Sign in</button>
+  </form>
+  <p id="msg"></p>
+  <script>
+    const home = "https://localhost:8443/";
+    const next = new URLSearchParams(location.search).get("next") || home;
+    document.getElementById("next").value = next;
+    document.getElementById("login").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const resp = await fetch(form.action, {
+        method: "POST",
+        body: new URLSearchParams(new FormData(form)),
+        headers: {"Content-Type": "application/x-www-form-urlencoded"},
+      });
+      if (resp.redirected) {
+        location.href = resp.url;
+        return;
+      }
+      document.getElementById("msg").textContent = await resp.text();
+    });
+  </script>
+</body>
+</html>

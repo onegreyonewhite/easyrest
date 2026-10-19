@@ -1,0 +1,91 @@
+name: easyrest-shop-api
+
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: catalog
+      MYSQL_USER: shop
+      MYSQL_PASSWORD: shop
+    volumes:
+      - ./mysql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./mysql/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-ushop", "-pshop"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: shop
+    volumes:
+      - ./postgres/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./postgres/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "psql -U postgres -d shop -tAc \"SELECT rolname FROM pg_roles WHERE rolname='shop_conn'\" | grep -q shop_conn"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+  minio:
+    image: alpine/minio:latest-release
+    user: "0:0"
+    command: ["server", "/data", "--console-address", ":9001"]
+    volumes:
+      - minio-data:/data
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio-secret
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+  server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    command: ["--config", "/config/config.yaml"]
+    volumes:
+      - ./config.yaml:/config/config.yaml:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+  minio-init:
+    image: amazon/aws-cli
+    environment:
+      AWS_ACCESS_KEY_ID: minio
+      AWS_SECRET_ACCESS_KEY: minio-secret
+      AWS_DEFAULT_REGION: us-east-1
+    entrypoint: ["/bin/bash", "/init.sh"]
+    volumes:
+      - ./minio/init.sh:/init.sh:ro
+    depends_on:
+      minio:
+        condition: service_healthy
+      server:
+        condition: service_started
+    restart: "no"
+  traefik:
+    image: traefik:v3
+    command: ["--configFile=/etc/traefik/traefik.yml"]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+      - ./tls:/certs:ro
+    depends_on:
+      - server
+      - minio
+
+volumes:
+  minio-data:

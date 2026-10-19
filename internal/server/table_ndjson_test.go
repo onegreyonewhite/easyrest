@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/goccy/go-json"
 	"github.com/onegreyonewhite/easyrest/internal/config"
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
 
 type pagingDBPlugin struct {
@@ -41,35 +43,68 @@ func (p *pagingDBPlugin) TableGet(_ string, _ string, _ []string, _ map[string]a
 	if limit <= 0 || offset >= len(p.rows) {
 		return []map[string]any{}, nil, nil
 	}
-	end := offset + limit
-	if end > len(p.rows) {
-		end = len(p.rows)
-	}
+	end := min(offset+limit, len(p.rows))
 	out := make([]map[string]any, end-offset)
 	copy(out, p.rows[offset:end])
 	return out, nil, nil
 }
 
 func TestNegotiateResponseTypeNDJSON(t *testing.T) {
+	refs := contentRefsNamed(easyrest.StandardContentNames())
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Accept", contentTypeNDJSON)
-	got, varyCT := negotiateResponseType(req, url.Values{})
-	if got != contentTypeNDJSON || varyCT {
-		t.Fatalf("accept ndjson: got %q varyCT=%v", got, varyCT)
+	got := negotiateContent(req, url.Values{}, refs)
+	if got.Renderer.RenderMedia != contentTypeNDJSON {
+		t.Fatalf("accept ndjson: %q", got.Renderer.RenderMedia)
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/?format=ndjson", nil)
-	got, _ = negotiateResponseType(req, req.URL.Query())
-	if got != contentTypeNDJSON {
-		t.Fatalf("format=ndjson: %q", got)
+	got = negotiateContent(req, req.URL.Query(), refs)
+	if got.Renderer.RenderMedia != contentTypeNDJSON {
+		t.Fatalf("format=ndjson: %q", got.Renderer.RenderMedia)
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/?format=json", nil)
 	req.Header.Set("Accept", contentTypeNDJSON)
-	got, _ = negotiateResponseType(req, req.URL.Query())
-	if got != "application/json" {
-		t.Fatalf("format=json wins: %q", got)
+	got = negotiateContent(req, req.URL.Query(), refs)
+	if got.Renderer.RenderMedia != easyrest.MediaTypeJSON {
+		t.Fatalf("format=json wins: %q", got.Renderer.RenderMedia)
 	}
+}
+
+func streamTableGetNDJSON(
+	w http.ResponseWriter,
+	r *http.Request,
+	dbKey string,
+	pluginCtx map[string]any,
+	dbPlug easyrest.DBPlugin,
+	query url.Values,
+	userID, table string,
+	selectFields []string,
+	where map[string]any,
+	ordering, groupBy []string,
+	pageLimit, offset, maxRows int,
+) {
+	ref, _ := initContentPlugin("ndjson", builtinNDJSON(), nil)
+	serveContentRead(contentRead{
+		w:              w,
+		r:              r,
+		dbKey:          dbKey,
+		pluginCtx:      pluginCtx,
+		query:          query,
+		plug:           dbPlug,
+		renderer:       ref,
+		userID:         userID,
+		table:          table,
+		selectFields:   selectFields,
+		where:          where,
+		ordering:       ordering,
+		groupBy:        groupBy,
+		limit:          maxRows,
+		offset:         offset,
+		page:           pageLimit,
+		range416AtZero: true,
+	})
 }
 
 func TestStreamTableGetNDJSONPagesAndCancel(t *testing.T) {
@@ -182,6 +217,60 @@ func TestStreamTableGetNDJSONMaxRows(t *testing.T) {
 		t.Fatalf("rows %d body=%q", len(rows), w.Body.String())
 	}
 	assertNDJSONTrailers(t, w, "0-2/*")
+}
+
+type countOncePlugin struct {
+	fakeDBPlugin
+	mu    sync.Mutex
+	modes []string
+}
+
+func (p *countOncePlugin) TableGet(_ string, _ string, _ []string, _ map[string]any, _ []string, _ []string, limit, offset int, ctx map[string]any) ([]map[string]any, map[string]any, error) {
+	mode := ""
+	if prefer, ok := ctx["prefer"].(map[string]any); ok {
+		mode, _ = prefer["count"].(string)
+	}
+	p.mu.Lock()
+	p.modes = append(p.modes, mode)
+	p.mu.Unlock()
+	out := map[string]any{}
+	maps.Copy(out, ctx)
+	out["total"] = int64(5)
+	if offset >= 4 {
+		return []map[string]any{{"id": offset}}, out, nil
+	}
+	rows := make([]map[string]any, limit)
+	for i := range rows {
+		rows[i] = map[string]any{"id": offset + i}
+	}
+	return rows, out, nil
+}
+
+func TestStreamTableGetNDJSONCountsOnce(t *testing.T) {
+	orig := GetConfig()
+	t.Cleanup(func() { SetConfig(orig) })
+	SetConfig(config.Config{Server: config.ServerConfig{WriteTimeout: 0}})
+
+	plug := &countOncePlugin{}
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/test/users/", nil)
+	ctx := map[string]any{"prefer": map[string]any{"count": "exact"}}
+	streamTableGetNDJSON(w, req, "test", ctx, plug, url.Values{}, "u", "users", nil, nil, nil, nil, 2, 0, 0)
+	assertNDJSONTrailers(t, w, "0-4/5")
+	plug.mu.Lock()
+	modes := append([]string(nil), plug.modes...)
+	plug.mu.Unlock()
+	if len(modes) < 2 {
+		t.Fatalf("expected later pages, modes %#v", modes)
+	}
+	if modes[0] != "exact" {
+		t.Fatalf("first page count = %q", modes[0])
+	}
+	for i, mode := range modes[1:] {
+		if mode != "" {
+			t.Fatalf("page %d still has prefer.count %q", i+1, mode)
+		}
+	}
 }
 
 func TestNdjsonContentRange(t *testing.T) {
@@ -312,6 +401,9 @@ func TestStreamTableGetNDJSONFirstPageError(t *testing.T) {
 	streamTableGetNDJSON(w, req, "test", map[string]any{}, plug, url.Values{}, "u", "users", nil, nil, nil, nil, 2, 0, 0)
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("status %d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Error in TableGet") {
+		t.Fatalf("body %q", w.Body.String())
 	}
 	res := w.Result()
 	t.Cleanup(func() { res.Body.Close() })

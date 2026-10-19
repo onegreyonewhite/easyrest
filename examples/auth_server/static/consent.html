@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Consent</title>
+  <style>body{background:#fff;color:#111;font:16px sans-serif;margin:2rem} button{margin-right:.5rem}</style>
+</head>
+<body>
+  <h1>Allow this application?</h1>
+  <p id="ask"></p>
+  <form method="post" action="/restapi/v1/consent/decide">
+    <input type="hidden" name="next" id="next">
+    <button type="submit" name="decision" value="allow">Allow</button>
+    <button type="submit" name="decision" value="deny">Deny</button>
+  </form>
+  <script>
+    const next = new URLSearchParams(location.search).get("next") || "";
+    document.getElementById("next").value = next;
+    const request = new URL(next, location.origin);
+    const query = request.searchParams;
+    document.getElementById("ask").textContent = query.get("client_id")
+      ? query.get("client_id") + " asks for " + (query.get("scope") || "openid")
+      : "Open this page from the demo app.";
+  </script>
+</body>
+</html>

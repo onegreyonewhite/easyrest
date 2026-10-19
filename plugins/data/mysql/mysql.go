@@ -905,15 +905,100 @@ func convertILIKEtoLower(where map[string]any) map[string]any {
 	return result
 }
 
+func resolveMySQLCount(ctx context.Context, tx *sql.Tx, mode string, pluginCtx map[string]any, inner string, args []any) (int64, bool, error) {
+	var planned int64
+	hasPlanned := false
+	if mode == "planned" || mode == "estimated" {
+		var raw string
+		if err := tx.QueryRowContext(ctx, "EXPLAIN FORMAT=JSON "+inner, args...).Scan(&raw); err != nil {
+			return 0, false, fmt.Errorf("failed to explain query: %w", err)
+		}
+		n, err := mysqlExaminedRows([]byte(raw))
+		if err != nil {
+			return 0, false, err
+		}
+		planned = n
+		hasPlanned = true
+	}
+	return easyrest.CountFromEstimate(mode, planned, hasPlanned, easyrest.CountMaxRows(pluginCtx), func() (int64, error) {
+		var n int64
+		if err := tx.QueryRowContext(ctx, easyrest.CountSQL(inner), args...).Scan(&n); err != nil {
+			return 0, fmt.Errorf("failed to count rows: %w", err)
+		}
+		return n, nil
+	})
+}
+
+func mysqlExaminedRows(raw []byte) (int64, error) {
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return 0, fmt.Errorf("failed to parse explain: %w", err)
+	}
+	block, ok := doc["query_block"].(map[string]any)
+	if !ok {
+		return 0, fmt.Errorf("failed to parse explain: missing query_block")
+	}
+	n, ok := lastRowsExamined(block)
+	if !ok {
+		return 0, fmt.Errorf("failed to parse explain: missing rows_examined_per_scan")
+	}
+	return easyrest.RoundCount(n), nil
+}
+
+func lastRowsExamined(node map[string]any) (float64, bool) {
+	var found float64
+	ok := false
+	if table, isMap := node["table"].(map[string]any); isMap {
+		if n, yes := jsonFloat(table["rows_examined_per_scan"]); yes {
+			found, ok = n, true
+		}
+	}
+	if nested, isSlice := node["nested_loop"].([]any); isSlice {
+		for _, item := range nested {
+			child, isMap := item.(map[string]any)
+			if !isMap {
+				continue
+			}
+			if n, yes := lastRowsExamined(child); yes {
+				found, ok = n, true
+			}
+		}
+	}
+	return found, ok
+}
+
+func jsonFloat(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	default:
+		return 0, false
+	}
+}
+
 // TableGet builds and executes a SELECT query.
 func (m *mysqlPlugin) TableGet(userID, table string, selectFields []string, where map[string]any,
 	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, map[string]any, error) {
 
-	query, args, err := easyrest.BuildSelectQuery(table, selectFields, where, ordering, groupBy, limit, offset, easyrest.SelectOptions{
-		WhereRewriter: convertILIKEtoLower,
-	})
+	selectOpts := easyrest.SelectOptions{WhereRewriter: convertILIKEtoLower}
+	query, args, err := easyrest.BuildSelectQuery(table, selectFields, where, ordering, groupBy, limit, offset, selectOpts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to build WHERE: %w", err)
+	}
+	mode := easyrest.CountPreference(ctx)
+	var inner string
+	var countArgs []any
+	if mode != "" {
+		built, cargs, cerr := easyrest.BuildSelectQuery(table, selectFields, where, nil, groupBy, 0, 0, selectOpts)
+		if cerr != nil {
+			return nil, nil, fmt.Errorf("failed to build count: %w", cerr)
+		}
+		inner = built
+		countArgs = cargs
 	}
 
 	queryCtx := context.Background()
@@ -938,6 +1023,19 @@ func (m *mysqlPlugin) TableGet(userID, table string, selectFields []string, wher
 		return nil, nil, err
 	}
 
+	var total int64
+	counted := false
+	if mode != "" {
+		got, ok, rerr := resolveMySQLCount(queryCtx, tx, mode, ctx, inner, countArgs)
+		if rerr != nil {
+			return nil, nil, rerr
+		}
+		if ok {
+			total = got
+			counted = true
+		}
+	}
+
 	rows, err := tx.QueryContext(queryCtx, query, args...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to execute query: %w", err)
@@ -953,6 +1051,12 @@ func (m *mysqlPlugin) TableGet(userID, table string, selectFields []string, wher
 	outCtx, settings, err := mergeHarvestedContext(tx, ctx)
 	if err != nil {
 		return nil, nil, err
+	}
+	if counted {
+		if outCtx == nil {
+			outCtx = ctx
+		}
+		outCtx = easyrest.WithTotal(outCtx, total)
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, nil, fmt.Errorf("failed to commit transaction: %w", err)

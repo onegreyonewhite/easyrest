@@ -1,0 +1,517 @@
+port: "8443"
+check_scope: true
+token_user_search: sub
+
+tls_enabled: true
+tls_cert_file: /tls/cert.pem
+tls_key_file: /tls/key.pem
+
+internal_rpc:
+  network: unix
+  address: /tmp/easyrest.sock
+
+content_plugins:
+  token_form:
+    path: /usr/local/bin/easyrest-content-fixedform
+    settings:
+      fields: [client_id, code, code_verifier, grant_type, redirect_uri, refresh_token, scope]
+  login_form:
+    path: /usr/local/bin/easyrest-content-fixedform
+    settings:
+      fields: [email, password, next]
+  consent_form:
+    path: /usr/local/bin/easyrest-content-fixedform
+    settings:
+      fields: [decision, next]
+  password_form:
+    path: /usr/local/bin/easyrest-content-fixedform
+    settings:
+      fields: [current_password, new_password]
+
+auth_plugins:
+  jwt:
+    settings:
+      jwt_secret: dev-only-change-me
+  dbsession:
+    settings:
+      plugin: auth
+      table: sessions
+
+middleware_plugins:
+  dbqueryhook:
+    settings:
+      by_key:
+        auth:
+          pre_request: auth.pre_request
+
+storage_plugins:
+  static:
+    settings:
+      path: /static
+
+plugins:
+  auth:
+    uri: postgres://auth_conn:auth_conn@postgres:5432/auth?sslmode=disable&search_path=auth
+    internal: true
+    db_tx_end: commit-allow-override
+
+application:
+  template_path: /config/page.html
+  version: v1
+  auth: jwt
+  source: auth
+  storage: memory
+  parsers: [json]
+  renderers: [json]
+  api:
+    v1:
+      auth: [dbsession, jwt]
+      middlewares: [dbqueryhook]
+      endpoints:
+        login:
+          url: /
+          auth: []
+          public: true
+          actions:
+            placeholder: {}
+          list_actions:
+            login:
+              func: auth.login
+              auth: []
+              parsers: [login_form]
+              renderers: [json]
+              fields:
+                email:
+                  type: string
+                password:
+                  type: string
+                  writeOnly: true
+                next:
+                  type: string
+                sub:
+                  type: string
+                  readOnly: true
+                error:
+                  type: string
+                  readOnly: true
+            logout:
+              func: auth.logout
+              auth: [dbsession]
+              fields:
+                error:
+                  type: string
+                  readOnly: true
+        discovery:
+          url: .well-known
+          auth: []
+          public: true
+          actions:
+            placeholder: {}
+          state_actions:
+            openid_configuration:
+              url: openid-configuration
+              func: auth.openid_configuration
+              no_trailing_slash: true
+              auth: []
+              fields:
+                issuer:
+                  type: string
+                  readOnly: true
+                authorization_endpoint:
+                  type: string
+                  readOnly: true
+                token_endpoint:
+                  type: string
+                  readOnly: true
+                userinfo_endpoint:
+                  type: string
+                  readOnly: true
+                jwks_uri:
+                  type: string
+                  readOnly: true
+                scopes_supported:
+                  type: array
+                  readOnly: true
+                response_types_supported:
+                  type: array
+                  readOnly: true
+                subject_types_supported:
+                  type: array
+                  readOnly: true
+                id_token_signing_alg_values_supported:
+                  type: array
+                  readOnly: true
+                code_challenge_methods_supported:
+                  type: array
+                  readOnly: true
+                token_endpoint_auth_methods_supported:
+                  type: array
+                  readOnly: true
+                grant_types_supported:
+                  type: array
+                  readOnly: true
+                error:
+                  type: string
+                  readOnly: true
+                error_description:
+                  type: string
+                  readOnly: true
+        jwks:
+          url: jwks
+          auth: []
+          public: true
+          actions:
+            placeholder: {}
+          state_actions:
+            public:
+              func: auth.jwks
+              no_trailing_slash: true
+              auth: []
+              fields:
+                keys:
+                  type: array
+                  readOnly: true
+                error:
+                  type: string
+                  readOnly: true
+        authorize:
+          url: authorize
+          auth: []
+          public: true
+          actions:
+            placeholder: {}
+          state_actions:
+            start:
+              func: auth.authorize
+              no_trailing_slash: true
+              auth: []
+              fields:
+                error:
+                  type: string
+                  readOnly: true
+                error_description:
+                  type: string
+                  readOnly: true
+        consent:
+          url: consent
+          auth: [dbsession]
+          public: true
+          actions:
+            placeholder: {}
+          list_actions:
+            decide:
+              func: auth.consent
+              no_trailing_slash: true
+              auth: [dbsession]
+              parsers: [consent_form]
+              renderers: [json]
+              fields:
+                decision:
+                  type: string
+                next:
+                  type: string
+                error:
+                  type: string
+                  readOnly: true
+                error_description:
+                  type: string
+                  readOnly: true
+        token:
+          url: token
+          table: auth.token
+          no_trailing_slash: true
+          auth: []
+          public: true
+          actions:
+            placeholder: {}
+            create:
+              type: func
+              no_trailing_slash: true
+              parsers: [token_form]
+              renderers: [json]
+              fields:
+                - client_id
+                - code
+                - code_verifier
+                - grant_type
+                - redirect_uri
+                - refresh_token
+                - scope
+        users:
+          url: users
+          table: auth.create_user
+          auth: [dbsession, jwt]
+          primary_key: id
+          actions:
+            list:
+              table: users
+              fields: [id, username, status, created_at, updated_at]
+              required_scopes: [users-read]
+            retrieve:
+              table: users
+              fields: [id, username, status, created_at, updated_at]
+              required_scopes: [users-read]
+            create:
+              type: func
+              fields: [username, password]
+              required_scopes: [users-write]
+            update:
+              table: users
+              fields: [username, status]
+              required_scopes: [users-write]
+            destroy:
+              table: users
+              required_scopes: [users-write]
+          list_actions:
+            set_password:
+              func: auth.set_password
+              no_trailing_slash: true
+              required_scopes: [users-write]
+              fields:
+                user_id:
+                  type: string
+                password:
+                  type: string
+                  writeOnly: true
+                username:
+                  type: string
+                  readOnly: true
+                status:
+                  type: string
+                  readOnly: true
+        profiles:
+          url: profiles
+          table: profiles
+          auth: [dbsession, jwt]
+          primary_key: user_id
+          actions:
+            list:
+              fields: [user_id, given_name, family_name, middle_name, nickname, email, email_verified, picture, locale, zoneinfo, updated_at]
+              required_scopes: [profiles-read]
+            retrieve:
+              fields: [user_id, given_name, family_name, middle_name, nickname, email, email_verified, picture, locale, zoneinfo, updated_at]
+              required_scopes: [profiles-read]
+            create:
+              fields: [user_id, given_name, family_name, middle_name, nickname, email, email_verified, picture, locale, zoneinfo]
+              required_scopes: [profiles-write]
+            update:
+              fields: [given_name, family_name, middle_name, nickname, email, email_verified, picture, locale, zoneinfo]
+              required_scopes: [profiles-write]
+            destroy:
+              required_scopes: [profiles-write]
+        security_groups:
+          url: security-groups
+          table: security_groups
+          auth: [dbsession, jwt]
+          primary_key: id
+          actions:
+            list:
+              fields: [id, name, description]
+              required_scopes: [security-groups-read]
+            retrieve:
+              fields: [id, name, description]
+              required_scopes: [security-groups-read]
+            create:
+              fields: [id, name, description]
+              required_scopes: [security-groups-write]
+            update:
+              fields: [name, description]
+              required_scopes: [security-groups-write]
+            destroy:
+              required_scopes: [security-groups-write]
+        group_scopes:
+          url: group-scopes
+          table: group_scopes
+          auth: [dbsession, jwt]
+          primary_key: id
+          actions:
+            list:
+              fields: [id, group_id, scope]
+              required_scopes: [group-scopes-read]
+            retrieve:
+              fields: [id, group_id, scope]
+              required_scopes: [group-scopes-read]
+            create:
+              fields: [group_id, scope]
+              required_scopes: [group-scopes-write]
+            update:
+              fields: [group_id, scope]
+              required_scopes: [group-scopes-write]
+            destroy:
+              required_scopes: [group-scopes-write]
+        group_members:
+          url: group-members
+          table: group_members
+          auth: [dbsession, jwt]
+          primary_key: id
+          actions:
+            list:
+              fields: [id, group_id, user_id]
+              required_scopes: [group-members-read]
+            retrieve:
+              fields: [id, group_id, user_id]
+              required_scopes: [group-members-read]
+            create:
+              fields: [group_id, user_id]
+              required_scopes: [group-members-write]
+            update:
+              fields: [group_id, user_id]
+              required_scopes: [group-members-write]
+            destroy:
+              required_scopes: [group-members-write]
+        clients:
+          url: clients
+          table: oauth_clients
+          auth: [dbsession, jwt]
+          primary_key: client_id
+          actions:
+            list:
+              fields: [client_id, name, require_consent]
+              required_scopes: [clients-read]
+            retrieve:
+              fields: [client_id, name, require_consent]
+              required_scopes: [clients-read]
+            create:
+              fields: [client_id, name, require_consent]
+              required_scopes: [clients-write]
+            update:
+              fields: [name, require_consent]
+              required_scopes: [clients-write]
+            destroy:
+              required_scopes: [clients-write]
+        client_redirects:
+          url: client-redirects
+          table: oauth_client_redirects
+          auth: [dbsession, jwt]
+          primary_key: id
+          actions:
+            list:
+              fields: [id, client_id, redirect_uri]
+              required_scopes: [client-redirects-read]
+            retrieve:
+              fields: [id, client_id, redirect_uri]
+              required_scopes: [client-redirects-read]
+            create:
+              fields: [client_id, redirect_uri]
+              required_scopes: [client-redirects-write]
+            update:
+              fields: [client_id, redirect_uri]
+              required_scopes: [client-redirects-write]
+            destroy:
+              required_scopes: [client-redirects-write]
+        consents:
+          url: consents
+          table: oauth_consents
+          auth: [dbsession, jwt]
+          primary_key: id
+          actions:
+            list:
+              fields: [id, user_id, client_id, scope]
+              required_scopes: [consents-read]
+            retrieve:
+              fields: [id, user_id, client_id, scope]
+              required_scopes: [consents-read]
+            destroy:
+              required_scopes: [consents-write]
+        userinfo:
+          url: userinfo
+          auth: [jwt]
+          actions:
+            placeholder: {}
+          state_actions:
+            claims:
+              func: auth.userinfo
+              post: true
+              no_trailing_slash: true
+              auth: [jwt]
+              required_scopes: [openid]
+              parsers: [json, form]
+              renderers: [json]
+              fields:
+                sub:
+                  type: string
+                  readOnly: true
+                given_name:
+                  type: string
+                  readOnly: true
+                family_name:
+                  type: string
+                  readOnly: true
+                middle_name:
+                  type: string
+                  readOnly: true
+                nickname:
+                  type: string
+                  readOnly: true
+                picture:
+                  type: string
+                  readOnly: true
+                locale:
+                  type: string
+                  readOnly: true
+                zoneinfo:
+                  type: string
+                  readOnly: true
+                email:
+                  type: string
+                  readOnly: true
+                email_verified:
+                  type: boolean
+                  readOnly: true
+                groups:
+                  type: array
+                  readOnly: true
+                error:
+                  type: string
+                  readOnly: true
+        me:
+          auth: [dbsession, jwt]
+          public: true
+          actions:
+            placeholder: {}
+          state_actions:
+            profile:
+              func: auth.profile
+              no_trailing_slash: true
+              auth: [dbsession, jwt]
+              fields:
+                given_name:
+                  type: string
+                family_name:
+                  type: string
+                middle_name:
+                  type: string
+                nickname:
+                  type: string
+                picture:
+                  type: string
+                locale:
+                  type: string
+                zoneinfo:
+                  type: string
+                email:
+                  type: string
+                  readOnly: true
+                email_verified:
+                  type: boolean
+                  readOnly: true
+                error:
+                  type: string
+                  readOnly: true
+          list_actions:
+            password:
+              func: auth.change_password
+              no_trailing_slash: true
+              auth: [dbsession, jwt]
+              parsers: [password_form]
+              renderers: [json]
+              fields:
+                current_password:
+                  type: string
+                  writeOnly: true
+                new_password:
+                  type: string
+                  writeOnly: true
+                error:
+                  type: string
+                  readOnly: true

@@ -73,10 +73,9 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+    command: ["--config", "/config/config.yaml"]
     environment:
-      ER_CONFIG_FILE: /config/config.yaml
       ER_PPROF_ADDR: "0.0.0.0:6060"
-      ER_NO_PLUGIN_LOG: "1"
     volumes:
       - ./config.yaml:/config/config.yaml:ro
       - ./data/sqlite:/data/sqlite

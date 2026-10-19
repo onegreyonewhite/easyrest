@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -459,4 +460,85 @@ func GetTxPreference(ctx map[string]any) (string, error) {
 		}
 	}
 	return txPreference, nil
+}
+
+// CountPreference returns prefer.count when it is exact, planned, or estimated.
+// Any other value, including a missing key, is ignored.
+func CountPreference(ctx map[string]any) string {
+	if ctx == nil {
+		return ""
+	}
+	prefer, ok := ctx["prefer"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	mode, ok := prefer["count"].(string)
+	if !ok {
+		return ""
+	}
+	switch mode {
+	case "exact", "planned", "estimated":
+		return mode
+	default:
+		return ""
+	}
+}
+
+// CountMaxRows returns ctx db_max_rows, or 10000 when the value is missing or not positive.
+func CountMaxRows(ctx map[string]any) int {
+	n, ok := IntFromCtx(ctx, "db_max_rows")
+	if !ok || n <= 0 {
+		return 10000
+	}
+	return n
+}
+
+// CountFromEstimate chooses the total for a count mode.
+// exact is invoked for mode exact, and for estimated when a planned value is known and is below maxRows.
+func CountFromEstimate(mode string, planned int64, hasPlanned bool, maxRows int, exact func() (int64, error)) (int64, bool, error) {
+	switch mode {
+	case "exact":
+		n, err := exact()
+		if err != nil {
+			return 0, false, err
+		}
+		return n, true, nil
+	case "planned":
+		if !hasPlanned {
+			return 0, false, nil
+		}
+		return planned, true, nil
+	case "estimated":
+		if !hasPlanned {
+			return 0, false, nil
+		}
+		if planned < int64(maxRows) {
+			n, err := exact()
+			if err != nil {
+				return 0, false, err
+			}
+			return n, true, nil
+		}
+		return planned, true, nil
+	default:
+		return 0, false, nil
+	}
+}
+
+// RoundCount turns a planner estimate into a non-negative row count.
+func RoundCount(n float64) int64 {
+	v := int64(math.Round(n))
+	if v < 0 {
+		return 0
+	}
+	return v
+}
+
+// WithTotal sets total on ctx and returns that map. A nil ctx becomes a new map.
+func WithTotal(ctx map[string]any, total int64) map[string]any {
+	if ctx == nil {
+		ctx = make(map[string]any, 1)
+	}
+	ctx["total"] = total
+	return ctx
 }

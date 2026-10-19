@@ -189,6 +189,7 @@ func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs, viewDefs, rpcDef
 		paths[path] = &PathItem{Post: op}
 	}
 
+	scheme, _ := requestPublic(r)["scheme"].(string)
 	swaggerDef := &SwaggerSpec{
 		Swagger: "2.0",
 		Info: SwaggerInfo{
@@ -197,7 +198,7 @@ func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs, viewDefs, rpcDef
 		},
 		Host:                r.Host,
 		BasePath:            "/api/" + dbKey,
-		Schemes:             []string{"http"},
+		Schemes:             []string{scheme},
 		Consumes:            []string{"application/json"},
 		Produces:            []string{"application/json", "application/x-ndjson"},
 		Definitions:         mergedDefs,
@@ -419,40 +420,60 @@ func buildDELETEEndpoint(name string, properties map[string]any) *Operation {
 // schemaHandler now builds and returns a full swagger 2.0 spec.
 func schemaHandler(w http.ResponseWriter, r *http.Request) {
 	dbKey := strings.ToLower(chi.URLParam(r, "db"))
+	if denyInternalDB(w, r, dbKey) {
+		return
+	}
+	swaggerSpec, pluginCtx, built, ok := ensureSwaggerSpec(w, r, dbKey)
+	if !ok {
+		return
+	}
+	names := defaultDocumentNames()
+	format := firstDocumentFormat(names)
+	writeSwagger(
+		w,
+		r,
+		dbKey,
+		pluginCtx,
+		names,
+		built,
+		swaggerSpec,
+		swaggerPageCtx(r, easyrest.SwaggerDocument, absoluteFormatURL(r, format)),
+	)
+}
 
+func ensureSwaggerSpec(w http.ResponseWriter, r *http.Request, dbKey string) (any, map[string]any, bool, bool) {
 	schemaCacheMutex.RLock()
 	swaggerSpec, ok := schemaCache[dbKey]
 	schemaCacheMutex.RUnlock()
 	if ok {
-		respondJSON(w, http.StatusOK, swaggerSpec)
-		return
+		return swaggerSpec, nil, false, true
 	}
 
 	dbPlug, ok := loadDBPlugin(w, dbKey)
 	if !ok {
-		return
+		return nil, nil, false, false
 	}
 
-	pluginCtx := BuildPluginContext(r)
+	pluginCtx := buildPluginContext(r, dbKey, "", "")
 	pluginCtx, mwOK := runPreRequestMiddlewares(w, dbKey, pluginCtx)
 	if !mwOK {
-		return
+		return nil, nil, false, false
 	}
 	schemaRaw, returnedCtx, err := dbPlug.GetSchema(pluginCtx)
 	pluginCtx = applyReturnedPluginContext(pluginCtx, returnedCtx)
 	if err != nil {
-		middlewareHTTPError(w, dbKey, pluginCtx, "GetSchema not implemented", http.StatusNotImplemented)
-		return
+		middlewareHTTPError(w, r, dbKey, pluginCtx, "GetSchema not implemented", http.StatusNotImplemented)
+		return nil, nil, false, false
 	}
 	schemaMap, ok := schemaRaw.(map[string]any)
 	if !ok {
-		middlewareHTTPError(w, dbKey, pluginCtx, "Invalid schema format", http.StatusInternalServerError)
-		return
+		middlewareHTTPError(w, r, dbKey, pluginCtx, "Invalid schema format", http.StatusInternalServerError)
+		return nil, nil, false, false
 	}
 	tableDefs, ok := schemaMap["tables"].(map[string]any)
 	if !ok {
-		middlewareHTTPError(w, dbKey, pluginCtx, "Invalid tables schema", http.StatusInternalServerError)
-		return
+		middlewareHTTPError(w, r, dbKey, pluginCtx, "Invalid tables schema", http.StatusInternalServerError)
+		return nil, nil, false, false
 	}
 	delete(tableDefs, "easyrest_cache")
 	var viewDefs map[string]any
@@ -476,6 +497,5 @@ func schemaHandler(w http.ResponseWriter, r *http.Request) {
 		schemaCache[dbKey] = swaggerSpec
 	}
 	schemaCacheMutex.Unlock()
-
-	middlewareRespondJSON(w, dbKey, pluginCtx, http.StatusOK, swaggerSpec)
+	return swaggerSpec, pluginCtx, true, true
 }

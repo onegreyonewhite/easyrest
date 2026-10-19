@@ -1,0 +1,31 @@
+name: easyrest-auth-server
+
+services:
+  postgres:
+    build: ./postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: auth
+    healthcheck:
+      test: ["CMD-SHELL", "psql -U postgres -d auth -tAc \"SELECT rolname FROM pg_roles WHERE rolname='auth_conn'\" | grep -q auth_conn"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+  server:
+    build:
+      context: ../..
+      dockerfile: examples/auth_server/server/Dockerfile
+    command: ["--config", "/config/config.yaml"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./config.yaml:/config/config.yaml:ro
+      - ./page.html:/config/page.html:ro
+      - ./static:/static:ro
+      - ./tls:/tls:ro
+    tmpfs:
+      - /tmp:mode=1777

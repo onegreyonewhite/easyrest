@@ -23,10 +23,16 @@ var (
 	middlewarePluginClients    atomic.Pointer[map[string]*hplugin.Client]
 	globalMiddlewareChain      atomic.Pointer[[]easyrest.MiddlewarePlugin]
 	dbMiddlewareOrder          atomic.Pointer[map[string][]easyrest.MiddlewarePlugin]
+	contentPlugins             atomic.Pointer[map[string]contentPluginRef]
+	contentPluginClients       atomic.Pointer[map[string]*hplugin.Client]
+	storagePlugins             atomic.Pointer[map[string]storagePluginRef]
+	storagePluginClients       atomic.Pointer[map[string]*hplugin.Client]
 	PreservedDbPlugins         map[string]PreservedPluginFactory[easyrest.DBPlugin]
 	PreservedQueryPlugins      map[string]PreservedPluginFactory[easyrest.DBQueryPlugin]
 	PreservedAuthPlugins       map[string]PreservedPluginFactory[easyrest.AuthPlugin]
 	PreservedMiddlewarePlugins map[string]PreservedPluginFactory[easyrest.MiddlewarePlugin]
+	PreservedContentPlugins    map[string]PreservedPluginFactory[easyrest.ContentPlugin]
+	PreservedStoragePlugins    map[string]PreservedPluginFactory[easyrest.StoragePlugin]
 )
 
 func init() {
@@ -41,6 +47,8 @@ func init() {
 	AuthPlugins.Store(&emptyAuthPlugins)
 	emptyAuthSecDefs := make(map[string]map[string]any)
 	AuthSecurityDefinitions.Store(&emptyAuthSecDefs)
+	emptyAuthCredentials := make(map[string]authCredential)
+	authCredentials.Store(&emptyAuthCredentials)
 	emptyMiddlewarePlugins := make(map[string]easyrest.MiddlewarePlugin)
 	MiddlewarePlugins.Store(&emptyMiddlewarePlugins)
 	emptyMiddlewarePluginClients := make(map[string]*hplugin.Client)
@@ -49,11 +57,24 @@ func init() {
 	globalMiddlewareChain.Store(&emptyGlobalMiddlewareChain)
 	emptyDbMiddlewareOrder := make(map[string][]easyrest.MiddlewarePlugin)
 	dbMiddlewareOrder.Store(&emptyDbMiddlewareOrder)
+	emptyContentPlugins := make(map[string]contentPluginRef)
+	contentPlugins.Store(&emptyContentPlugins)
+	emptyContentClients := make(map[string]*hplugin.Client)
+	contentPluginClients.Store(&emptyContentClients)
+
+	emptyStoragePlugins := make(map[string]storagePluginRef)
+	storagePlugins.Store(&emptyStoragePlugins)
+	emptyStorageClients := make(map[string]*hplugin.Client)
+	storagePluginClients.Store(&emptyStorageClients)
 
 	PreservedDbPlugins = make(map[string]PreservedPluginFactory[easyrest.DBPlugin])
 	PreservedQueryPlugins = make(map[string]PreservedPluginFactory[easyrest.DBQueryPlugin])
 	PreservedAuthPlugins = make(map[string]PreservedPluginFactory[easyrest.AuthPlugin])
 	PreservedMiddlewarePlugins = make(map[string]PreservedPluginFactory[easyrest.MiddlewarePlugin])
+	PreservedContentPlugins = make(map[string]PreservedPluginFactory[easyrest.ContentPlugin])
+	PreservedStoragePlugins = make(map[string]PreservedPluginFactory[easyrest.StoragePlugin])
+	registerBuiltinContentPlugins()
+	registerBuiltinStoragePlugins()
 }
 
 type pluginCloser interface {
@@ -81,6 +102,8 @@ func closeLoadedPlugins() {
 func StopPlugins() {
 	// Get the current clients map pointer
 	oldClientsPtr := pluginClients.Load()
+	oldContentClientsPtr := contentPluginClients.Load()
+	oldStorageClientsPtr := storagePluginClients.Load()
 
 	closeLoadedPlugins()
 
@@ -97,6 +120,8 @@ func StopPlugins() {
 	AuthPlugins.Store(&emptyAuthPlugins)
 	emptyAuthSecDefs := make(map[string]map[string]any)
 	AuthSecurityDefinitions.Store(&emptyAuthSecDefs)
+	emptyAuthCredentials := make(map[string]authCredential)
+	authCredentials.Store(&emptyAuthCredentials)
 
 	emptyOrder := []string{}
 	authPluginOrder.Store(&emptyOrder)
@@ -109,6 +134,14 @@ func StopPlugins() {
 	globalMiddlewareChain.Store(&emptyGlobalMiddlewareChain)
 	emptyDbMiddlewareOrder := make(map[string][]easyrest.MiddlewarePlugin)
 	dbMiddlewareOrder.Store(&emptyDbMiddlewareOrder)
+	emptyContentPlugins := make(map[string]contentPluginRef)
+	contentPlugins.Store(&emptyContentPlugins)
+	emptyContentClients := make(map[string]*hplugin.Client)
+	contentPluginClients.Store(&emptyContentClients)
+	emptyStoragePlugins := make(map[string]storagePluginRef)
+	storagePlugins.Store(&emptyStoragePlugins)
+	emptyStorageClients := make(map[string]*hplugin.Client)
+	storagePluginClients.Store(&emptyStorageClients)
 
 	clearSchemaCache()
 
@@ -128,6 +161,19 @@ func StopPlugins() {
 			client.Kill()
 		}
 	}
+	if oldContentClientsPtr != nil {
+		for name, client := range *oldContentClientsPtr {
+			stdlog.Printf("Stopping content plugin client for: %s", name)
+			client.Kill()
+		}
+	}
+	if oldStorageClientsPtr != nil {
+		for name, client := range *oldStorageClientsPtr {
+			stdlog.Printf("Stopping storage plugin client for: %s", name)
+			client.Kill()
+		}
+	}
+	publishStorage()
 }
 
 type connectionPlugin interface {
@@ -182,6 +228,7 @@ func LoadPlugins() {
 	newQueryPlugins := make(map[string]easyrest.DBQueryPlugin)
 	newPluginClients := make(map[string]*hplugin.Client)
 	newAuthPlugins := make(map[string]easyrest.AuthPlugin)
+	newAuthCredentials := make(map[string]authCredential)
 	newAuthSecurityDefinitions := make(map[string]map[string]any)
 
 	for connName, pluginCfg := range cfg.PluginMap {
@@ -234,7 +281,7 @@ func LoadPlugins() {
 		client, rpcClient, err := startPluginRPCClient(absPluginPath, map[string]hplugin.Plugin{
 			"db":    &easyrest.DBPluginPlugin{},
 			"query": &easyrest.DBQueryPluginPlugin{},
-		}, cfg.NoPluginLog)
+		}, !cfg.PluginLog)
 		if err != nil {
 			stdlog.Printf("Error creating RPC client process for plugin %s (%s): %v", connName, pluginPath, err)
 			continue
@@ -269,13 +316,14 @@ func LoadPlugins() {
 		if authPluginCfg.Path == "" {
 			if factory, ok := PreservedAuthPlugins[authPluginName]; ok {
 				authPluginInstance := factory()
-				schema, errInitPreserved := authPluginInstance.Init(authPluginCfg.Settings)
+				info, errInitPreserved := authPluginInstance.Init(authPluginCfg.Settings, currentHostRPC())
 				if errInitPreserved != nil {
 					stdlog.Printf("Error initializing preserved Auth plugin '%s': %v", authPluginName, errInitPreserved)
 				} else {
 					newAuthPlugins[authPluginName] = authPluginInstance
-					if schema != nil {
-						newAuthSecurityDefinitions[authPluginName] = schema
+					newAuthCredentials[authPluginName] = credentialFrom(info)
+					if info.Schema != nil {
+						newAuthSecurityDefinitions[authPluginName] = info.Schema
 					}
 					pluginInitialized = true
 					stdlog.Printf("Auth plugin '%s' (preserved) initialized.", authPluginName)
@@ -296,7 +344,7 @@ func LoadPlugins() {
 
 		client, rpcClient, err := startPluginRPCClient(absPluginPath, map[string]hplugin.Plugin{
 			"auth": &easyrest.AuthPluginPlugin{},
-		}, cfg.NoPluginLog)
+		}, !cfg.PluginLog)
 		if err != nil {
 			stdlog.Printf("Error creating RPC client for auth plugin %s (%s): %v", authPluginName, absPluginPath, err)
 			continue
@@ -306,11 +354,12 @@ func LoadPlugins() {
 		if errDispense == nil {
 			authPlug, ok := rawAuth.(easyrest.AuthPlugin)
 			if ok {
-				schema, errInit := authPlug.Init(authPluginCfg.Settings)
+				info, errInit := authPlug.Init(authPluginCfg.Settings, currentHostRPC())
 				if errInit == nil {
 					newAuthPlugins[authPluginName] = authPlug
-					if schema != nil {
-						newAuthSecurityDefinitions[authPluginName] = schema
+					newAuthCredentials[authPluginName] = credentialFrom(info)
+					if info.Schema != nil {
+						newAuthSecurityDefinitions[authPluginName] = info.Schema
 					}
 					pluginInitialized = true
 				} else {
@@ -341,11 +390,12 @@ func LoadPlugins() {
 
 	for mwPluginName, mwPluginCfg := range cfg.MiddlewarePlugins {
 		pluginInitialized := false
+		driver := middlewareDriver(mwPluginName, mwPluginCfg)
 
 		if mwPluginCfg.Path == "" {
-			if factory, ok := PreservedMiddlewarePlugins[mwPluginName]; ok {
+			if factory, ok := PreservedMiddlewarePlugins[driver]; ok {
 				mwInstance := factory()
-				if errInit := mwInstance.Init(mwPluginCfg.Settings); errInit != nil {
+				if _, errInit := mwInstance.Init(mwPluginCfg.Settings, currentHostRPC()); errInit != nil {
 					stdlog.Printf("Error initializing preserved middleware plugin '%s': %v", mwPluginName, errInit)
 				} else {
 					newMiddlewarePlugins[mwPluginName] = mwInstance
@@ -356,7 +406,7 @@ func LoadPlugins() {
 			}
 		}
 
-		absPluginPath, pathSearchOrigin, errResolvingPath := resolveNamedPluginPath(mwPluginName, mwPluginCfg.Path, "easyrest-middleware-"+mwPluginName)
+		absPluginPath, pathSearchOrigin, errResolvingPath := resolveNamedPluginPath(mwPluginName, mwPluginCfg.Path, "easyrest-middleware-"+driver)
 		if errResolvingPath != nil {
 			stdlog.Printf("Middleware plugin '%s': Could not find/validate executable (searched as '%s'): %v. Skipping.", mwPluginName, pathSearchOrigin, errResolvingPath)
 			continue
@@ -364,7 +414,7 @@ func LoadPlugins() {
 
 		client, rpcClient, err := startPluginRPCClient(absPluginPath, map[string]hplugin.Plugin{
 			"middleware": &easyrest.MiddlewarePluginPlugin{},
-		}, cfg.NoPluginLog)
+		}, !cfg.PluginLog)
 		if err != nil {
 			stdlog.Printf("Error creating RPC client for middleware plugin %s (%s): %v", mwPluginName, absPluginPath, err)
 			continue
@@ -374,7 +424,7 @@ func LoadPlugins() {
 		if errDispense == nil {
 			mwPlug, ok := rawMw.(easyrest.MiddlewarePlugin)
 			if ok {
-				if errInit := mwPlug.Init(mwPluginCfg.Settings); errInit != nil {
+				if _, errInit := mwPlug.Init(mwPluginCfg.Settings, currentHostRPC()); errInit != nil {
 					stdlog.Printf("Error initializing Middleware interface for plugin %s (RPC): %v", mwPluginName, errInit)
 				} else {
 					newMiddlewarePlugins[mwPluginName] = mwPlug
@@ -402,9 +452,27 @@ func LoadPlugins() {
 	globalMiddlewareChain.Store(&globalChain)
 	dbMiddlewareOrder.Store(&dbChains)
 
+	ensureStandardContent(cfg)
+	newContentPlugins := make(map[string]contentPluginRef)
+	newContentClients := make(map[string]*hplugin.Client)
+	for name, plugCfg := range cfg.ContentPlugins {
+		ref, client, ok := loadOneContentPlugin(name, plugCfg, !cfg.PluginLog)
+		if !ok {
+			continue
+		}
+		newContentPlugins[name] = ref
+		if client != nil {
+			newContentClients[name] = client
+		}
+	}
+
+	newStoragePlugins, newStorageClients := loadStoragePlugins(cfg, !cfg.PluginLog)
+
 	// Get the pointer to the old clients map *before* swapping
 	oldClientsPtr := pluginClients.Load()
 	oldMiddlewareClientsPtr := middlewarePluginClients.Load()
+	oldContentClientsPtr := contentPluginClients.Load()
+	oldStorageClientsPtr := storagePluginClients.Load()
 
 	closeLoadedPlugins()
 
@@ -414,11 +482,17 @@ func LoadPlugins() {
 
 	// Atomically swap for Auth
 	AuthPlugins.Store(&newAuthPlugins)
+	authCredentials.Store(&newAuthCredentials)
 	AuthSecurityDefinitions.Store(&newAuthSecurityDefinitions)
 	setAuthPluginOrder(newAuthPlugins)
 
 	MiddlewarePlugins.Store(&newMiddlewarePlugins)
 	middlewarePluginClients.Store(&newMiddlewarePluginClients)
+	contentPlugins.Store(&newContentPlugins)
+	contentPluginClients.Store(&newContentClients)
+	storagePlugins.Store(&newStoragePlugins)
+	storagePluginClients.Store(&newStorageClients)
+	publishStorage()
 
 	// Swap the plugin clients
 	pluginClients.Store(&newPluginClients)
@@ -443,6 +517,26 @@ func LoadPlugins() {
 				client.Kill()
 			}
 			stdlog.Printf("Finished stopping old middleware plugin clients.")
+		}
+	}
+	if oldContentClientsPtr != nil {
+		oldContentClients := *oldContentClientsPtr
+		if len(oldContentClients) > 0 {
+			stdlog.Printf("Stopping %d old content plugin client(s)...", len(oldContentClients))
+			for name, client := range oldContentClients {
+				stdlog.Printf("Stopping content plugin client for: %s", name)
+				client.Kill()
+			}
+		}
+	}
+	if oldStorageClientsPtr != nil {
+		oldStorageClients := *oldStorageClientsPtr
+		if len(oldStorageClients) > 0 {
+			stdlog.Printf("Stopping %d old storage plugin client(s)...", len(oldStorageClients))
+			for name, client := range oldStorageClients {
+				stdlog.Printf("Stopping storage plugin client for: %s", name)
+				client.Kill()
+			}
 		}
 	}
 }

@@ -623,6 +623,187 @@ func TestTableGet_LimitOffset(t *testing.T) {
 	}
 }
 
+func TestTableGet_ExactCountIgnoresLimit(t *testing.T) {
+	uri := "sqlite://:memory:"
+	plugin := &sqlitePlugin{}
+	if err := plugin.InitConnection(uri); err != nil {
+		t.Fatalf("InitConnection failed: %v", err)
+	}
+	db, err := openInMemoryDB(uri)
+	if err != nil {
+		t.Fatalf("openInMemoryDB failed: %v", err)
+	}
+	plugin.db = db
+	if err := initTestDB(plugin.db); err != nil {
+		t.Fatalf("initTestDB failed: %v", err)
+	}
+	_, err = plugin.db.Exec(`
+		INSERT INTO users (name, update_field) VALUES
+		('Alice', 'keep'),
+		('Bob', 'keep'),
+		('Charlie', 'keep'),
+		('Dave', 'drop')
+	`)
+	if err != nil {
+		t.Fatalf("Insert failed: %v", err)
+	}
+
+	where := map[string]any{"update_field": map[string]any{"=": "keep"}}
+	ctx := map[string]any{
+		"timezone": "UTC",
+		"prefer":   map[string]any{"count": "exact"},
+	}
+	results, out, err := plugin.TableGet("testuser", "users", []string{"name"}, where, []string{"name"}, nil, 1, 0, ctx)
+	if err != nil {
+		t.Fatalf("TableGet failed: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("page size = %d, want 1", len(results))
+	}
+	if out["total"] != int64(3) {
+		t.Fatalf("total = %#v, want 3 filtered rows", out["total"])
+	}
+	if out["timezone"] != "UTC" {
+		t.Fatalf("returned ctx dropped timezone: %#v", out["timezone"])
+	}
+
+	ignored, out, err := plugin.TableGet("testuser", "users", []string{"name"}, where, nil, nil, 1, 0, map[string]any{
+		"prefer": map[string]any{"count": "nope"},
+	})
+	if err != nil {
+		t.Fatalf("unknown count: %v", err)
+	}
+	if len(ignored) != 1 {
+		t.Fatalf("unknown count page = %d", len(ignored))
+	}
+	if out != nil {
+		t.Fatalf("unknown count must not add total, ctx %#v", out)
+	}
+}
+
+func TestSqliteStatTotal(t *testing.T) {
+	n, ok := sqliteStatTotal("4")
+	if !ok || n != 4 {
+		t.Fatalf("table stat = %d ok=%v", n, ok)
+	}
+	n, ok = sqliteStatTotal("9 1 2")
+	if !ok || n != 9 {
+		t.Fatalf("index stat = %d ok=%v", n, ok)
+	}
+	if _, ok := sqliteStatTotal(""); ok {
+		t.Fatal("empty stat must be unknown")
+	}
+}
+
+func newUsersPlugin(t *testing.T) *sqlitePlugin {
+	t.Helper()
+	uri := "sqlite://:memory:"
+	plugin := &sqlitePlugin{}
+	if err := plugin.InitConnection(uri); err != nil {
+		t.Fatalf("InitConnection failed: %v", err)
+	}
+	db, err := openInMemoryDB(uri)
+	if err != nil {
+		t.Fatalf("openInMemoryDB failed: %v", err)
+	}
+	plugin.db = db
+	if err := initTestDB(plugin.db); err != nil {
+		t.Fatalf("initTestDB failed: %v", err)
+	}
+	_, err = plugin.db.Exec(`
+		INSERT INTO users (name, update_field) VALUES
+		('Alice', 'keep'),
+		('Bob', 'keep'),
+		('Charlie', 'keep'),
+		('Dave', 'drop')
+	`)
+	if err != nil {
+		t.Fatalf("Insert failed: %v", err)
+	}
+	return plugin
+}
+
+func TestTableGet_PlannedCountUsesStat1(t *testing.T) {
+	plugin := newUsersPlugin(t)
+	where := map[string]any{"update_field": map[string]any{"=": "keep"}}
+	results, out, err := plugin.TableGet("testuser", "users", []string{"name"}, where, nil, nil, 1, 0, map[string]any{
+		"prefer": map[string]any{"count": "planned"},
+	})
+	if err != nil {
+		t.Fatalf("TableGet without stat1: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("page size = %d, want 1", len(results))
+	}
+	if out != nil {
+		t.Fatalf("missing sqlite_stat1 must omit total, ctx %#v", out)
+	}
+
+	if _, err := plugin.db.Exec(`ANALYZE`); err != nil {
+		t.Fatalf("ANALYZE: %v", err)
+	}
+	var stat string
+	if err := plugin.db.QueryRow(`SELECT stat FROM sqlite_stat1 WHERE tbl = 'users' AND idx IS NULL`).Scan(&stat); err != nil {
+		t.Fatalf("sqlite_stat1: %v", err)
+	}
+	want, ok := sqliteStatTotal(stat)
+	if !ok {
+		t.Fatalf("unreadable stat %q", stat)
+	}
+	results, out, err = plugin.TableGet("testuser", "users", []string{"name"}, where, nil, nil, 1, 0, map[string]any{
+		"prefer": map[string]any{"count": "planned"},
+	})
+	if err != nil {
+		t.Fatalf("TableGet planned: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("page size = %d, want 1", len(results))
+	}
+	if out["total"] != want {
+		t.Fatalf("total = %#v, want table stat %d", out["total"], want)
+	}
+	if want == 1 || want == 3 {
+		t.Fatalf("stat %d collapsed to the page or the filter", want)
+	}
+}
+
+func TestTableGet_EstimatedCountThreshold(t *testing.T) {
+	plugin := newUsersPlugin(t)
+	if _, err := plugin.db.Exec(`ANALYZE`); err != nil {
+		t.Fatalf("ANALYZE: %v", err)
+	}
+	var stat string
+	if err := plugin.db.QueryRow(`SELECT stat FROM sqlite_stat1 WHERE tbl = 'users' AND idx IS NULL`).Scan(&stat); err != nil {
+		t.Fatalf("sqlite_stat1: %v", err)
+	}
+	planned, ok := sqliteStatTotal(stat)
+	if !ok {
+		t.Fatalf("unreadable stat %q", stat)
+	}
+	where := map[string]any{"update_field": map[string]any{"=": "keep"}}
+
+	_, out, err := plugin.TableGet("testuser", "users", []string{"name"}, where, nil, nil, 1, 0, map[string]any{
+		"prefer": map[string]any{"count": "estimated"},
+	})
+	if err != nil {
+		t.Fatalf("estimated below default max: %v", err)
+	}
+	if out["total"] != int64(3) {
+		t.Fatalf("total = %#v, want exact 3 when the table estimate is below 10000", out["total"])
+	}
+
+	_, out, err = plugin.TableGet("testuser", "users", []string{"name"}, where, nil, nil, 1, 0, map[string]any{
+		"db_max_rows": int(planned),
+		"prefer":      map[string]any{"count": "estimated"},
+	})
+	if err != nil {
+		t.Fatalf("estimated at max: %v", err)
+	}
+	if out["total"] != planned {
+		t.Fatalf("total = %#v, want planned %d when it equals db_max_rows", out["total"], planned)
+	}
+}
+
 // TestTableGet_TimeFormat tests time formatting for different cases
 func TestTableGet_TimeFormat(t *testing.T) {
 	uri := "sqlite://:memory:"

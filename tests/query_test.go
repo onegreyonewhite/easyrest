@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -27,8 +26,7 @@ func (m *mockQueryPlugin) QueryCall(query string, ctx map[string]any) ([]map[str
 func TestQueryHandler(t *testing.T) {
 	defer server.StopPlugins()
 
-	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
-	server.ReloadConfig()
+	applyTestConfig(t, testSecretYAML(true))
 	router := server.SetupRouter()
 
 	config := server.GetConfig()

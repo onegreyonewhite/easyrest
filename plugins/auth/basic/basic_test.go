@@ -2,6 +2,7 @@ package basic
 
 import (
 	"encoding/base64"
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -17,11 +18,12 @@ func TestBasicAuthPlugin_Init(t *testing.T) {
 				"user2": "pass2",
 			},
 		}
-		schema, err := plugin.Init(settings)
+		info, err := plugin.Init(settings, easyrest.HostRPC{})
+		schema := info.Schema
 		require.NoError(t, err)
 		require.NotNil(t, schema)
-		assert.Equal(t, "http", schema["type"])
-		assert.Equal(t, "basic", schema["scheme"])
+		assert.Equal(t, "basic", schema["type"])
+		assert.NotContains(t, schema, "scheme")
 		assert.Equal(t, settings["userlist"], plugin.userlist)
 	})
 
@@ -34,11 +36,12 @@ func TestBasicAuthPlugin_Init(t *testing.T) {
 			},
 		}
 		expectedUserlist := map[string]string{"user1": "pass1", "user2": "pass2"}
-		schema, err := plugin.Init(settings)
+		info, err := plugin.Init(settings, easyrest.HostRPC{})
+		schema := info.Schema
 		require.NoError(t, err)
 		require.NotNil(t, schema)
-		assert.Equal(t, "http", schema["type"])
-		assert.Equal(t, "basic", schema["scheme"])
+		assert.Equal(t, "basic", schema["type"])
+		assert.NotContains(t, schema, "scheme")
 		assert.Equal(t, expectedUserlist, plugin.userlist)
 	})
 
@@ -49,7 +52,7 @@ func TestBasicAuthPlugin_Init(t *testing.T) {
 				"user1": 123, // Non-string password
 			},
 		}
-		_, err := plugin.Init(settings)
+		_, err := plugin.Init(settings, easyrest.HostRPC{})
 		require.Error(t, err)
 		assert.EqualError(t, err, "userlist contains non-string password for user user1")
 	})
@@ -57,7 +60,7 @@ func TestBasicAuthPlugin_Init(t *testing.T) {
 	t.Run("Initialization with missing userlist", func(t *testing.T) {
 		plugin := &BasicAuthPlugin{}
 		settings := map[string]any{}
-		_, err := plugin.Init(settings)
+		_, err := plugin.Init(settings, easyrest.HostRPC{})
 		require.Error(t, err)
 		assert.EqualError(t, err, "userlist is required and must be a map[string]string or map[string]any (with string values)")
 	})
@@ -67,7 +70,7 @@ func TestBasicAuthPlugin_Init(t *testing.T) {
 		settings := map[string]any{
 			"userlist": "not-a-map",
 		}
-		_, err := plugin.Init(settings)
+		_, err := plugin.Init(settings, easyrest.HostRPC{})
 		require.Error(t, err)
 		assert.EqualError(t, err, "userlist is required and must be a map[string]string or map[string]any (with string values)")
 	})
@@ -77,7 +80,7 @@ func TestBasicAuthPlugin_Init(t *testing.T) {
 		settings := map[string]any{
 			"userlist": map[string]string{},
 		}
-		_, err := plugin.Init(settings)
+		_, err := plugin.Init(settings, easyrest.HostRPC{})
 		require.Error(t, err)
 		assert.EqualError(t, err, "userlist cannot be empty")
 	})
@@ -89,7 +92,7 @@ func TestBasicAuthPlugin_Authenticate(t *testing.T) {
 		"testuser":  "testpass",
 		"testuser2": "anotherpass",
 	}
-	_, err := plugin.Init(map[string]any{"userlist": userlist})
+	_, err := plugin.Init(map[string]any{"userlist": userlist}, easyrest.HostRPC{})
 	require.NoError(t, err)
 
 	validCreds := base64.StdEncoding.EncodeToString([]byte("testuser:testpass"))
@@ -207,7 +210,7 @@ func TestBasicAuthPlugin_Authenticate(t *testing.T) {
 		colonPassList := map[string]string{
 			"usercolpass": "pass:word",
 		}
-		_, initErr := pluginWithColonPass.Init(map[string]any{"userlist": colonPassList})
+		_, initErr := pluginWithColonPass.Init(map[string]any{"userlist": colonPassList}, easyrest.HostRPC{})
 		require.NoError(t, initErr)
 
 		credsWithColonInPass := base64.StdEncoding.EncodeToString([]byte("usercolpass:pass:word"))

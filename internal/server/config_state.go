@@ -1,6 +1,7 @@
 package server
 
 import (
+	stdlog "log"
 	"sync"
 	"sync/atomic"
 
@@ -10,6 +11,10 @@ import (
 var (
 	cfgPtr  atomic.Pointer[config.Config]
 	cfgOnce sync.Once
+
+	appMu       sync.Mutex
+	appOverride string
+	appFiles    []string
 )
 
 // schemaCache caches GetSchema results per dbKey.
@@ -24,7 +29,11 @@ func ensureConfig() *config.Config {
 	}
 	cfgOnce.Do(func() {
 		if cfgPtr.Load() == nil {
-			loaded := config.Load()
+			loaded, err := config.Load(nil, "")
+			if err != nil {
+				stdlog.Printf("load default config: %v", err)
+				loaded = config.Config{}
+			}
 			cfgPtr.Store(&loaded)
 		}
 	})
@@ -53,9 +62,40 @@ func clearSchemaCache() {
 	schemaCacheMutex.Unlock()
 }
 
-func ReloadConfig() {
-	loaded := config.Load()
-	cfgPtr.Store(&loaded)
+// SetupApplication loads config files, overlays overrideYAML, swaps the global
+// config, and reloads plugins. It does not rebuild the HTTP router.
+func SetupApplication(overrideYAML string, configFiles []string) error {
+	loaded, err := config.Load(configFiles, overrideYAML)
+	if err != nil {
+		return err
+	}
+	if err := validateRestHandlers(&loaded); err != nil {
+		return err
+	}
+	files := append([]string(nil), configFiles...)
+	appMu.Lock()
+	appOverride = overrideYAML
+	appFiles = files
+	appMu.Unlock()
+
+	SetConfig(loaded)
 	clearSchemaCache()
 	ResetClaimsCache()
+	LoadPlugins()
+	return nil
+}
+
+func reloadApplication() error {
+	appMu.Lock()
+	override := appOverride
+	files := append([]string(nil), appFiles...)
+	appMu.Unlock()
+	return SetupApplication(override, files)
+}
+
+// ReloadConfig reloads the last SetupApplication inputs.
+func ReloadConfig() {
+	if err := reloadApplication(); err != nil {
+		stdlog.Printf("reload config: %v", err)
+	}
 }

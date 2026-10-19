@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -28,7 +29,6 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
-	"go.opentelemetry.io/otel/exporters/zipkin"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -37,6 +37,22 @@ import (
 )
 
 type contextKey string
+
+// routeMount adds routes on every router build, including a SIGHUP reload.
+type routeMount func(chi.Router)
+
+var routeHook atomic.Pointer[routeMount]
+
+// SetRoutes stores the function buildRouter calls after the built-in routes.
+// A nil mount clears the hook. The function runs again on every rebuild.
+func SetRoutes(mount func(chi.Router)) {
+	if mount == nil {
+		routeHook.Store(nil)
+		return
+	}
+	wrapped := routeMount(mount)
+	routeHook.Store(&wrapped)
+}
 
 const TokenClaimsKey contextKey = "tokenClaims"
 const requestPluginHeadersKey contextKey = "pluginHeaders"
@@ -72,8 +88,12 @@ func pluginHeadersFromRequest(r *http.Request) map[string]any {
 
 // BuildPluginContext extracts context variables from the HTTP request.
 func BuildPluginContext(r *http.Request) map[string]any {
+	return buildPluginContext(r, strings.ToLower(chi.URLParam(r, "db")), chi.URLParam(r, "table"), chi.URLParam(r, "func"))
+}
+
+func buildPluginContext(r *http.Request, dbKey, table, fn string) map[string]any {
 	cfg := currentConfig()
-	dbKey := strings.ToLower(chi.URLParam(r, "db"))
+	dbKey = strings.ToLower(dbKey)
 	dbConfig := cfg.PluginMap[dbKey]
 	headers := pluginHeadersFromRequest(r)
 	claims := getTokenClaims(r)
@@ -109,8 +129,11 @@ func BuildPluginContext(r *http.Request) map[string]any {
 	}
 
 	prefer["tx"] = tx
+	if _, ok := prefer["count"]; !ok && knownCountMode(dbConfig.DbPreferCount) {
+		prefer["count"] = dbConfig.DbPreferCount
+	}
 
-	pluginCtx := make(map[string]any, 14+len(r.Cookies()))
+	pluginCtx := make(map[string]any, 15+len(r.Cookies()))
 	pluginCtx["timezone"] = timezone
 	pluginCtx["headers"] = headers
 	pluginCtx["claims"] = plainClaims
@@ -119,10 +142,11 @@ func BuildPluginContext(r *http.Request) map[string]any {
 	pluginCtx["path"] = r.URL.Path
 	pluginCtx["query"] = r.URL.RawQuery
 	pluginCtx["prefer"] = prefer
-	if table := chi.URLParam(r, "table"); table != "" {
+	pluginCtx["db_max_rows"] = dbConfig.DbMaxRows
+	if table != "" {
 		pluginCtx[easyrest.CtxTable] = table
 	}
-	if fn := chi.URLParam(r, "func"); fn != "" {
+	if fn != "" {
 		pluginCtx[easyrest.CtxFunction] = fn
 	}
 	// Add cookies as individual keys "cookie.[name]"
@@ -154,7 +178,79 @@ func BuildPluginContext(r *http.Request) map[string]any {
 	}
 	pluginCtx["client_ip"] = clientIP
 	pluginCtx[easyrest.CtxDBType] = easyrest.DBTypeFromURI(dbConfig.Uri)
+	pluginCtx["request"] = requestPublic(r)
 	return pluginCtx
+}
+
+func requestPublic(r *http.Request) map[string]any {
+	forwarded := forwardedParams(r.Header.Get("Forwarded"))
+	// tls_enabled is the public scheme for this listener. A server request leaves URL.Scheme empty, and a proxy proto must not change it.
+	var scheme string
+	if currentConfig().TLSEnabled {
+		scheme = "https"
+	} else {
+		scheme = firstHeaderToken(r.Header.Get("X-Forwarded-Proto"))
+		if scheme == "" {
+			scheme = forwarded["proto"]
+		}
+		if scheme == "" {
+			scheme = r.URL.Scheme
+		}
+		if scheme == "" {
+			scheme = "http"
+		}
+	}
+	host := firstHeaderToken(r.Header.Get("X-Forwarded-Host"))
+	if host == "" {
+		host = forwarded["host"]
+	}
+	if host == "" {
+		host = r.Header.Get("Host")
+	}
+	if host == "" {
+		host = r.Host
+	}
+	request := map[string]any{
+		"scheme": scheme,
+		"host":   host,
+		"prefix": requestPrefix(r.Header.Get("X-Forwarded-Prefix")),
+	}
+	if value := r.Header.Get("X-Forwarded-For"); value != "" {
+		request["forwarded_for"] = value
+	}
+	if value := r.Header.Get("X-Real-IP"); value != "" {
+		request["real_ip"] = value
+	}
+	if value := r.Header.Get("Via"); value != "" {
+		request["via"] = value
+	}
+	return request
+}
+
+func requestPrefix(value string) string {
+	prefix := strings.Trim(strings.TrimSpace(value), "/")
+	if prefix == "" {
+		return ""
+	}
+	return "/" + prefix
+}
+
+func firstHeaderToken(value string) string {
+	token, _, _ := strings.Cut(value, ",")
+	return strings.TrimSpace(token)
+}
+
+func forwardedParams(header string) map[string]string {
+	element, _, _ := strings.Cut(header, ",")
+	out := map[string]string{}
+	for param := range strings.SplitSeq(element, ";") {
+		key, value, ok := strings.Cut(param, "=")
+		if !ok {
+			continue
+		}
+		out[strings.ToLower(strings.TrimSpace(key))] = strings.Trim(strings.TrimSpace(value), `"`)
+	}
+	return out
 }
 
 // AccessLogMiddleware logs incoming HTTP requests if enabled.
@@ -176,10 +272,10 @@ func Authenticate(r *http.Request) (string, *http.Request, error) {
 		return extractUserIDFromClaims(existingClaims, currentConfig().TokenUserSearch), r, nil
 	}
 
-	authHeaderValue := r.Header.Get("Authorization")
+	authHeaderValue := authCacheKey(r)
 	cfg := currentConfig()
 
-	// Check cache for claims and user_id using the raw Authorization header value as key
+	// Check cache for claims and user_id using every declared credential.
 	if claimsCache != nil && authHeaderValue != "" {
 		if cached, found := claimsCache.Get(authHeaderValue); found {
 			if entry, ok := cached.(claimsCacheEntry); ok {
@@ -189,46 +285,109 @@ func Authenticate(r *http.Request) (string, *http.Request, error) {
 		}
 	}
 
-	authPlugins := AuthPlugins.Load()
-	claims := jwt.MapClaims{}
-	authorized := false
-	var authErr error
-
-	headersForPlugin, pluginHeaders := buildRequestHeaderMaps(r.Header)
-	pluginMethod := r.Method
-	pluginPath := r.URL.Path
-	pluginQuery := r.URL.RawQuery
-
-	for _, pluginName := range authPluginOrderSnapshot() {
-		plugin := (*authPlugins)[pluginName]
-		pluginClaims, err := plugin.Authenticate(headersForPlugin, pluginMethod, pluginPath, pluginQuery)
-		if err == nil {
-			maps.Copy(claims, pluginClaims)
-			authorized = true
-			break
-		}
-		authErr = fmt.Errorf("plugin %s: %w", pluginName, err)
-	}
-
-	if !authorized {
+	tried := tryAuthPlugins(r, nil)
+	if !tried.ok {
 		if len(cfg.AnonClaims) > 0 {
 			claims := jwt.MapClaims{}
 			maps.Copy(claims, cfg.AnonClaims)
 			r = r.WithContext(context.WithValue(r.Context(), TokenClaimsKey, claims))
 			return "", r, nil
 		}
-		return "", r, fmt.Errorf("authentication failed: %w", authErr)
+		return "", r, fmt.Errorf("authentication failed: %w", tried.err)
 	}
 
-	ctx := context.WithValue(r.Context(), TokenClaimsKey, claims)
-	ctx = context.WithValue(ctx, requestPluginHeadersKey, pluginHeaders)
-	r = r.WithContext(ctx)
-	userID := extractUserIDFromClaims(claims, cfg.TokenUserSearch)
-	// Store in cache using the raw Authorization header value as key
-	if claimsCache != nil {
-		claimsCache.SetDefault(authHeaderValue, claimsCacheEntry{Claims: claims, UserID: userID})
+	userID, r := applyAuthSuccess(r, tried.claims, tried.headers)
+	// Store in cache using every declared credential as the key
+	if claimsCache != nil && authHeaderValue != "" {
+		claimsCache.SetDefault(authHeaderValue, claimsCacheEntry{Claims: tried.claims, UserID: userID})
 	}
 	return userID, r, nil
+}
+
+func authenticateAllowed(r *http.Request, names []string, appAnon map[string]any) (string, *http.Request, error) {
+	if len(names) == 0 {
+		return finishAnon(r, appAnon, true)
+	}
+	allow := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		allow[name] = struct{}{}
+	}
+	tried := tryAuthPlugins(r, allow)
+	if tried.ok {
+		userID, r := applyAuthSuccess(r, tried.claims, tried.headers)
+		return userID, r, nil
+	}
+	userID, r, err := finishAnon(r, appAnon, false)
+	if err != nil {
+		if tried.err != nil {
+			return "", r, fmt.Errorf("authentication failed: %w", tried.err)
+		}
+		return "", r, fmt.Errorf("authentication failed")
+	}
+	return userID, r, nil
+}
+
+// triedAuth is the first successful plugin, or the last plugin error.
+type triedAuth struct {
+	claims  jwt.MapClaims
+	headers map[string]any
+	err     error
+	ok      bool
+}
+
+// tryAuthPlugins tries plugins in trial order. A nil allow set tries every loaded plugin.
+func tryAuthPlugins(r *http.Request, allow map[string]struct{}) triedAuth {
+	loaded := AuthPlugins.Load()
+	headersForPlugin, pluginHeaders := authHeadersForPlugins(r)
+	if allow != nil && loaded == nil {
+		return triedAuth{headers: pluginHeaders}
+	}
+	var authErr error
+	for _, pluginName := range authPluginOrderSnapshot() {
+		if allow != nil {
+			if _, ok := allow[pluginName]; !ok {
+				continue
+			}
+		}
+		plugin := (*loaded)[pluginName]
+		if allow != nil && plugin == nil {
+			continue
+		}
+		pluginClaims, err := plugin.Authenticate(headersForPlugin, r.Method, r.URL.Path, r.URL.RawQuery)
+		if err != nil {
+			authErr = fmt.Errorf("plugin %s: %w", pluginName, err)
+			continue
+		}
+		claims := jwt.MapClaims{}
+		maps.Copy(claims, pluginClaims)
+		return triedAuth{claims: claims, headers: pluginHeaders, ok: true}
+	}
+	return triedAuth{headers: pluginHeaders, err: authErr}
+}
+
+func applyAuthSuccess(r *http.Request, claims jwt.MapClaims, headers map[string]any) (string, *http.Request) {
+	ctx := context.WithValue(r.Context(), TokenClaimsKey, claims)
+	ctx = context.WithValue(ctx, requestPluginHeadersKey, headers)
+	r = r.WithContext(ctx)
+	return extractUserIDFromClaims(claims, currentConfig().TokenUserSearch), r
+}
+
+func finishAnon(r *http.Request, appAnon map[string]any, allowEmpty bool) (string, *http.Request, error) {
+	claimsMap := appAnon
+	if claimsMap == nil {
+		claimsMap = currentConfig().AnonClaims
+	}
+	if len(claimsMap) == 0 && !allowEmpty {
+		return "", r, fmt.Errorf("authentication failed")
+	}
+	if len(claimsMap) == 0 {
+		r = r.WithContext(context.WithValue(r.Context(), TokenClaimsKey, jwt.MapClaims{}))
+		return "", r, nil
+	}
+	claims := jwt.MapClaims{}
+	maps.Copy(claims, claimsMap)
+	r = r.WithContext(context.WithValue(r.Context(), TokenClaimsKey, claims))
+	return extractUserIDFromClaims(claims, currentConfig().TokenUserSearch), r, nil
 }
 
 // proxyHeadersHandler wraps the original handler to process X-Forwarded-* headers
@@ -338,8 +497,14 @@ func clientIPMiddleware(cfg config.ServerConfig) func(http.Handler) http.Handler
 	}
 }
 
-// SetupRouter initializes the router and endpoints.
+// SetupRouter loads plugins and builds the router. Tests use this entry point.
 func SetupRouter() chi.Router {
+	LoadPlugins()
+	return buildRouter()
+}
+
+// buildRouter initializes the router and endpoints from the active config.
+func buildRouter() chi.Router {
 	cfg := GetConfig()
 	// Initialize claims cache with default expiration and cleanup interval
 	if claimsCache == nil && cfg.TokenCacheTTL > 0 {
@@ -347,10 +512,12 @@ func SetupRouter() chi.Router {
 		cleanupInterval := time.Duration(cfg.TokenCacheTTL) * time.Second * 10
 		claimsCache = cachepkg.New(defaultExpiration, cleanupInterval)
 	}
-	LoadPlugins()
 	r := chi.NewRouter()
 
 	chi.RegisterMethod("QUERY")
+
+	// Add recovery middleware
+	r.Use(middleware.Recoverer)
 
 	// Add CORS middleware first
 	if cfg.CORS.Enabled {
@@ -363,10 +530,10 @@ func SetupRouter() chi.Router {
 	r.Use(proxyHeadersHandler)
 
 	r.Use(middleware.GetHead)
-	r.Use(middleware.Recoverer)
 	r.Use(spanNameMiddleware)
 
 	// Schema endpoint.
+	r.Get("/", rootCatalogHandler)
 	r.Get("/api/{db}/", schemaHandler)
 	// Read-only SQL query endpoint.
 	r.Method("QUERY", "/api/{db}/", http.HandlerFunc(queryHandler))
@@ -391,6 +558,13 @@ func SetupRouter() chi.Router {
 	tables.Delete(tablePath, tableDelete)
 	// Add health check endpoint.
 	r.Get("/health", healthHandler)
+	mountRestAPI(r)
+	mountStorage(r)
+	publishRestAPI()
+	publishStorage()
+	if mount := routeHook.Load(); mount != nil && *mount != nil {
+		(*mount)(r)
+	}
 	return r
 }
 
@@ -401,9 +575,6 @@ func InitOtel(otelCfg config.OtelConfig) (shutdown func(context.Context) error, 
 		exp, err = otlptracegrpc.New(context.Background(), otlptracegrpc.WithEndpoint(otelCfg.Endpoint), otlptracegrpc.WithInsecure())
 	case "otlphttp":
 		exp, err = otlptracehttp.New(context.Background(), otlptracehttp.WithEndpoint(otelCfg.Endpoint))
-	case "zipkin":
-		stdlog.Printf("Initializing Zipkin tracer deprecated, use otlp instead")
-		exp, err = zipkin.New(otelCfg.Endpoint)
 	default:
 		return nil, fmt.Errorf("unsupported otel protocol: %s", otelCfg.Protocol)
 	}
@@ -422,9 +593,41 @@ func InitOtel(otelCfg config.OtelConfig) (shutdown func(context.Context) error, 
 	return tp.Shutdown, nil
 }
 
-// Run starts the HTTP server.
-func Run(conf config.Config) {
-	SetConfig(conf)
+type swapHandler struct {
+	current atomic.Pointer[http.Handler]
+}
+
+func (s *swapHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h := s.current.Load()
+	if h == nil || *h == nil {
+		http.Error(w, "server not ready", http.StatusServiceUnavailable)
+		return
+	}
+	(*h).ServeHTTP(w, r)
+}
+
+func (s *swapHandler) store(h http.Handler) {
+	s.current.Store(&h)
+}
+
+// LiveHandler builds the HTTP handler from the active config.
+// Run serves this handler and swaps it in again after SIGHUP.
+func LiveHandler() http.Handler {
+	return buildLiveHandler(GetConfig())
+}
+
+// buildLiveHandler builds the swappable request handler. Plugins are already loaded.
+func buildLiveHandler(cfg config.Config) http.Handler {
+	var handler http.Handler = buildRouter()
+	if cfg.AccessLogOn {
+		handler = AccessLogMiddleware(handler)
+	}
+	return handler
+}
+
+// Run starts the HTTP server from the configuration set by SetupApplication.
+func Run() {
+	conf := GetConfig()
 	var otelShutdown func(context.Context) error
 	if conf.Otel.Enabled {
 		var err error
@@ -433,11 +636,9 @@ func Run(conf config.Config) {
 			stdlog.Printf("Failed to initialize OpenTelemetry: %v", err)
 		}
 	}
-	router := SetupRouter()
-	var handler http.Handler = router
-	if conf.AccessLogOn {
-		handler = AccessLogMiddleware(handler)
-	}
+	swap := &swapHandler{}
+	swap.store(buildLiveHandler(conf))
+	var handler http.Handler = swap
 	if otelShutdown != nil {
 		handler = otelhttp.NewHandler(handler, "server-request")
 	}
@@ -485,6 +686,13 @@ func Run(conf config.Config) {
 	defer cancel()
 
 	// Run server in a goroutine
+	rpcLis, err := listenInternalRPC(conf.InternalRPC)
+	if err != nil {
+		stdlog.Fatalf("internal rpc: %v", err)
+	}
+	if rpcLis != nil {
+		go serveInternalRPC(rpcLis)
+	}
 	go func() {
 		if conf.TLSEnabled {
 			http2.ConfigureServer(srv, h2s)
@@ -508,10 +716,16 @@ func Run(conf config.Config) {
 		sig := <-sigChan
 		if sig == syscall.SIGHUP {
 			stdlog.Println("Received SIGHUP - reloading configuration")
-			ReloadConfig()
-			LoadPlugins()
+			if err := reloadApplication(); err != nil {
+				stdlog.Printf("reload config: %v", err)
+				continue
+			}
+			swap.store(buildLiveHandler(GetConfig()))
 		} else {
 			stdlog.Printf("Received signal %v - shutting down the server", sig)
+			if rpcLis != nil {
+				rpcLis.Close()
+			}
 			if err := srv.Shutdown(ctx); err != nil {
 				stdlog.Printf("Forced server shutdown due to error: %v", err)
 			}

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -21,8 +22,8 @@ type mockMiddlewarePlugin struct {
 	updateVal  any
 }
 
-func (m *mockMiddlewarePlugin) Init(settings map[string]any) error {
-	return nil
+func (m *mockMiddlewarePlugin) Init(map[string]any, easyrest.HostRPC) (easyrest.MiddlewareInfo, error) {
+	return easyrest.NewMiddlewareInfo(), nil
 }
 
 func (m *mockMiddlewarePlugin) PreRequest(dbKey string, ctx map[string]any) (map[string]any, *int, error) {
@@ -37,9 +38,7 @@ func (m *mockMiddlewarePlugin) PreRequest(dbKey string, ctx map[string]any) (map
 	}
 	if m.updateKey != "" {
 		updated := make(map[string]any, len(ctx)+1)
-		for k, v := range ctx {
-			updated[k] = v
-		}
+		maps.Copy(updated, ctx)
 		updated[m.updateKey] = m.updateVal
 		return updated, nil, nil
 	}
@@ -59,7 +58,9 @@ type recordingMiddlewarePlugin struct {
 	order *[]string
 }
 
-func (p *recordingMiddlewarePlugin) Init(settings map[string]any) error { return nil }
+func (p *recordingMiddlewarePlugin) Init(map[string]any, easyrest.HostRPC) (easyrest.MiddlewareInfo, error) {
+	return easyrest.NewMiddlewareInfo(), nil
+}
 
 func (p *recordingMiddlewarePlugin) PreRequest(dbKey string, ctx map[string]any) (map[string]any, *int, error) {
 	*p.order = append(*p.order, p.label)
@@ -241,7 +242,9 @@ type postHeaderPlugin struct {
 	err     error
 }
 
-func (p *postHeaderPlugin) Init(settings map[string]any) error { return nil }
+func (p *postHeaderPlugin) Init(map[string]any, easyrest.HostRPC) (easyrest.MiddlewareInfo, error) {
+	return easyrest.NewMiddlewareInfo(), nil
+}
 
 func (p *postHeaderPlugin) PreRequest(dbKey string, ctx map[string]any) (map[string]any, *int, error) {
 	return ctx, nil, nil
@@ -369,7 +372,9 @@ type countingPostPlugin struct {
 	postCalls  *int
 }
 
-func (p *countingPostPlugin) Init(settings map[string]any) error { return nil }
+func (p *countingPostPlugin) Init(map[string]any, easyrest.HostRPC) (easyrest.MiddlewareInfo, error) {
+	return easyrest.NewMiddlewareInfo(), nil
+}
 
 func (p *countingPostPlugin) PreRequest(dbKey string, ctx map[string]any) (map[string]any, *int, error) {
 	return ctx, p.failStatus, errTest("stop")
@@ -386,7 +391,9 @@ type headerOnFailPlugin struct {
 	ctxVal     any
 }
 
-func (p *headerOnFailPlugin) Init(settings map[string]any) error { return nil }
+func (p *headerOnFailPlugin) Init(map[string]any, easyrest.HostRPC) (easyrest.MiddlewareInfo, error) {
+	return easyrest.NewMiddlewareInfo(), nil
+}
 
 func (p *headerOnFailPlugin) PreRequest(dbKey string, ctx map[string]any) (map[string]any, *int, error) {
 	if ctx == nil {
@@ -585,11 +592,12 @@ func TestMiddlewareWriteHeader_StatusOverride(t *testing.T) {
 
 func TestMiddlewareRespondJSON_HeadersAndStatus(t *testing.T) {
 	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	ctx := map[string]any{
 		"response.status":  "418",
 		"response.headers": `[{"X-From-Sql":"1"}]`,
 	}
-	middlewareRespondJSON(w, "test", ctx, http.StatusOK, map[string]any{"ok": true})
+	middlewareRespondJSON(w, r, "test", ctx, http.StatusOK, map[string]any{"ok": true})
 	if w.Code != 418 {
 		t.Fatalf("status: %d", w.Code)
 	}
@@ -602,7 +610,9 @@ type statusCapturePlugin struct {
 	statuses []int
 }
 
-func (p *statusCapturePlugin) Init(settings map[string]any) error { return nil }
+func (p *statusCapturePlugin) Init(map[string]any, easyrest.HostRPC) (easyrest.MiddlewareInfo, error) {
+	return easyrest.NewMiddlewareInfo(), nil
+}
 
 func (p *statusCapturePlugin) PreRequest(dbKey string, ctx map[string]any) (map[string]any, *int, error) {
 	return ctx, nil, nil
@@ -632,7 +642,7 @@ func TestSetHandlerStatus_VisibleInPostRequest(t *testing.T) {
 
 	w = httptest.NewRecorder()
 	ctx = map[string]any{}
-	middlewareHTTPError(w, "test", ctx, "boom", http.StatusBadRequest)
+	middlewareHTTPError(w, r, "test", ctx, "boom", http.StatusBadRequest)
 	if len(plug.statuses) != 2 || plug.statuses[1] != http.StatusBadRequest {
 		t.Fatalf("error: %#v", plug.statuses)
 	}
@@ -646,7 +656,7 @@ func TestSetHandlerStatus_VisibleInPostRequest(t *testing.T) {
 
 	w = httptest.NewRecorder()
 	ctx = map[string]any{}
-	middlewareRespondJSON(w, "test", ctx, http.StatusCreated, map[string]any{"ok": true})
+	middlewareRespondJSON(w, r, "test", ctx, http.StatusCreated, map[string]any{"ok": true})
 	if len(plug.statuses) != 4 || plug.statuses[3] != http.StatusCreated {
 		t.Fatalf("respond json: %#v", plug.statuses)
 	}

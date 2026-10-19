@@ -42,6 +42,7 @@ type Store interface {
 
 // Plugin is an ETag middleware that stores version tokens in a Store.
 type Plugin struct {
+	host         easyrest.HostRPC
 	store        Store
 	ttl          time.Duration
 	invalidation map[string]map[string][]string
@@ -53,7 +54,15 @@ func New(store Store) *Plugin {
 }
 
 // Init reads uri, ttl (default 24h), and invalidation_map, then opens the store.
-func (p *Plugin) Init(settings map[string]any) error {
+func (p *Plugin) Init(settings map[string]any, host easyrest.HostRPC) (easyrest.MiddlewareInfo, error) {
+	p.host = host
+	if err := p.initSettings(settings); err != nil {
+		return easyrest.MiddlewareInfo{}, err
+	}
+	return easyrest.NewMiddlewareInfo(), nil
+}
+
+func (p *Plugin) initSettings(settings map[string]any) error {
 	if p.store == nil {
 		return errors.New("cache store is required")
 	}
@@ -218,7 +227,7 @@ func representationWeak(fingerprint string) bool {
 		if !ok {
 			continue
 		}
-		if key == "Accept" && val == contentTypeNDJSON {
+		if key == "Accept" && (val == contentTypeNDJSON || val == easyrest.MediaTypeCSV) {
 			return true
 		}
 		if key == "Range" && val != "" {

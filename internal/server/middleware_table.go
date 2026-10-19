@@ -59,7 +59,7 @@ func requirePluginMiddleware(spec resourceSpec) func(http.Handler) http.Handler 
 			if spec.allow != nil {
 				allow = spec.allow(prePluginCfg)
 			}
-			dbPlug, cfg, pluginCfg, ok := resolveDBPlugin(w, bag.dbKey, bag.resource, exclude, allow, spec.reserved)
+			dbPlug, cfg, pluginCfg, ok := resolveDBPlugin(w, r, bag.dbKey, bag.resource, exclude, allow, spec.reserved)
 			if !ok {
 				return
 			}
@@ -107,8 +107,18 @@ func tablePreRequestMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		bag := apiRequestFrom(r)
 		pluginCtx := BuildPluginContext(r)
-		typ, _ := negotiateResponseType(r, bag.query)
-		bag.respType = typ
+		var defaults []string
+		if bag.cfg != nil {
+			defaults = bag.cfg.DefaultContentHandlers
+		}
+		names := contentHandlerNames(nil, nil, bag.pluginCfg.ContentHandlers, defaults)
+		bag.content = negotiateContent(r, bag.query, contentRefsNamed(names))
+		if bag.content.Renderer.RenderMedia != "" {
+			bag.respType = bag.content.Renderer.RenderMedia
+		} else {
+			bag.respType = easyrest.MediaTypeJSON
+		}
+		typ := bag.respType
 		if len(middlewareChain(bag.dbKey)) > 0 {
 			pluginCtx[easyrest.CtxCacheETagVariant] = cacheVaryFingerprint(typ, r, pluginCtx)
 		}
@@ -191,5 +201,5 @@ func preferFingerprint(pluginCtx map[string]any) string {
 
 func tableMethodNotAllowed(w http.ResponseWriter, r *http.Request) {
 	bag := apiRequestFrom(r)
-	middlewareHTTPError(w, bag.dbKey, bag.pluginCtx, "Method not allowed", http.StatusMethodNotAllowed)
+	middlewareHTTPError(w, r, bag.dbKey, bag.pluginCtx, "Method not allowed", http.StatusMethodNotAllowed)
 }

@@ -32,6 +32,7 @@ type apiRequest struct {
 	pluginCtx map[string]any
 	query     url.Values
 	respType  string
+	content   contentChoice
 	isPublic  bool
 }
 

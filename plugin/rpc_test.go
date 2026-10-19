@@ -2,10 +2,13 @@ package plugin
 
 import (
 	"errors"
+	"math"
 	"net"
 	"net/rpc"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	goplugin "github.com/hashicorp/go-plugin"
 )
@@ -93,11 +96,11 @@ type stubMiddlewarePlugin struct {
 	postHeaders      map[string]string
 }
 
-func (s *stubMiddlewarePlugin) Init(settings map[string]any) error {
+func (s *stubMiddlewarePlugin) Init(map[string]any, HostRPC) (MiddlewareInfo, error) {
 	if s.failInit {
-		return errors.New("middleware init failed")
+		return MiddlewareInfo{}, errors.New("middleware init failed")
 	}
-	return nil
+	return NewMiddlewareInfo(), nil
 }
 
 func (s *stubMiddlewarePlugin) PreRequest(dbKey string, ctx map[string]any) (map[string]any, *int, error) {
@@ -122,12 +125,12 @@ type stubAuthPlugin struct {
 	failAuth bool
 }
 
-func (s *stubAuthPlugin) Init(settings map[string]any) (map[string]any, error) {
+func (s *stubAuthPlugin) Init(map[string]any, HostRPC) (AuthInfo, error) {
 	schema := map[string]any{"type": "apiKey", "name": "Authorization"}
 	if s.failInit {
-		return schema, errors.New("auth init failed")
+		return NewAuthInfo(schema), errors.New("auth init failed")
 	}
-	return schema, nil
+	return NewAuthInfo(schema), nil
 }
 
 func (s *stubAuthPlugin) Authenticate(headers map[string]string, method, path, query string) (map[string]any, error) {
@@ -135,6 +138,38 @@ func (s *stubAuthPlugin) Authenticate(headers map[string]string, method, path, q
 		return nil, errors.New("auth failed")
 	}
 	return map[string]any{"sub": "user1", "method": method}, nil
+}
+
+type stubContentPlugin struct {
+	ContentBase
+	failInit   bool
+	failParse  bool
+	failRender bool
+	badRender  bool
+}
+
+func (s *stubContentPlugin) Init(map[string]any) (ContentInfo, error) {
+	if s.failInit {
+		return ContentInfo{}, errors.New("content init failed")
+	}
+	return NewContentInfo(MediaTypeJSON, MediaTypeJSON, "json"), nil
+}
+
+func (s *stubContentPlugin) Parse(body []byte, ctx map[string]any) (any, map[string]any, error) {
+	if s.failParse {
+		return nil, ctx, errors.New("parse failed")
+	}
+	return map[string]any{"body": string(body)}, ctx, nil
+}
+
+func (s *stubContentPlugin) Render(data any, ctx map[string]any) (any, map[string]any, error) {
+	if s.failRender {
+		return nil, ctx, errors.New("render failed")
+	}
+	if s.badRender {
+		return 1, ctx, nil
+	}
+	return []byte("ok"), ctx, nil
 }
 
 func startRPCServer(t *testing.T, rcvr any) (*rpc.Client, func()) {
@@ -148,9 +183,7 @@ func startRPCServer(t *testing.T, rcvr any) (*rpc.Client, func()) {
 		t.Fatalf("Listen: %v", err)
 	}
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
@@ -158,7 +191,7 @@ func startRPCServer(t *testing.T, rcvr any) (*rpc.Client, func()) {
 			}
 			go srv.ServeConn(conn)
 		}
-	}()
+	})
 	client, err := rpc.Dial("tcp", ln.Addr().String())
 	if err != nil {
 		ln.Close()
@@ -350,7 +383,7 @@ func TestMiddlewarePluginRPC_SuccessAndError(t *testing.T) {
 	defer cleanup()
 	mw := &MiddlewarePluginRPC{client: client}
 
-	if err := mw.Init(map[string]any{"k": "v"}); err != nil {
+	if _, err := mw.Init(map[string]any{"k": "v"}, HostRPC{}); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 	ctx, status, err := mw.PreRequest("test", map[string]any{"method": "GET"})
@@ -359,7 +392,7 @@ func TestMiddlewarePluginRPC_SuccessAndError(t *testing.T) {
 	}
 
 	impl.failInit = true
-	if err := mw.Init(nil); err == nil {
+	if _, err := mw.Init(nil, HostRPC{}); err == nil {
 		t.Fatal("expected Init error")
 	}
 	impl.failInit = false
@@ -393,7 +426,7 @@ func TestMiddlewarePluginRPC_ClientCallFailure(t *testing.T) {
 	client, cleanup := startRPCServer(t, &MiddlewarePluginRPCServer{Impl: &stubMiddlewarePlugin{}})
 	cleanup()
 	mw := &MiddlewarePluginRPC{client: client}
-	if err := mw.Init(nil); err == nil {
+	if _, err := mw.Init(nil, HostRPC{}); err == nil {
 		t.Fatal("expected Init RPC error")
 	}
 	if _, _, err := mw.PreRequest("test", nil); err == nil {
@@ -410,7 +443,8 @@ func TestAuthPluginRPC_SuccessAndError(t *testing.T) {
 	defer cleanup()
 	auth := &AuthPluginRPC{client: client}
 
-	schema, err := auth.Init(map[string]any{"k": "v"})
+	info, err := auth.Init(map[string]any{"k": "v"}, HostRPC{})
+	schema := info.Schema
 	if err != nil || schema["type"] != "apiKey" {
 		t.Fatalf("Init: %v %v", schema, err)
 	}
@@ -420,7 +454,8 @@ func TestAuthPluginRPC_SuccessAndError(t *testing.T) {
 	}
 
 	impl.failInit = true
-	schema, err = auth.Init(nil)
+	info, err = auth.Init(nil, HostRPC{})
+	schema = info.Schema
 	if err == nil || schema["type"] != "apiKey" {
 		t.Fatalf("Init with error should still return schema: %v %v", schema, err)
 	}
@@ -435,7 +470,7 @@ func TestAuthPluginRPC_ClientCallFailure(t *testing.T) {
 	client, cleanup := startRPCServer(t, &AuthPluginRPCServer{Impl: &stubAuthPlugin{}})
 	cleanup()
 	auth := &AuthPluginRPC{client: client}
-	if _, err := auth.Init(nil); err == nil {
+	if _, err := auth.Init(nil, HostRPC{}); err == nil {
 		t.Fatal("expected Init RPC error")
 	}
 	if _, err := auth.Authenticate(nil, "GET", "/", ""); err == nil {
@@ -486,6 +521,160 @@ func TestPluginBrokerConstructors(t *testing.T) {
 	clientObj, err = mwP.Client(broker, cli)
 	if err != nil || clientObj == nil {
 		t.Fatalf("MiddlewarePluginPlugin.Client: %v %v", clientObj, err)
+	}
+
+	contentP := &ContentPluginPlugin{Impl: &stubContentPlugin{}}
+	srv, err = contentP.Server(broker)
+	if err != nil || srv == nil {
+		t.Fatalf("ContentPluginPlugin.Server: %v %v", srv, err)
+	}
+	clientObj, err = contentP.Client(broker, cli)
+	if err != nil || clientObj == nil {
+		t.Fatalf("ContentPluginPlugin.Client: %v %v", clientObj, err)
+	}
+}
+
+func TestContentPluginRPC_RoundTrip(t *testing.T) {
+	impl := &stubContentPlugin{}
+	client, cleanup := startRPCServer(t, &ContentPluginRPCServer{Impl: impl})
+	defer cleanup()
+	plug := &ContentPluginRPC{client: client}
+
+	info, err := plug.Init(map[string]any{"k": "v"})
+	if err != nil || info.RenderMedia != MediaTypeJSON || info.ParserMedia != MediaTypeJSON || info.Format != "json" {
+		t.Fatalf("Init %+v %v", info, err)
+	}
+	if info.Metadata == nil || info.Ctx == nil {
+		t.Fatalf("meta %#v ctx %#v", info.Metadata, info.Ctx)
+	}
+	value, ctx, err := plug.Parse([]byte(`{"a":1}`), map[string]any{"n": "1"})
+	row, _ := value.(map[string]any)
+	if err != nil || row["body"] != `{"a":1}` || ctx["n"] != "1" {
+		t.Fatalf("Parse %#v %#v %v", value, ctx, err)
+	}
+	rendered, ctx, err := plug.Render(map[string]any{"a": "1"}, map[string]any{"n": "1"})
+	body, _ := rendered.([]byte)
+	if err != nil || string(body) != "ok" || ctx["n"] != "1" {
+		t.Fatalf("Render %#v %#v %v", rendered, ctx, err)
+	}
+	windows, repeat := plug.PrepareGet(0, 3, 10)
+	if repeat || len(windows) != 1 || windows[0].Limit != 10 || windows[0].Offset != 3 {
+		t.Fatalf("PrepareGet %+v %v", windows, repeat)
+	}
+	chunks := plug.PrepareCreate(map[string]any{"a": "1"}, 2)
+	if len(chunks) != 1 {
+		t.Fatalf("PrepareCreate %#v", chunks)
+	}
+
+	impl.failInit = true
+	if _, err = plug.Init(nil); err == nil {
+		t.Fatal("expected Init error")
+	}
+	impl.failInit = false
+	impl.failParse = true
+	if _, _, err = plug.Parse(nil, nil); err == nil {
+		t.Fatal("expected Parse error")
+	}
+	impl.failParse = false
+	impl.failRender = true
+	if _, _, err = plug.Render(nil, nil); err == nil {
+		t.Fatal("expected Render error")
+	}
+	impl.failRender = false
+	impl.badRender = true
+	if _, _, err = plug.Render(nil, nil); err == nil {
+		t.Fatal("expected Render type error")
+	}
+}
+
+type fixedParsePlugin struct {
+	ContentBase
+	value any
+}
+
+func (p *fixedParsePlugin) Init(map[string]any) (ContentInfo, error) {
+	return NewContentInfo(MediaTypeJSON, MediaTypeJSON, "json"), nil
+}
+
+func (p *fixedParsePlugin) Parse([]byte, map[string]any) (any, map[string]any, error) {
+	return p.value, map[string]any{}, nil
+}
+
+func TestContentPluginRPC_GobScalars(t *testing.T) {
+	when := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+	impl := &fixedParsePlugin{value: map[string]any{
+		"u":    uint64(9),
+		"i":    int64(-3),
+		"f":    1.5,
+		"b":    true,
+		"s":    "ada",
+		"n":    nil,
+		"nest": map[string]any{"k": "v"},
+		"list": []any{"x", int64(2)},
+		"when": when,
+		"raw":  []byte("hi"),
+	}}
+	client, cleanup := startRPCServer(t, &ContentPluginRPCServer{Impl: impl})
+	defer cleanup()
+	plug := &ContentPluginRPC{client: client}
+
+	value, _, err := plug.Parse(nil, nil)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	row, ok := value.(map[string]any)
+	if !ok {
+		t.Fatalf("value %#v", value)
+	}
+	if row["u"] != uint64(9) || row["i"] != int64(-3) || row["f"] != 1.5 || row["b"] != true || row["s"] != "ada" || row["n"] != nil {
+		t.Fatalf("scalars %#v", row)
+	}
+	nest, _ := row["nest"].(map[string]any)
+	if nest["k"] != "v" {
+		t.Fatalf("nest %#v", row["nest"])
+	}
+	list, _ := row["list"].([]any)
+	if len(list) != 2 || list[0] != "x" || list[1] != int64(2) {
+		t.Fatalf("list %#v", row["list"])
+	}
+	gotWhen, _ := row["when"].(time.Time)
+	if !gotWhen.Equal(when) {
+		t.Fatalf("time %v", row["when"])
+	}
+	raw, _ := row["raw"].([]byte)
+	if string(raw) != "hi" {
+		t.Fatalf("bytes %#v", row["raw"])
+	}
+
+	nanClient, nanCleanup := startRPCServer(t, &ContentPluginRPCServer{Impl: &fixedParsePlugin{value: math.NaN()}})
+	defer nanCleanup()
+	nanPlug := &ContentPluginRPC{client: nanClient}
+	if _, _, err = nanPlug.Parse(nil, nil); err == nil || !strings.Contains(err.Error(), "non-finite") {
+		t.Fatalf("NaN error: %v", err)
+	}
+	if _, _, err = nanPlug.Parse([]byte("again"), nil); err == nil || !strings.Contains(err.Error(), "non-finite") {
+		t.Fatalf("NaN must not break the RPC connection: %v", err)
+	}
+}
+
+func TestContentPluginRPC_ClientCallFailure(t *testing.T) {
+	client, cleanup := startRPCServer(t, &ContentPluginRPCServer{Impl: &stubContentPlugin{}})
+	cleanup()
+	plug := &ContentPluginRPC{client: client}
+	if _, err := plug.Init(nil); err == nil {
+		t.Fatal("expected Init RPC error")
+	}
+	if _, _, err := plug.Parse(nil, nil); err == nil {
+		t.Fatal("expected Parse RPC error")
+	}
+	if _, _, err := plug.Render(nil, nil); err == nil {
+		t.Fatal("expected Render RPC error")
+	}
+	if windows, repeat := plug.PrepareGet(1, 0, 1); windows != nil || repeat {
+		t.Fatalf("PrepareGet after close %+v %v", windows, repeat)
+	}
+	if chunks := plug.PrepareCreate(nil, 1); chunks != nil {
+		t.Fatalf("PrepareCreate after close %#v", chunks)
 	}
 }
 

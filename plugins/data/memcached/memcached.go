@@ -80,10 +80,7 @@ func (p *memcachedCachePlugin) Set(key string, value string, ttl time.Duration) 
 		return errors.New("memcached client not initialized")
 	}
 
-	ttlSeconds := int32(ttl.Seconds())
-	if ttlSeconds < 0 {
-		ttlSeconds = 0
-	}
+	ttlSeconds := max(int32(ttl.Seconds()), 0)
 
 	err := p.client.Set(&memcache.Item{
 		Key:        key,

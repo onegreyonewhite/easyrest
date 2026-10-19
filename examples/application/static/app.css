@@ -1,0 +1,18 @@
+body {
+  margin: 2rem;
+  font-family: sans-serif;
+  color: #222;
+}
+
+form {
+  display: flex;
+  gap: 1rem;
+  align-items: end;
+  margin-bottom: 1rem;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}

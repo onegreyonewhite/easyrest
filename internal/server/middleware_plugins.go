@@ -16,6 +16,13 @@ import (
 
 const responseHeaderPrefix = "response.header."
 
+func middlewareDriver(name string, plugCfg config.MiddlewareConfig) string {
+	if plugCfg.Plugin != "" {
+		return plugCfg.Plugin
+	}
+	return name
+}
+
 func resolveMiddlewareNames(names []string, cfg config.Config, loaded map[string]easyrest.MiddlewarePlugin) []easyrest.MiddlewarePlugin {
 	if len(names) == 0 {
 		return nil
@@ -130,7 +137,7 @@ func applyContextResponseHeaders(w http.ResponseWriter, pluginCtx map[string]any
 		return
 	}
 
-	prefixKeys := make([]string, 0)
+	var prefixKeys []string
 	for k := range pluginCtx {
 		if strings.HasPrefix(k, responseHeaderPrefix) {
 			prefixKeys = append(prefixKeys, k)
@@ -304,11 +311,9 @@ func setHandlerStatus(pluginCtx map[string]any, code int) {
 	}
 }
 
-func middlewareHTTPError(w http.ResponseWriter, dbKey string, pluginCtx map[string]any, msg string, code int) {
-	setHandlerStatus(pluginCtx, code)
-	runPostRequestMiddlewares(w, dbKey, pluginCtx)
-	applyContextResponseHeaders(w, pluginCtx)
-	http.Error(w, msg, code)
+func middlewareHTTPError(w http.ResponseWriter, r *http.Request, dbKey string, pluginCtx map[string]any, msg string, code int) {
+	cw := newContentWriter(w, r, dbKey, pluginCtx, nil, contentPluginRef{}, true)
+	_ = cw.WriteError(code, msg)
 }
 
 func middlewareWriteHeader(w http.ResponseWriter, dbKey string, pluginCtx map[string]any, code int) {
@@ -319,20 +324,15 @@ func middlewareWriteHeader(w http.ResponseWriter, dbKey string, pluginCtx map[st
 }
 
 func middlewareMakeResponse(w http.ResponseWriter, r *http.Request, dbKey string, pluginCtx map[string]any, status int, v any, query url.Values) {
-	setHandlerStatus(pluginCtx, status)
-	runPostRequestMiddlewares(w, dbKey, pluginCtx)
-	applyContextResponseHeaders(w, pluginCtx)
-	status = statusFromPluginContext(pluginCtx, status)
-	if query == nil {
-		makeResponse(w, r, status, v)
-		return
+	cw := newContentWriter(w, r, dbKey, pluginCtx, query, contentPluginRef{}, true)
+	var pag map[string]any
+	if r != nil {
+		pag, _ = r.Context().Value(contentPaginationCtxKey{}).(map[string]any)
 	}
-	makeResponseWithQuery(w, r, status, v, query)
+	_ = cw.Write(status, v, pag)
 }
 
-func middlewareRespondJSON(w http.ResponseWriter, dbKey string, pluginCtx map[string]any, status int, v any) {
-	setHandlerStatus(pluginCtx, status)
-	runPostRequestMiddlewares(w, dbKey, pluginCtx)
-	applyContextResponseHeaders(w, pluginCtx)
-	respondJSON(w, statusFromPluginContext(pluginCtx, status), v)
+func middlewareRespondJSON(w http.ResponseWriter, r *http.Request, dbKey string, pluginCtx map[string]any, status int, v any) {
+	cw := newContentWriter(w, r, dbKey, pluginCtx, nil, contentPluginRef{}, true)
+	_ = cw.Write(status, v, nil)
 }

@@ -30,7 +30,9 @@ type trackingMiddlewarePlugin struct {
 	ctxHeaders    map[string]any
 }
 
-func (p *trackingMiddlewarePlugin) Init(settings map[string]any) error { return nil }
+func (p *trackingMiddlewarePlugin) Init(map[string]any, easyrest.HostRPC) (easyrest.MiddlewareInfo, error) {
+	return easyrest.NewMiddlewareInfo(), nil
+}
 
 func (p *trackingMiddlewarePlugin) PreRequest(dbKey string, ctx map[string]any) (map[string]any, *int, error) {
 	p.callCount++
@@ -68,12 +70,8 @@ func setupMiddlewareIntegration(t *testing.T, mw *trackingMiddlewarePlugin) (htt
 	}
 
 	dbPath := setupTestDB(t)
-	os.Setenv("ER_DB_TEST", "sqlite://"+dbPath)
-	os.Setenv("ER_CHECK_SCOPE", "0")
-	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
-	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
-
-	cfg := config.Load()
+	applyTestConfig(t, testSQLiteYAML("sqlite://"+dbPath, false, ""))
+	cfg := server.GetConfig()
 	cfg.MiddlewarePlugins = map[string]config.MiddlewareConfig{
 		"testmw": {},
 	}
@@ -397,9 +395,7 @@ func TestMiddlewareIntegration_UnknownPluginSkipped(t *testing.T) {
 
 	dbPath := setupTestDB(t)
 	defer os.Remove(dbPath)
-	os.Setenv("ER_DB_TEST", "sqlite://"+dbPath)
-	os.Setenv("ER_CHECK_SCOPE", "0")
-	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
+	applyTestConfig(t, testSQLiteYAML("sqlite://"+dbPath, false, ""))
 	server.PreservedAuthPlugins["jwt"] = func() easyrest.AuthPlugin {
 		return &jwtplugin.JWTAuthPlugin{}
 	}
@@ -407,7 +403,7 @@ func TestMiddlewareIntegration_UnknownPluginSkipped(t *testing.T) {
 		return sqlitePlugin.NewSqlitePlugin()
 	}
 
-	cfg := config.Load()
+	cfg := server.GetConfig()
 	cfg.GlobalRequestMiddlewares = []string{"missing_mw"}
 	cfg.MiddlewarePlugins = map[string]config.MiddlewareConfig{}
 	server.SetConfig(cfg)

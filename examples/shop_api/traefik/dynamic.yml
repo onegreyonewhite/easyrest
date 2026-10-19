@@ -1,0 +1,38 @@
+http:
+  routers:
+    cdn:
+      rule: PathPrefix(`/cdn`)
+      entryPoints: [websecure]
+      middlewares: [cdn-rewrite, cdn-cache]
+      service: minio
+      tls: {}
+      priority: 100
+    api:
+      rule: PathPrefix(`/`)
+      entryPoints: [websecure]
+      service: easyrest
+      tls: {}
+      priority: 1
+  middlewares:
+    cdn-rewrite:
+      replacePathRegex:
+        regex: ^/cdn/(.*)
+        replacement: /shop/$1
+    cdn-cache:
+      headers:
+        customResponseHeaders:
+          Cache-Control: "public, max-age=86400"
+  services:
+    minio:
+      loadBalancer:
+        servers:
+          - url: http://minio:9000
+    easyrest:
+      loadBalancer:
+        servers:
+          - url: http://server:8080
+
+tls:
+  certificates:
+    - certFile: /certs/cert.pem
+      keyFile: /certs/key.pem

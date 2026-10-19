@@ -54,11 +54,13 @@ plugins:
     uri: sqlite://./test.db
   postgres:
     title: "Postgres API"
+    db_prefer_count: estimated
     # docker run --name pg-easyrest -p 5433:5432   -e POSTGRES_PASSWORD=root   -e POSTGRES_DB=easyrestdb   -d postgres:15
     # docker exec -i pg-easyrest psql -U postgres -d easyrestdb < schemas/postgres.sql
     uri: postgres://postgres:root@localhost:5433/easyrestdb?maxOpenConns=100&maxIdleConns=25&connMaxLifetime=5&connMaxIdleTime=10&timeout=30&bulkThreshold=100&sslmode=disable&search_path=public&autoCleanup=true
   mysql:
     title: "MySQL API"
+    db_prefer_count: estimated
     # docker run --name mysql-easyrest -p 3307:3306   -e MYSQL_ROOT_PASSWORD=root   -e MYSQL_DATABASE=easyrestdb   -d mysql:8
     # docker exec -i mysql-easyrest mysql -uroot -proot easyrestdb < schemas/mysql.sql
     uri: mysql://root:root@localhost:3307/easyrestdb?parseTime=true&autoCleanup=true

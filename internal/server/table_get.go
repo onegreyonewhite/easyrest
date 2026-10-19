@@ -1,13 +1,37 @@
 package server
 
 import (
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
+
+func contextTotal(pluginCtx map[string]any) (int64, bool) {
+	if pluginCtx == nil {
+		return 0, false
+	}
+	switch n := pluginCtx["total"].(type) {
+	case int:
+		return int64(n), true
+	case int64:
+		return n, true
+	case float64:
+		return int64(math.Round(n)), true
+	default:
+		return 0, false
+	}
+}
+
+func formatContentRange(start, end int, pluginCtx map[string]any) string {
+	suffix := "*"
+	if total, ok := contextTotal(pluginCtx); ok {
+		suffix = strconv.FormatInt(total, 10)
+	}
+	return strconv.Itoa(start) + "-" + strconv.Itoa(end) + "/" + suffix
+}
 
 func preferPageSize(pluginCtx map[string]any) int {
 	prefer, ok := pluginCtx["prefer"].(map[string]any)
@@ -29,13 +53,13 @@ func preferPageSize(pluginCtx map[string]any) int {
 	return n
 }
 
-func tableFlatContext(w http.ResponseWriter, bag *apiRequest, queryValues map[string][]string) (map[string]string, bool) {
+func tableFlatContext(w http.ResponseWriter, r *http.Request, bag *apiRequest, queryValues map[string][]string) (map[string]string, bool) {
 	if !queryNeedsContextSubst(queryValues) {
 		return nil, true
 	}
 	flatCtx, err := easyrest.FormatToContext(bag.pluginCtx)
 	if err != nil {
-		middlewareHTTPError(w, bag.dbKey, bag.pluginCtx, "Error formatting context: "+err.Error(), http.StatusInternalServerError)
+		middlewareHTTPError(w, r, bag.dbKey, bag.pluginCtx, "Error formatting context: "+err.Error(), http.StatusInternalServerError)
 		return nil, false
 	}
 	return flatCtx, true
@@ -47,7 +71,7 @@ func tableGet(w http.ResponseWriter, r *http.Request) {
 	table := bag.resource
 	pluginCtx := bag.pluginCtx
 	queryValues := bag.query
-	flatCtx, ok := tableFlatContext(w, bag, queryValues)
+	flatCtx, ok := tableFlatContext(w, r, bag, queryValues)
 	if !ok {
 		return
 	}
@@ -94,75 +118,46 @@ func tableGet(w http.ResponseWriter, r *http.Request) {
 
 	selectFields, groupBy, err := processSelectParam(selectParam, flatCtx, pluginCtx)
 	if err != nil {
-		middlewareHTTPError(w, dbKey, pluginCtx, "Error processing select parameter: "+err.Error(), http.StatusBadRequest)
+		middlewareHTTPError(w, r, dbKey, pluginCtx, "Error processing select parameter: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	where, err := ParseWhereClause(queryValues, flatCtx, pluginCtx)
 	if err != nil {
-		middlewareHTTPError(w, dbKey, pluginCtx, "Error processing where clause: "+err.Error(), http.StatusBadRequest)
+		middlewareHTTPError(w, r, dbKey, pluginCtx, "Error processing where clause: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	ordering := ParseCSV(queryValues.Get("ordering"))
 	if err := sanitizeIdentifierList(ordering); err != nil {
-		middlewareHTTPError(w, dbKey, pluginCtx, "Error processing ordering parameter: "+err.Error(), http.StatusBadRequest)
+		middlewareHTTPError(w, r, dbKey, pluginCtx, "Error processing ordering parameter: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	if bag.respType == contentTypeNDJSON && pageSize > 0 {
-		if preferSize > 0 {
-			appendPreferenceApplied(w, "page_size="+strconv.Itoa(preferSize))
-		}
-		streamTableGetNDJSON(w, r, dbKey, pluginCtx, bag.dbPlug, queryValues, bag.userID, table, selectFields, where, ordering, groupBy, pageSize, offset, maxRows)
-		return
+	_, sliced := readWindow(bag.content.Renderer.Plugin, maxRows, offset, pageSize)
+	if preferSize > 0 && (sliced || limit == 0) {
+		appendPreferenceApplied(w, "page_size="+strconv.Itoa(preferSize))
 	}
 
-	if limit == 0 {
-		limit = pageSize
-		if preferSize > 0 {
-			appendPreferenceApplied(w, "page_size="+strconv.Itoa(preferSize))
-		}
-	}
-
-	startTime := time.Now()
-	rows, returnedCtx, err := bag.dbPlug.TableGet(bag.userID, table, selectFields, where, ordering, groupBy, limit, offset, pluginCtx)
-	pluginCtx = applyReturnedPluginContext(pluginCtx, returnedCtx)
-	queryTime := time.Since(startTime)
-
-	setDBServerTiming(w, queryTime)
-
-	if err != nil {
-		middlewareHTTPError(w, dbKey, pluginCtx, "Error in TableGet: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	status := http.StatusOK
-
-	rowCount := len(rows)
-	startIdx := offset
-	endIdx := offset + rowCount - 1
-	if rowCount == 0 {
-		endIdx = offset - 1
-	}
-
-	if startIdx > endIdx {
-		status = http.StatusRequestedRangeNotSatisfiable
-		if usedHeaderRange {
-			parts := strings.SplitN(rangeHeader, "-", 2)
-			if len(parts) == 2 {
-				end, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
-				if err2 == nil {
-					startIdx = end
-					endIdx = end
-				}
-			}
-		}
-		rows = []map[string]any{}
-	}
-	w.Header().Set("Content-Range", strconv.Itoa(startIdx)+"-"+strconv.Itoa(endIdx)+"/*")
-	w.Header().Set("Range-Unit", "items")
-	w.Header().Set("Accept-Ranges", "items")
-
-	middlewareMakeResponse(w, r, dbKey, pluginCtx, status, rows, queryValues)
+	serveContentRead(contentRead{
+		w:              w,
+		r:              r,
+		dbKey:          dbKey,
+		pluginCtx:      pluginCtx,
+		query:          queryValues,
+		plug:           bag.dbPlug,
+		renderer:       bag.content.Renderer,
+		userID:         bag.userID,
+		table:          table,
+		selectFields:   selectFields,
+		where:          where,
+		ordering:       ordering,
+		groupBy:        groupBy,
+		limit:          maxRows,
+		offset:         offset,
+		page:           pageSize,
+		range416AtZero: true,
+		usedRange:      usedHeaderRange,
+		rangeHeader:    rangeHeader,
+	})
 }

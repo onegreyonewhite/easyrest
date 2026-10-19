@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Demo callback</title>
+  <style>body{background:#fff;color:#111;font:16px sans-serif;margin:2rem} pre{white-space:pre-wrap}</style>
+</head>
+<body>
+  <h1>Demo application</h1>
+  <pre id="out">Waiting for the token...</pre>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const out = document.getElementById("out");
+    const error = params.get("error");
+    if (error) {
+      out.textContent = error + (params.get("error_description") ? "\n" + params.get("error_description") : "");
+    } else {
+      const code = params.get("code");
+      const verifier = sessionStorage.getItem("pkce_verifier");
+      if (!code || !verifier) {
+        out.textContent = "This page receives the authorization code for the spa client.";
+      } else {
+        const body = new URLSearchParams({
+          grant_type: "authorization_code",
+          client_id: "spa",
+          code: code,
+          redirect_uri: "https://localhost:8443/media/static/callback.html",
+          code_verifier: verifier,
+        });
+        fetch("/restapi/v1/token", {
+          method: "POST",
+          body: body,
+          headers: {"Content-Type": "application/x-www-form-urlencoded"},
+        }).then(async (resp) => {
+          out.textContent = resp.status + "\n" + await resp.text();
+        });
+      }
+    }
+  </script>
+</body>
+</html>

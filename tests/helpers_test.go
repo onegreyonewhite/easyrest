@@ -2,6 +2,7 @@ package tests
 
 import (
 	"database/sql"
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
@@ -13,7 +14,6 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	_ "modernc.org/sqlite"
 
-	"github.com/onegreyonewhite/easyrest/internal/config"
 	"github.com/onegreyonewhite/easyrest/internal/server"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
@@ -116,15 +116,53 @@ func insertUser(t *testing.T, dbPath, name, updateField string) int {
 	return int(id)
 }
 
+func applyTestConfig(tb testing.TB, yamlText string) {
+	tb.Helper()
+	if err := server.SetupApplication(yamlText, nil); err != nil {
+		tb.Fatal(err)
+	}
+}
+
+func testSQLiteYAML(uri string, checkScope bool, extra string) string {
+	scope := "true"
+	if !checkScope {
+		scope = "false"
+	}
+	return fmt.Sprintf(`
+check_scope: %s
+token_user_search: sub
+token_cache_ttl: 20
+auth_plugins:
+  jwt:
+    settings:
+      jwt_secret: mytestsecret
+plugins:
+  test:
+    uri: %q
+%s
+`, scope, uri, extra)
+}
+
+func testSecretYAML(checkScope bool) string {
+	scope := "true"
+	if !checkScope {
+		scope = "false"
+	}
+	return fmt.Sprintf(`
+check_scope: %s
+token_user_search: sub
+token_cache_ttl: 20
+auth_plugins:
+  jwt:
+    settings:
+      jwt_secret: mytestsecret
+`, scope)
+}
+
 // setupServerWithDB sets up a test server with the given database.
 func setupServerWithDB(t *testing.T, dbPath string) chi.Router {
 	t.Helper()
-	os.Setenv("ER_DB_TEST", "sqlite://"+dbPath)
-	os.Setenv("ER_CHECK_SCOPE", "0")
-	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
-	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
-	cfg := config.Load()
-	server.SetConfig(cfg)
+	applyTestConfig(t, testSQLiteYAML("sqlite://"+dbPath, false, ""))
 	return server.SetupRouter()
 }
 

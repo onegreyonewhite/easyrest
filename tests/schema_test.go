@@ -122,15 +122,9 @@ func TestSwaggerSchema(t *testing.T) {
 	defer server.StopPlugins()
 
 	// Set environment variables for the plugin.
-	os.Setenv("ER_DB_TEST", "sqlite://"+dbPath)
-	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
-	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
 	os.Setenv("ER_TOKEN_AUTHURL", "http://auth.example.com/token")
-	os.Setenv("ER_CHECK_SCOPE", "0")
-	os.Setenv("ER_NO_PLUGIN_LOG", "1")
-
-	// Use SetupRouter to obtain the router.
-	server.ReloadConfig()
+	t.Cleanup(func() { os.Unsetenv("ER_TOKEN_AUTHURL") })
+	applyTestConfig(t, testSQLiteYAML("sqlite://"+dbPath, false, ""))
 	router := server.SetupRouter()
 
 	// Create a request to /api/test/
@@ -253,7 +247,6 @@ func TestSwaggerSchema(t *testing.T) {
 
 func TestSwaggerSchemaWithRPC(t *testing.T) {
 	// Unset ER_DB_TEST to avoid LoadPlugins overriding our fake plugin.
-	os.Unsetenv("ER_DB_TEST")
 	defer server.StopPlugins()
 	// Set the fake plugin for database "test".
 	mockPluginInstance1 := &fakeDBPluginWithRPC{}
@@ -266,7 +259,7 @@ func TestSwaggerSchemaWithRPC(t *testing.T) {
 		t.Fatalf("Failed to create request: %v", err)
 	}
 	rr := httptest.NewRecorder()
-	server.ReloadConfig()
+	applyTestConfig(t, testSecretYAML(false))
 	server.LoadPlugins()
 
 	router := server.SetupRouter()
@@ -351,14 +344,13 @@ func (f *fakeDBPluginWithAllowList) GetSchema(ctx map[string]any) (any, map[stri
 }
 
 func TestSwaggerSchemaWithAllowList(t *testing.T) {
-	os.Unsetenv("ER_DB_TEST")
 	defer server.StopPlugins()
 
 	mockPlugin := &fakeDBPluginWithAllowList{}
 	newPluginsMap := map[string]easyrest.DBPlugin{"mockallow": mockPlugin}
 	server.DbPlugins.Store(&newPluginsMap)
 
-	server.ReloadConfig()
+	applyTestConfig(t, testSecretYAML(false))
 	cfg := server.GetConfig()
 	cfg.PluginMap["mockallow"] = config.PluginConfig{
 		Name: "mockallow",
@@ -468,13 +460,12 @@ func (p *countingSchemaPlugin) schemaCalls() int {
 }
 
 func TestSchemaCacheHit(t *testing.T) {
-	os.Unsetenv("ER_DB_TEST")
 	defer server.StopPlugins()
 
 	plugin := &countingSchemaPlugin{}
 	server.DbPlugins.Store(&map[string]easyrest.DBPlugin{"mock": plugin})
 
-	server.ReloadConfig()
+	applyTestConfig(t, testSecretYAML(false))
 	router := server.SetupRouter()
 	server.DbPlugins.Store(&map[string]easyrest.DBPlugin{"mock": plugin})
 

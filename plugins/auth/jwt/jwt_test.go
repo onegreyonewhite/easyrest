@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -49,7 +50,8 @@ func TestJWTAuthPlugin_Init(t *testing.T) {
 			"jwt_secret": "mysecret",
 			"token_type": "CustomAuth",
 		}
-		schema, err := plugin.Init(settings)
+		info, err := plugin.Init(settings, easyrest.HostRPC{})
+		schema := info.Schema
 		require.NoError(t, err)
 		require.NotNil(t, schema)
 		assert.Equal(t, "mysecret", plugin.jwt_secret)
@@ -67,7 +69,8 @@ func TestJWTAuthPlugin_Init(t *testing.T) {
 			"token_type":     "Bearer",
 			"flow":           "password", // Explicitly set flow
 		}
-		schema, err := plugin.Init(settings)
+		info, err := plugin.Init(settings, easyrest.HostRPC{})
+		schema := info.Schema
 		require.NoError(t, err)
 		require.NotNil(t, schema)
 		assert.Equal(t, "http://localhost/token", plugin.token_endpoint)
@@ -86,7 +89,8 @@ func TestJWTAuthPlugin_Init(t *testing.T) {
 			"authorization_endpoint": "http://localhost/auth",
 			"token_type":             "Bearer",
 		}
-		schema, err := plugin.Init(settings)
+		info, err := plugin.Init(settings, easyrest.HostRPC{})
+		schema := info.Schema
 		require.NoError(t, err)
 		require.NotNil(t, schema)
 		assert.Equal(t, "http://localhost/token", plugin.token_endpoint)
@@ -107,7 +111,8 @@ func TestJWTAuthPlugin_Init(t *testing.T) {
 			"authorization_endpoint": "http://localhost/auth", // No token_endpoint
 			"flow":                   "implicit",              // User might try to force implicit
 		}
-		schema, err := plugin.Init(settings)
+		info, err := plugin.Init(settings, easyrest.HostRPC{})
+		schema := info.Schema
 		require.NoError(t, err)
 		assert.Equal(t, "apiKey", schema["type"]) // Fallback because token_endpoint is primary trigger for oauth2 in JWTAuthPlugin
 	})
@@ -145,7 +150,8 @@ func TestOIDCAuthPlugin_Init(t *testing.T) {
 			"token_type":          "OIDCBearer",
 			"flow":                "accessCode", // Explicit flow
 		}
-		schema, err := plugin.Init(settings)
+		info, err := plugin.Init(settings, easyrest.HostRPC{})
+		schema := info.Schema
 		require.NoError(t, err)
 		require.NotNil(t, schema)
 
@@ -173,7 +179,8 @@ func TestOIDCAuthPlugin_Init(t *testing.T) {
 		})
 		plugin := &OIDCAuthPlugin{}
 		settings := map[string]any{"open_id_connect_url": oidcURL}
-		schema, err := plugin.Init(settings)
+		info, err := plugin.Init(settings, easyrest.HostRPC{})
+		schema := info.Schema
 		require.NoError(t, err)
 		assert.Equal(t, "implicit", schema["flow"])
 		assert.Equal(t, discoveryDoc.AuthorizationEndpoint, schema["authorizationUrl"])
@@ -198,7 +205,8 @@ func TestOIDCAuthPlugin_Init(t *testing.T) {
 		plugin := &OIDCAuthPlugin{}
 		// Explicitly ask for a flow that needs tokenUrl to trigger fallback logic
 		settings := map[string]any{"open_id_connect_url": oidcURL, "flow": "accessCode"}
-		schema, err := plugin.Init(settings)
+		info, err := plugin.Init(settings, easyrest.HostRPC{})
+		schema := info.Schema
 		require.NoError(t, err)
 		assert.Equal(t, "accessCode", schema["flow"])
 		assert.Equal(t, testTokenURL, schema["tokenUrl"])
@@ -211,7 +219,7 @@ func TestOIDCAuthPlugin_Init(t *testing.T) {
 		})
 		plugin := &OIDCAuthPlugin{}
 		settings := map[string]any{"open_id_connect_url": oidcURL}
-		_, err := plugin.Init(settings)
+		_, err := plugin.Init(settings, easyrest.HostRPC{})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "OpenID configuration request to")
 		assert.Contains(t, err.Error(), "failed with status 500")
@@ -224,7 +232,7 @@ func TestOIDCAuthPlugin_Init(t *testing.T) {
 		})
 		plugin := &OIDCAuthPlugin{}
 		settings := map[string]any{"open_id_connect_url": oidcURL}
-		_, err := plugin.Init(settings)
+		_, err := plugin.Init(settings, easyrest.HostRPC{})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "error decoding OpenID configuration")
 	})
@@ -240,7 +248,7 @@ func TestOIDCAuthPlugin_Init(t *testing.T) {
 		})
 		plugin := &OIDCAuthPlugin{}
 		settings := map[string]any{"open_id_connect_url": oidcURL}
-		_, err := plugin.Init(settings)
+		_, err := plugin.Init(settings, easyrest.HostRPC{})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "authorization_endpoint not found")
 	})
@@ -248,7 +256,7 @@ func TestOIDCAuthPlugin_Init(t *testing.T) {
 	t.Run("Discovery request creation error", func(t *testing.T) {
 		plugin := &OIDCAuthPlugin{}
 		settings := map[string]any{"open_id_connect_url": ":::invalid-url"}
-		_, err := plugin.Init(settings)
+		_, err := plugin.Init(settings, easyrest.HostRPC{})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "error creating request to open_id_connect_url")
 	})
@@ -256,7 +264,7 @@ func TestOIDCAuthPlugin_Init(t *testing.T) {
 	t.Run("Missing open_id_connect_url setting", func(t *testing.T) {
 		plugin := &OIDCAuthPlugin{}
 		settings := map[string]any{}
-		_, err := plugin.Init(settings)
+		_, err := plugin.Init(settings, easyrest.HostRPC{})
 		require.Error(t, err)
 		assert.EqualError(t, err, "open_id_connect_url is required for OIDCAuthPlugin")
 	})
@@ -273,7 +281,7 @@ func TestJWTAuthPlugin_Authenticate(t *testing.T) {
 
 	t.Run("Header Parsing", func(t *testing.T) {
 		plugin := &JWTAuthPlugin{}
-		plugin.Init(map[string]any{"token_type": "TestBearer"})
+		plugin.Init(map[string]any{"token_type": "TestBearer"}, easyrest.HostRPC{})
 
 		tests := []struct {
 			name          string
@@ -291,7 +299,7 @@ func TestJWTAuthPlugin_Authenticate(t *testing.T) {
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
 				p := &JWTAuthPlugin{}
-				p.Init(map[string]any{"token_type": tt.tokenType})
+				p.Init(map[string]any{"token_type": tt.tokenType}, easyrest.HostRPC{})
 
 				headersMap := map[string]string{}
 				if tt.name == "nil headers map" {
@@ -308,7 +316,7 @@ func TestJWTAuthPlugin_Authenticate(t *testing.T) {
 		}
 		t.Run("empty token with default Bearer", func(t *testing.T) {
 			p := &JWTAuthPlugin{}
-			p.Init(map[string]any{})
+			p.Init(map[string]any{}, easyrest.HostRPC{})
 			_, err := p.Authenticate(map[string]string{"Authorization": "Bearer "}, "GET", "/test", "param=val")
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "invalid authorization header: token is empty after type Bearer")
@@ -318,7 +326,7 @@ func TestJWTAuthPlugin_Authenticate(t *testing.T) {
 	t.Run("Direct Token Parsing", func(t *testing.T) {
 		t.Run("Signed Token - HS256", func(t *testing.T) {
 			plugin := &JWTAuthPlugin{}
-			plugin.Init(map[string]any{"jwt_secret": testSecret, "token_type": "Bearer"})
+			plugin.Init(map[string]any{"jwt_secret": testSecret, "token_type": "Bearer"}, easyrest.HostRPC{})
 
 			claims, err := plugin.Authenticate(map[string]string{"Authorization": "Bearer " + validSignedToken}, "GET", "/test", "param=val")
 			require.NoError(t, err)
@@ -329,7 +337,7 @@ func TestJWTAuthPlugin_Authenticate(t *testing.T) {
 			assert.Contains(t, err.Error(), "token has invalid claims: token is expired")
 
 			pluginWrongSecret := &JWTAuthPlugin{}
-			pluginWrongSecret.Init(map[string]any{"jwt_secret": "wrong-secret", "token_type": "Bearer"})
+			pluginWrongSecret.Init(map[string]any{"jwt_secret": "wrong-secret", "token_type": "Bearer"}, easyrest.HostRPC{})
 			_, err = pluginWrongSecret.Authenticate(map[string]string{"Authorization": "Bearer " + validSignedToken}, "GET", "/test", "param=val")
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "token signature is invalid: signature is invalid")
@@ -356,7 +364,7 @@ func TestJWTAuthPlugin_Authenticate(t *testing.T) {
 
 		t.Run("Unsigned Token (no jwt_secret in plugin)", func(t *testing.T) {
 			plugin := &JWTAuthPlugin{}
-			plugin.Init(map[string]any{"token_type": "Bearer"})
+			plugin.Init(map[string]any{"token_type": "Bearer"}, easyrest.HostRPC{})
 
 			claims, err := plugin.Authenticate(map[string]string{"Authorization": "Bearer " + unsignedTokenValid}, "GET", "/test", "param=val")
 			require.NoError(t, err)
@@ -417,7 +425,7 @@ func TestOIDCAuthPlugin_Authenticate(t *testing.T) {
 	t.Run("Header Parsing", func(t *testing.T) {
 		plugin := &OIDCAuthPlugin{}
 		mockOIDCURL := setupMockOIDCServer(OpenIDConfiguration{UserinfoEndpoint: "http://dummy", AuthorizationEndpoint: "http://dummy/auth"})
-		plugin.Init(map[string]any{"open_id_connect_url": mockOIDCURL, "token_type": "OidcBearer"})
+		plugin.Init(map[string]any{"open_id_connect_url": mockOIDCURL, "token_type": "OidcBearer"}, easyrest.HostRPC{})
 
 		tests := []struct {
 			name          string
@@ -457,7 +465,7 @@ func TestOIDCAuthPlugin_Authenticate(t *testing.T) {
 		mockedOIDCURL := setupMockOIDCServer(discoveryDoc)
 
 		plugin := &OIDCAuthPlugin{}
-		_, err := plugin.Init(map[string]any{"open_id_connect_url": mockedOIDCURL, "token_type": "Bearer"})
+		_, err := plugin.Init(map[string]any{"open_id_connect_url": mockedOIDCURL, "token_type": "Bearer"}, easyrest.HostRPC{})
 		require.NoError(t, err)
 
 		claims, err := plugin.Authenticate(map[string]string{"Authorization": "Bearer user-token"}, "GET", "/test", "param=val")
@@ -480,7 +488,7 @@ func TestOIDCAuthPlugin_Authenticate(t *testing.T) {
 		_, err := plugin.Init(map[string]any{
 			"open_id_connect_url": mockedOIDCURL,
 			"token_type":          "Bearer",
-		})
+		}, easyrest.HostRPC{})
 		require.NoError(t, err)
 
 		claims, err := plugin.Authenticate(map[string]string{"Authorization": "Bearer user-token-for-jwt-response"}, "GET", "/test", "param=val")
@@ -497,7 +505,7 @@ func TestOIDCAuthPlugin_Authenticate(t *testing.T) {
 		mockedOIDCURL := setupMockOIDCServer(discoveryDoc)
 
 		plugin := &OIDCAuthPlugin{}
-		_, err := plugin.Init(map[string]any{"open_id_connect_url": mockedOIDCURL, "token_type": "Bearer"})
+		_, err := plugin.Init(map[string]any{"open_id_connect_url": mockedOIDCURL, "token_type": "Bearer"}, easyrest.HostRPC{})
 		require.NoError(t, err)
 
 		_, err = plugin.Authenticate(map[string]string{"Authorization": "Bearer user-token"}, "GET", "/test", "param=val")
@@ -523,7 +531,7 @@ func TestOIDCAuthPlugin_Authenticate(t *testing.T) {
 		mockedOIDCURL := setupMockOIDCServer(discoveryDoc)
 
 		plugin := &OIDCAuthPlugin{}
-		_, err := plugin.Init(map[string]any{"open_id_connect_url": mockedOIDCURL})
+		_, err := plugin.Init(map[string]any{"open_id_connect_url": mockedOIDCURL}, easyrest.HostRPC{})
 		require.NoError(t, err)
 
 		_, err = plugin.Authenticate(map[string]string{"Authorization": "Bearer user-token"}, "GET", "/test", "param=val")
@@ -540,7 +548,7 @@ func TestOIDCAuthPlugin_Authenticate(t *testing.T) {
 		mockedOIDCURL := setupMockOIDCServer(discoveryDoc)
 
 		plugin := &OIDCAuthPlugin{}
-		_, err := plugin.Init(map[string]any{"open_id_connect_url": mockedOIDCURL})
+		_, err := plugin.Init(map[string]any{"open_id_connect_url": mockedOIDCURL}, easyrest.HostRPC{})
 		require.NoError(t, err)
 
 		_, err = plugin.Authenticate(map[string]string{"Authorization": "Bearer user-token"}, "GET", "/test", "param=val")
@@ -557,7 +565,7 @@ func TestOIDCAuthPlugin_Authenticate(t *testing.T) {
 		mockedOIDCURL := setupMockOIDCServer(discoveryDoc)
 
 		plugin := &OIDCAuthPlugin{}
-		_, err := plugin.Init(map[string]any{"open_id_connect_url": mockedOIDCURL})
+		_, err := plugin.Init(map[string]any{"open_id_connect_url": mockedOIDCURL}, easyrest.HostRPC{})
 		require.NoError(t, err)
 
 		_, err = plugin.Authenticate(map[string]string{"Authorization": "Bearer user-token"}, "GET", "/test", "param=val")
@@ -574,7 +582,7 @@ func TestOIDCAuthPlugin_Authenticate(t *testing.T) {
 		mockedOIDCURL := setupMockOIDCServer(discoveryDoc)
 
 		plugin := &OIDCAuthPlugin{}
-		_, err := plugin.Init(map[string]any{"open_id_connect_url": mockedOIDCURL})
+		_, err := plugin.Init(map[string]any{"open_id_connect_url": mockedOIDCURL}, easyrest.HostRPC{})
 		require.NoError(t, err)
 
 		_, err = plugin.Authenticate(map[string]string{"Authorization": "Bearer user-token"}, "GET", "/test", "param=val")

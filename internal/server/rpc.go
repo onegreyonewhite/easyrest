@@ -20,20 +20,23 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 
 	preCfg := currentConfig()
 	prePluginCfg := preCfg.PluginMap[dbKey]
-	dbPlug, config, pluginCfg, ok := resolveDBPlugin(w, dbKey, funcName, prePluginCfg.Exclude.Func, prePluginCfg.AllowList.Func, nil)
+	dbPlug, config, pluginCfg, ok := resolveDBPlugin(w, r, dbKey, funcName, prePluginCfg.Exclude.Func, prePluginCfg.AllowList.Func, nil)
 	if !ok {
 		return
 	}
 
-	userID, r, err := Authenticate(r)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusUnauthorized)
-		return
-	}
-
-	isPublicFunc := slices.Contains(pluginCfg.Public.Func, funcName)
-	if !enforceScope(w, r, config.CheckScope, isPublicFunc, funcName+"-write") {
-		return
+	userID := ""
+	if !internalCall(r) {
+		var err error
+		userID, r, err = Authenticate(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+			return
+		}
+		isPublicFunc := slices.Contains(pluginCfg.Public.Func, funcName)
+		if !enforceScope(w, r, config.CheckScope, isPublicFunc, funcName+"-write") {
+			return
+		}
 	}
 
 	// Using parseRequest to handle different formats of incoming data
@@ -59,18 +62,18 @@ func rpcHandler(w http.ResponseWriter, r *http.Request) {
 
 	flatCtx, err := formatContextForSubst(pluginCtx, nil, data)
 	if err != nil {
-		middlewareHTTPError(w, dbKey, pluginCtx, "Error formatting context: "+err.Error(), http.StatusInternalServerError)
+		middlewareHTTPError(w, r, dbKey, pluginCtx, "Error formatting context: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	data = substituteValue(data, flatCtx, pluginCtx).(map[string]any)
 	if err := validateBodyColumns(data); err != nil {
-		middlewareHTTPError(w, dbKey, pluginCtx, err.Error(), http.StatusBadRequest)
+		middlewareHTTPError(w, r, dbKey, pluginCtx, err.Error(), http.StatusBadRequest)
 		return
 	}
 	result, returnedCtx, err := dbPlug.CallFunction(userID, funcName, data, pluginCtx)
 	pluginCtx = applyReturnedPluginContext(pluginCtx, returnedCtx)
 	if err != nil {
-		middlewareHTTPError(w, dbKey, pluginCtx, "Error in CallFunction: "+err.Error(), http.StatusInternalServerError)
+		middlewareHTTPError(w, r, dbKey, pluginCtx, "Error in CallFunction: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 

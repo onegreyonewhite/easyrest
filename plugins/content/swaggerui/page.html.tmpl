@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>{{.Title}}</title>
+  <link rel="stylesheet" href="{{.Assets}}swagger-ui.css">
+  <link rel="apple-touch-icon" sizes="180x180" href="{{.Assets}}apple-touch-icon.png">
+  <link rel="icon" type="image/png" href="{{.Assets}}favicon-32x32.png" sizes="32x32">
+  <link rel="icon" type="image/png" href="{{.Assets}}favicon-16x16.png" sizes="16x16">
+  <style>
+    html { box-sizing: border-box; }
+    *, *::before, *::after { box-sizing: inherit; }
+    body { margin: 0; background: #fafafa; color: #3b4151; font-family: sans-serif; }
+    .swagger-ui .topbar { background-color: #fafafa; border-bottom: 1px solid #d4d4d4; }
+    .swagger-ui .topbar a { display: none; }
+    .swagger-ui .topbar .download-url-wrapper input[type=text],
+    .swagger-ui .topbar .download-url-wrapper select {
+      border: 1px solid #d4d4d4;
+      background: #fff;
+      color: #3b4151;
+    }
+    .swagger-ui .topbar .download-url-button {
+      background: #fff;
+      color: #3b4151;
+      border: 1px solid #d4d4d4;
+    }
+  </style>
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="{{.Assets}}swagger-ui-bundle.js" charset="UTF-8"></script>
+  {{if .Standalone}}
+  <script src="{{.Assets}}swagger-ui-standalone-preset.js" charset="UTF-8"></script>
+  {{end}}
+  <script>
+    window.onload = function () {
+      var config = {{.Config}};
+      {{if .Schema}}
+      config.spec = {{.Schema}};
+      delete config.url;
+      delete config.urls;
+      {{end}}
+      {{if .Auth}}
+      var easyrestAuth = "{{.Auth}}";
+      {{end}}
+      config.presets = [SwaggerUIBundle.presets.apis{{if .Standalone}}, SwaggerUIStandalonePreset{{end}}];
+      config.requestInterceptor = function (req) {
+        var headers = req.headers || {};
+        var value = headers.Authorization || headers.authorization;
+        if (typeof value === "string" && value !== "" && value.indexOf(" ") < 0) {
+          headers.Authorization = "Bearer " + value;
+          req.headers = headers;
+        }
+        return req;
+      };
+      window.ui = SwaggerUIBundle(config);
+    };
+  </script>
+</body>
+</html>

@@ -9,7 +9,7 @@ import (
 func mustInit(t *testing.T, settings map[string]any) *Plugin {
 	t.Helper()
 	p := New()
-	if err := p.Init(settings); err != nil {
+	if _, err := p.Init(settings, easyrest.HostRPC{}); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 	return p
@@ -53,11 +53,11 @@ func TestInitPostgreSQLAliasAndYAML(t *testing.T) {
 
 func TestInitInvalidRoutine(t *testing.T) {
 	p := New()
-	err := p.Init(map[string]any{
+	_, err := p.Init(map[string]any{
 		"by_type": map[string]any{
 			"mysql": map[string]any{"pre_request": "foo-bar"},
 		},
-	})
+	}, easyrest.HostRPC{})
 	if err == nil {
 		t.Fatal("expected Init error")
 	}

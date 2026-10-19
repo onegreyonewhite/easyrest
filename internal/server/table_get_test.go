@@ -1,6 +1,26 @@
 package server
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"testing"
+
+	"github.com/onegreyonewhite/easyrest/internal/config"
+)
+
+type totalGetPlugin struct {
+	fakeDBPlugin
+	total any
+}
+
+func (p *totalGetPlugin) TableGet(string, string, []string, map[string]any, []string, []string, int, int, map[string]any) ([]map[string]any, map[string]any, error) {
+	ctx := map[string]any{}
+	if p.total != nil {
+		ctx["total"] = p.total
+	}
+	return []map[string]any{{"id": 1}}, ctx, nil
+}
 
 func TestPreferPageSize(t *testing.T) {
 	t.Parallel()
@@ -24,5 +44,33 @@ func TestPreferPageSize(t *testing.T) {
 				t.Fatalf("preferPageSize = %d, want %d", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestTableGetContentRangeUsesTotal(t *testing.T) {
+	orig := GetConfig()
+	t.Cleanup(func() { SetConfig(orig) })
+	SetConfig(config.Config{DefaultLimit: 10})
+
+	plug := &totalGetPlugin{total: int64(40)}
+	req := httptest.NewRequest(http.MethodGet, "/api/app/users/", nil)
+	bag, req := newAPIRequest(req)
+	t.Cleanup(func() { releaseAPIRequest(bag) })
+	bag.dbKey = "app"
+	bag.resource = "users"
+	bag.userID = "u"
+	bag.dbPlug = plug
+	bag.pluginCfg = config.PluginConfig{DefaultLimit: 10}
+	bag.pluginCtx = map[string]any{}
+	bag.query = url.Values{}
+	bag.respType = "application/json"
+
+	w := httptest.NewRecorder()
+	tableGet(w, req)
+	if got := w.Header().Get("Content-Range"); got != "0-0/40" {
+		t.Fatalf("Content-Range = %q, want 0-0/40", got)
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d body %s", w.Code, w.Body.String())
 	}
 }

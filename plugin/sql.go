@@ -83,6 +83,11 @@ func BuildSelectQuery(table string, selectFields []string, where map[string]any,
 	return sb.String(), args, nil
 }
 
+// CountSQL wraps a SELECT so the engine counts its rows.
+func CountSQL(selectSQL string) string {
+	return "SELECT count(*) FROM (" + selectSQL + ") AS er_count"
+}
+
 // FormatSQLTime formats t as a date or datetime string.
 func FormatSQLTime(t time.Time) string {
 	if t.Hour() == 0 && t.Minute() == 0 && t.Second() == 0 && t.Nanosecond() == 0 {

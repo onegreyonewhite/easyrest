@@ -26,8 +26,6 @@ func TestSelectBasic(t *testing.T) {
 
 	// Insert a single user.
 	insertUser(t, dbPath, "Alice", "")
-	os.Setenv("ER_CORS_ENABLED", "1")
-
 	router := setupServerWithDB(t, dbPath)
 	cfg := server.GetConfig()
 	cfg.PluginMap["test"] = config.PluginConfig{
@@ -395,9 +393,6 @@ func TestAnonymousScopeAccess(t *testing.T) {
 	}
 	db.Close()
 
-	os.Setenv("ER_CORS_ENABLED", "1")
-	os.Setenv("ER_ANON_CLAIMS", `{"scope": "product-read"}`)
-
 	router := setupServerWithDB(t, dbPath)
 	cfg := server.GetConfig()
 	cfg.PluginMap["test"] = config.PluginConfig{
@@ -409,6 +404,7 @@ func TestAnonymousScopeAccess(t *testing.T) {
 		},
 	}
 	cfg.CORS.Enabled = true
+	cfg.AnonClaims = map[string]any{"scope": "product-read"}
 	cfg.CheckScope = true
 	server.SetConfig(cfg)
 	server.LoadPlugins()
@@ -599,8 +595,6 @@ func TestSelectAllowList(t *testing.T) {
 		t.Fatalf("Failed to insert into users: %v", err)
 	}
 	db.Close()
-
-	os.Setenv("ER_CORS_ENABLED", "1")
 
 	router := setupServerWithDB(t, dbPath)
 	cfg := server.GetConfig()

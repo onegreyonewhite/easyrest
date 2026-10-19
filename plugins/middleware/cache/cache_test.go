@@ -57,7 +57,7 @@ func (s *fakeStore) Get(key string) (string, error) {
 func mustInit(t *testing.T, store Store, settings map[string]any) *Plugin {
 	t.Helper()
 	p := New(store)
-	if err := p.Init(settings); err != nil {
+	if _, err := p.Init(settings, easyrest.HostRPC{}); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 	return p
@@ -133,24 +133,24 @@ func TestInitTTLSeconds(t *testing.T) {
 }
 
 func TestInitValidation(t *testing.T) {
-	if err := New(nil).Init(nil); err == nil {
+	if _, err := New(nil).Init(nil, easyrest.HostRPC{}); err == nil {
 		t.Fatal("expected store required")
 	}
-	if err := New(newFakeStore()).Init(map[string]any{"uri": 1}); err == nil {
+	if _, err := New(newFakeStore()).Init(map[string]any{"uri": 1}, easyrest.HostRPC{}); err == nil {
 		t.Fatal("expected uri type error")
 	}
-	if err := New(newFakeStore()).Init(map[string]any{"ttl": "nope"}); err == nil {
+	if _, err := New(newFakeStore()).Init(map[string]any{"ttl": "nope"}, easyrest.HostRPC{}); err == nil {
 		t.Fatal("expected ttl parse error")
 	}
-	if err := New(newFakeStore()).Init(map[string]any{"ttl": 0}); err == nil {
+	if _, err := New(newFakeStore()).Init(map[string]any{"ttl": 0}, easyrest.HostRPC{}); err == nil {
 		t.Fatal("expected ttl > 0")
 	}
-	if err := New(newFakeStore()).Init(map[string]any{"invalidation_map": "x"}); err == nil {
+	if _, err := New(newFakeStore()).Init(map[string]any{"invalidation_map": "x"}, easyrest.HostRPC{}); err == nil {
 		t.Fatal("expected invalidation_map type error")
 	}
 	store := newFakeStore()
 	store.initErr = errors.New("boom")
-	if err := New(store).Init(map[string]any{"uri": "redis://x"}); err == nil {
+	if _, err := New(store).Init(map[string]any{"uri": "redis://x"}, easyrest.HostRPC{}); err == nil {
 		t.Fatal("expected store init error")
 	}
 }

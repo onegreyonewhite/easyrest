@@ -32,7 +32,7 @@ func TestResolveAndLoadDBPlugin(t *testing.T) {
 	DbPlugins.Store(&plugins)
 
 	w := httptest.NewRecorder()
-	if _, _, _, ok := resolveDBPlugin(w, "app", "easyrest_cache", nil, nil, []string{"easyrest_cache"}); ok {
+	if _, _, _, ok := resolveDBPlugin(w, nil, "app", "easyrest_cache", nil, nil, []string{"easyrest_cache"}); ok {
 		t.Fatal("reserved resource should 404")
 	}
 	if w.Code != http.StatusNotFound {
@@ -40,23 +40,23 @@ func TestResolveAndLoadDBPlugin(t *testing.T) {
 	}
 
 	w = httptest.NewRecorder()
-	if _, _, _, ok := resolveDBPlugin(w, "app", "hidden", []string{"hidden"}, nil, nil); ok {
+	if _, _, _, ok := resolveDBPlugin(w, nil, "app", "hidden", []string{"hidden"}, nil, nil); ok {
 		t.Fatal("excluded resource should 404")
 	}
 
 	w = httptest.NewRecorder()
-	if _, _, _, ok := resolveDBPlugin(w, "app", "orders", nil, []string{"users"}, nil); ok {
+	if _, _, _, ok := resolveDBPlugin(w, nil, "app", "orders", nil, []string{"users"}, nil); ok {
 		t.Fatal("not in allowlist should 404")
 	}
 
 	w = httptest.NewRecorder()
-	plug, _, _, ok := resolveDBPlugin(w, "app", "users", nil, []string{"users"}, nil)
+	plug, _, _, ok := resolveDBPlugin(w, nil, "app", "users", nil, []string{"users"}, nil)
 	if !ok || plug == nil {
 		t.Fatal("expected allowed plugin")
 	}
 
 	w = httptest.NewRecorder()
-	if _, _, _, ok := resolveDBPlugin(w, "missing", "users", nil, nil, nil); ok {
+	if _, _, _, ok := resolveDBPlugin(w, nil, "missing", "users", nil, nil, nil); ok {
 		t.Fatal("missing db key should 404")
 	}
 
@@ -187,5 +187,50 @@ func TestEnforceScopeAndPreference(t *testing.T) {
 		clientIPMiddleware(config.ServerConfig{TrustedProxyMode: "remote"}),
 	} {
 		mw(okHandler).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	}
+}
+
+func TestBuildPluginContextCountDefault(t *testing.T) {
+	orig := GetConfig()
+	t.Cleanup(func() { SetConfig(orig) })
+	SetConfig(config.Config{
+		DefaultTimezone: "UTC",
+		PluginMap: map[string]config.PluginConfig{
+			"app": {DbTxEnd: "commit", DbMaxRows: 10000, DbPreferCount: "exact"},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/app/users/", nil)
+	got := buildPluginContext(req, "app", "users", "")
+	prefer := got["prefer"].(map[string]any)
+	if prefer["count"] != "exact" {
+		t.Fatalf("missing Prefer count should use db_prefer_count, got %v", prefer["count"])
+	}
+	if got["db_max_rows"] != 10000 {
+		t.Fatalf("db_max_rows = %v, want 10000", got["db_max_rows"])
+	}
+	w := httptest.NewRecorder()
+	setPreferenceApplied(w, got)
+	if applied := w.Header().Get("Preference-Applied"); applied != "tx=commit count=exact timezone=UTC" {
+		t.Fatalf("Preference-Applied = %q", applied)
+	}
+
+	req.Header.Set("Prefer", "count=planned")
+	got = buildPluginContext(req, "app", "users", "")
+	prefer = got["prefer"].(map[string]any)
+	if prefer["count"] != "planned" {
+		t.Fatalf("client count should win, got %v", prefer["count"])
+	}
+
+	req.Header.Set("Prefer", "count=nope")
+	got = buildPluginContext(req, "app", "users", "")
+	prefer = got["prefer"].(map[string]any)
+	if prefer["count"] != "nope" {
+		t.Fatalf("unknown count should stay in prefer, got %v", prefer["count"])
+	}
+	w = httptest.NewRecorder()
+	setPreferenceApplied(w, got)
+	if applied := w.Header().Get("Preference-Applied"); strings.Contains(applied, "count=") {
+		t.Fatalf("unknown count echoed in Preference-Applied: %q", applied)
 	}
 }

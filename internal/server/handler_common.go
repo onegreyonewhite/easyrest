@@ -12,9 +12,23 @@ import (
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
 
-func resolveDBPlugin(w http.ResponseWriter, dbKey, resource string, exclude, allow, reserved []string) (easyrest.DBPlugin, *config.Config, config.PluginConfig, bool) {
+func denyInternalDB(w http.ResponseWriter, r *http.Request, dbKey string) bool {
+	if r != nil && internalCall(r) {
+		return false
+	}
+	if currentConfig().PluginMap[dbKey].Internal {
+		http.Error(w, "DB plugin not found", http.StatusNotFound)
+		return true
+	}
+	return false
+}
+
+func resolveDBPlugin(w http.ResponseWriter, r *http.Request, dbKey, resource string, exclude, allow, reserved []string) (easyrest.DBPlugin, *config.Config, config.PluginConfig, bool) {
 	cfg := currentConfig()
 	pluginCfg, hasPluginCfg := cfg.PluginMap[dbKey]
+	if denyInternalDB(w, r, dbKey) {
+		return nil, cfg, pluginCfg, false
+	}
 	if hasPluginCfg {
 		if slices.Contains(reserved, resource) || slices.Contains(exclude, resource) {
 			http.Error(w, "Not found", http.StatusNotFound)
@@ -56,6 +70,10 @@ func enforceScope(w http.ResponseWriter, r *http.Request, checkScope, isPublic b
 	return true
 }
 
+func knownCountMode(mode string) bool {
+	return mode == "exact" || mode == "planned" || mode == "estimated"
+}
+
 func setPreferenceApplied(w http.ResponseWriter, pluginCtx map[string]any) {
 	applied := strings.Builder{}
 	if prefer, ok := pluginCtx["prefer"].(map[string]any); ok {
@@ -65,6 +83,11 @@ func setPreferenceApplied(w http.ResponseWriter, pluginCtx map[string]any) {
 				applied.WriteString(txStr)
 				applied.WriteString(" ")
 			}
+		}
+		if count, ok := prefer["count"].(string); ok && knownCountMode(count) {
+			applied.WriteString("count=")
+			applied.WriteString(count)
+			applied.WriteString(" ")
 		}
 	}
 	applied.WriteString("timezone=")

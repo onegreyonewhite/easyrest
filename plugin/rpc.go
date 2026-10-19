@@ -3,7 +3,9 @@ package plugin
 import (
 	"encoding/gob"
 	"errors"
+	"math"
 	"net/rpc"
+	"slices"
 	"time"
 
 	"github.com/hashicorp/go-plugin"
@@ -321,17 +323,17 @@ func (p *DBQueryPluginPlugin) Client(broker *plugin.MuxBroker, c *rpc.Client) (a
 // AuthPluginRPC is the client wrapper for AuthPlugin.
 type AuthPluginRPC struct{ client *rpc.Client }
 
-func (a *AuthPluginRPC) Init(settings map[string]any) (map[string]any, error) {
-	req := AuthInitRequest{Settings: settings}
+func (a *AuthPluginRPC) Init(settings map[string]any, host HostRPC) (AuthInfo, error) {
+	req := AuthInitRequest{Settings: settings, Host: host}
 	var resp AuthInitResponse
 	err := a.client.Call("Plugin.Init", req, &resp)
 	if err != nil {
-		return nil, err
+		return AuthInfo{}, err
 	}
 	if resp.Error != "" {
-		return resp.Schema, errors.New(resp.Error)
+		return resp.Info, errors.New(resp.Error)
 	}
-	return resp.Schema, nil
+	return resp.Info, nil
 }
 
 func (a *AuthPluginRPC) Authenticate(headers map[string]string, method string, path string, query string) (map[string]any, error) {
@@ -353,8 +355,8 @@ type AuthPluginRPCServer struct {
 }
 
 func (s *AuthPluginRPCServer) Init(req AuthInitRequest, resp *AuthInitResponse) error {
-	schema, err := s.Impl.Init(req.Settings)
-	resp.Schema = schema
+	info, err := s.Impl.Init(req.Settings, req.Host)
+	resp.Info = info
 	if err != nil {
 		resp.Error = err.Error()
 	}
@@ -389,17 +391,17 @@ func (p *AuthPluginPlugin) Client(broker *plugin.MuxBroker, c *rpc.Client) (any,
 // MiddlewarePluginRPC is the client wrapper for MiddlewarePlugin.
 type MiddlewarePluginRPC struct{ client *rpc.Client }
 
-func (m *MiddlewarePluginRPC) Init(settings map[string]any) error {
-	req := MiddlewareInitRequest{Settings: settings}
+func (m *MiddlewarePluginRPC) Init(settings map[string]any, host HostRPC) (MiddlewareInfo, error) {
+	req := MiddlewareInitRequest{Settings: settings, Host: host}
 	var resp MiddlewareInitResponse
 	err := m.client.Call("Plugin.Init", req, &resp)
 	if err != nil {
-		return err
+		return MiddlewareInfo{}, err
 	}
 	if resp.Error != "" {
-		return errors.New(resp.Error)
+		return resp.Info, errors.New(resp.Error)
 	}
-	return nil
+	return resp.Info, nil
 }
 
 func (m *MiddlewarePluginRPC) PreRequest(dbKey string, ctx map[string]any) (map[string]any, *int, error) {
@@ -437,7 +439,8 @@ type MiddlewarePluginRPCServer struct {
 }
 
 func (s *MiddlewarePluginRPCServer) Init(req MiddlewareInitRequest, resp *MiddlewareInitResponse) error {
-	err := s.Impl.Init(req.Settings)
+	info, err := s.Impl.Init(req.Settings, req.Host)
+	resp.Info = info
 	if err != nil {
 		resp.Error = err.Error()
 	}
@@ -478,6 +481,467 @@ func (p *MiddlewarePluginPlugin) Client(broker *plugin.MuxBroker, c *rpc.Client)
 
 // --- End MiddlewarePlugin ---
 
+// ContentInitRequest holds settings for a content plugin.
+type ContentInitRequest struct {
+	Settings map[string]any
+}
+
+// ContentInitResponse is the Init result or an error string.
+type ContentInitResponse struct {
+	Info  ContentInfo
+	Error string
+}
+
+// ContentParseRequest is a raw body plus the plugin context.
+type ContentParseRequest struct {
+	Body []byte
+	Ctx  map[string]any
+}
+
+// ContentParseResponse is the parsed value. Value is a map or a slice.
+type ContentParseResponse struct {
+	Value any
+	Ctx   map[string]any
+	Error string
+}
+
+// ContentRenderRequest is the value to render and the plugin context.
+type ContentRenderRequest struct {
+	Data any
+	Ctx  map[string]any
+}
+
+// ContentRenderResponse is the rendered body bytes.
+type ContentRenderResponse struct {
+	Body  []byte
+	Ctx   map[string]any
+	Error string
+}
+
+// ContentPrepareGetRequest is the limit, offset, and page size for the next fetch.
+type ContentPrepareGetRequest struct {
+	Limit  int
+	Offset int
+	Page   int
+}
+
+// ContentPrepareGetResponse is the next TableGet windows.
+type ContentPrepareGetResponse struct {
+	Windows []ContentWindow
+	Repeat  bool
+}
+
+// ContentPrepareCreateRequest is the parsed body and the page size.
+type ContentPrepareCreateRequest struct {
+	Body any
+	Page int
+}
+
+// ContentPrepareCreateResponse is the body split into TableCreate chunks.
+type ContentPrepareCreateResponse struct {
+	Chunks []any
+	Error  string
+}
+
+// ContentPluginRPC is the client wrapper for ContentPlugin.
+type ContentPluginRPC struct{ client *rpc.Client }
+
+func (c *ContentPluginRPC) Init(settings map[string]any) (ContentInfo, error) {
+	req := ContentInitRequest{Settings: settings}
+	var resp ContentInitResponse
+	if err := c.client.Call("Plugin.Init", req, &resp); err != nil {
+		return ContentInfo{}, err
+	}
+	if resp.Error != "" {
+		return resp.Info, errors.New(resp.Error)
+	}
+	return resp.Info, nil
+}
+
+func (c *ContentPluginRPC) Parse(body []byte, ctx map[string]any) (any, map[string]any, error) {
+	req := ContentParseRequest{Body: body, Ctx: ctx}
+	var resp ContentParseResponse
+	if err := c.client.Call("Plugin.Parse", req, &resp); err != nil {
+		return nil, nil, err
+	}
+	if resp.Error != "" {
+		return resp.Value, resp.Ctx, errors.New(resp.Error)
+	}
+	return resp.Value, resp.Ctx, nil
+}
+
+func (c *ContentPluginRPC) Render(data any, ctx map[string]any) (any, map[string]any, error) {
+	req := ContentRenderRequest{Data: data, Ctx: ctx}
+	var resp ContentRenderResponse
+	if err := c.client.Call("Plugin.Render", req, &resp); err != nil {
+		return nil, nil, err
+	}
+	if resp.Error != "" {
+		return resp.Body, resp.Ctx, errors.New(resp.Error)
+	}
+	return resp.Body, resp.Ctx, nil
+}
+
+func (c *ContentPluginRPC) PrepareGet(limit, offset, page int) ([]ContentWindow, bool) {
+	req := ContentPrepareGetRequest{Limit: limit, Offset: offset, Page: page}
+	var resp ContentPrepareGetResponse
+	if err := c.client.Call("Plugin.PrepareGet", req, &resp); err != nil {
+		return nil, false
+	}
+	return resp.Windows, resp.Repeat
+}
+
+func (c *ContentPluginRPC) PrepareCreate(body any, page int) []any {
+	req := ContentPrepareCreateRequest{Body: body, Page: page}
+	var resp ContentPrepareCreateResponse
+	if err := c.client.Call("Plugin.PrepareCreate", req, &resp); err != nil {
+		return nil
+	}
+	if resp.Error != "" {
+		return nil
+	}
+	return resp.Chunks
+}
+
+// ContentPluginRPCServer is the server-side RPC implementation for ContentPlugin.
+type ContentPluginRPCServer struct {
+	Impl ContentPlugin
+}
+
+func (s *ContentPluginRPCServer) Init(req ContentInitRequest, resp *ContentInitResponse) error {
+	info, err := s.Impl.Init(req.Settings)
+	resp.Info = info
+	if err != nil {
+		resp.Error = err.Error()
+	}
+	return nil
+}
+
+func (s *ContentPluginRPCServer) Parse(req ContentParseRequest, resp *ContentParseResponse) error {
+	value, ctx, err := s.Impl.Parse(req.Body, req.Ctx)
+	if err != nil {
+		resp.Error = err.Error()
+	}
+	if hasNonFinite(value) || hasNonFinite(ctx) {
+		resp.Error = "non-finite float"
+		return nil
+	}
+	resp.Value = value
+	resp.Ctx = ctx
+	return nil
+}
+
+func (s *ContentPluginRPCServer) Render(req ContentRenderRequest, resp *ContentRenderResponse) error {
+	value, ctx, err := s.Impl.Render(req.Data, req.Ctx)
+	if hasNonFinite(value) || hasNonFinite(ctx) {
+		resp.Error = "non-finite float"
+		return nil
+	}
+	resp.Ctx = ctx
+	if err != nil {
+		resp.Error = err.Error()
+		return nil
+	}
+	body, err := RenderedBytes(value)
+	if err != nil {
+		resp.Error = err.Error()
+		return nil
+	}
+	resp.Body = body
+	return nil
+}
+
+func (s *ContentPluginRPCServer) PrepareGet(req ContentPrepareGetRequest, resp *ContentPrepareGetResponse) error {
+	windows, repeat := s.Impl.PrepareGet(req.Limit, req.Offset, req.Page)
+	resp.Windows = windows
+	resp.Repeat = repeat
+	return nil
+}
+
+func (s *ContentPluginRPCServer) PrepareCreate(req ContentPrepareCreateRequest, resp *ContentPrepareCreateResponse) error {
+	chunks := s.Impl.PrepareCreate(req.Body, req.Page)
+	if hasNonFinite(chunks) {
+		resp.Error = "non-finite float"
+		return nil
+	}
+	resp.Chunks = chunks
+	return nil
+}
+
+func hasNonFinite(v any) bool {
+	switch n := v.(type) {
+	case float32:
+		return math.IsNaN(float64(n)) || math.IsInf(float64(n), 0)
+	case float64:
+		return math.IsNaN(n) || math.IsInf(n, 0)
+	case map[string]any:
+		for _, item := range n {
+			if hasNonFinite(item) {
+				return true
+			}
+		}
+	case []any:
+		if slices.ContainsFunc(n, hasNonFinite) {
+			return true
+		}
+	case []map[string]any:
+		for i := range n {
+			if hasNonFinite(n[i]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ContentPluginPlugin wraps a ContentPlugin for go-plugin.
+type ContentPluginPlugin struct {
+	Impl ContentPlugin
+}
+
+func (p *ContentPluginPlugin) Server(broker *plugin.MuxBroker) (any, error) {
+	return &ContentPluginRPCServer{Impl: p.Impl}, nil
+}
+
+func (p *ContentPluginPlugin) Client(broker *plugin.MuxBroker, c *rpc.Client) (any, error) {
+	return &ContentPluginRPC{client: c}, nil
+}
+
+// --- End ContentPlugin ---
+
+// StorageInitRequest holds settings for a storage plugin.
+type StorageInitRequest struct {
+	Settings map[string]any
+	Host     HostRPC
+}
+
+// StorageInitResponse is the storage Init result.
+type StorageInitResponse struct {
+	Info  StorageInfo
+	Error string
+}
+
+// StoragePutRequest is a relative path, file bytes, and plugin context.
+type StoragePutRequest struct {
+	Path string
+	Body []byte
+	Ctx  map[string]any
+}
+
+// StoragePutResponse is the stored relative path.
+type StoragePutResponse struct {
+	Path  string
+	Ctx   map[string]any
+	Error string
+}
+
+// StoragePathRequest is a relative path and plugin context.
+type StoragePathRequest struct {
+	Path string
+	Ctx  map[string]any
+}
+
+// StorageGetURLRequest is a batch of relative paths and the plugin context.
+type StorageGetURLRequest struct {
+	Paths []string
+	Ctx   map[string]any
+}
+
+// StorageGetURLResponse is one URL and MIME type per requested path.
+type StorageGetURLResponse struct {
+	URLs  []StorageURL
+	Error string
+}
+
+// StorageMetadataResponse is file metadata.
+type StorageMetadataResponse struct {
+	Meta  StorageMeta
+	Error string
+}
+
+// StorageGetBinResponse is the file bytes and MIME type.
+type StorageGetBinResponse struct {
+	Body  []byte
+	Mime  string
+	Ctx   map[string]any
+	Error string
+}
+
+// StorageListResponse is one directory listing.
+type StorageListResponse struct {
+	Entries []StorageEntry
+	Error   string
+}
+
+// StorageDeleteResponse reports a delete error.
+type StorageDeleteResponse struct {
+	Error string
+}
+
+// StoragePluginRPC is the client wrapper for StoragePlugin.
+type StoragePluginRPC struct{ client *rpc.Client }
+
+func (c *StoragePluginRPC) Init(settings map[string]any, host HostRPC) (StorageInfo, error) {
+	var resp StorageInitResponse
+	if err := c.client.Call("Plugin.Init", StorageInitRequest{Settings: settings, Host: host}, &resp); err != nil {
+		return StorageInfo{}, err
+	}
+	if resp.Error != "" {
+		return resp.Info, errors.New(resp.Error)
+	}
+	return resp.Info, nil
+}
+
+func (c *StoragePluginRPC) Put(path string, body []byte, ctx map[string]any) (string, map[string]any, error) {
+	var resp StoragePutResponse
+	if err := c.client.Call("Plugin.Put", StoragePutRequest{Path: path, Body: body, Ctx: ctx}, &resp); err != nil {
+		return "", nil, err
+	}
+	if resp.Error != "" {
+		return resp.Path, resp.Ctx, errors.New(resp.Error)
+	}
+	return resp.Path, resp.Ctx, nil
+}
+
+func (c *StoragePluginRPC) GetUrl(paths []string, ctx map[string]any) ([]StorageURL, error) {
+	var resp StorageGetURLResponse
+	if err := c.client.Call("Plugin.GetUrl", StorageGetURLRequest{Paths: paths, Ctx: ctx}, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Error != "" {
+		return resp.URLs, errors.New(resp.Error)
+	}
+	return resp.URLs, nil
+}
+
+func (c *StoragePluginRPC) GetMetadata(path string, ctx map[string]any) (StorageMeta, error) {
+	var resp StorageMetadataResponse
+	if err := c.client.Call("Plugin.GetMetadata", StoragePathRequest{Path: path, Ctx: ctx}, &resp); err != nil {
+		return StorageMeta{}, err
+	}
+	if resp.Error != "" {
+		return resp.Meta, errors.New(resp.Error)
+	}
+	return resp.Meta, nil
+}
+
+func (c *StoragePluginRPC) GetBin(path string, ctx map[string]any) ([]byte, string, map[string]any, error) {
+	var resp StorageGetBinResponse
+	if err := c.client.Call("Plugin.GetBin", StoragePathRequest{Path: path, Ctx: ctx}, &resp); err != nil {
+		return nil, "", nil, err
+	}
+	if resp.Error != "" {
+		return resp.Body, resp.Mime, resp.Ctx, errors.New(resp.Error)
+	}
+	return resp.Body, resp.Mime, resp.Ctx, nil
+}
+
+func (c *StoragePluginRPC) List(path string, ctx map[string]any) ([]StorageEntry, error) {
+	var resp StorageListResponse
+	if err := c.client.Call("Plugin.List", StoragePathRequest{Path: path, Ctx: ctx}, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Error != "" {
+		return resp.Entries, errors.New(resp.Error)
+	}
+	return resp.Entries, nil
+}
+
+func (c *StoragePluginRPC) Delete(path string, ctx map[string]any) error {
+	var resp StorageDeleteResponse
+	if err := c.client.Call("Plugin.Delete", StoragePathRequest{Path: path, Ctx: ctx}, &resp); err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		return errors.New(resp.Error)
+	}
+	return nil
+}
+
+// StoragePluginRPCServer is the server-side RPC implementation for StoragePlugin.
+type StoragePluginRPCServer struct {
+	Impl StoragePlugin
+}
+
+func (s *StoragePluginRPCServer) Init(req StorageInitRequest, resp *StorageInitResponse) error {
+	info, err := s.Impl.Init(req.Settings, req.Host)
+	resp.Info = info
+	if err != nil {
+		resp.Error = err.Error()
+	}
+	return nil
+}
+
+func (s *StoragePluginRPCServer) Put(req StoragePutRequest, resp *StoragePutResponse) error {
+	rel, ctx, err := s.Impl.Put(req.Path, req.Body, req.Ctx)
+	resp.Path = rel
+	resp.Ctx = ctx
+	if err != nil {
+		resp.Error = err.Error()
+	}
+	return nil
+}
+
+func (s *StoragePluginRPCServer) GetUrl(req StorageGetURLRequest, resp *StorageGetURLResponse) error {
+	urls, err := s.Impl.GetUrl(req.Paths, req.Ctx)
+	resp.URLs = urls
+	if err != nil {
+		resp.Error = err.Error()
+	}
+	return nil
+}
+
+func (s *StoragePluginRPCServer) GetMetadata(req StoragePathRequest, resp *StorageMetadataResponse) error {
+	meta, err := s.Impl.GetMetadata(req.Path, req.Ctx)
+	resp.Meta = meta
+	if err != nil {
+		resp.Error = err.Error()
+	}
+	return nil
+}
+
+func (s *StoragePluginRPCServer) GetBin(req StoragePathRequest, resp *StorageGetBinResponse) error {
+	body, mimeType, ctx, err := s.Impl.GetBin(req.Path, req.Ctx)
+	resp.Body = body
+	resp.Mime = mimeType
+	resp.Ctx = ctx
+	if err != nil {
+		resp.Error = err.Error()
+	}
+	return nil
+}
+
+func (s *StoragePluginRPCServer) List(req StoragePathRequest, resp *StorageListResponse) error {
+	entries, err := s.Impl.List(req.Path, req.Ctx)
+	resp.Entries = entries
+	if err != nil {
+		resp.Error = err.Error()
+	}
+	return nil
+}
+
+func (s *StoragePluginRPCServer) Delete(req StoragePathRequest, resp *StorageDeleteResponse) error {
+	if err := s.Impl.Delete(req.Path, req.Ctx); err != nil {
+		resp.Error = err.Error()
+	}
+	return nil
+}
+
+// StoragePluginPlugin wraps a StoragePlugin for go-plugin.
+type StoragePluginPlugin struct {
+	Impl StoragePlugin
+}
+
+func (p *StoragePluginPlugin) Server(broker *plugin.MuxBroker) (any, error) {
+	return &StoragePluginRPCServer{Impl: p.Impl}, nil
+}
+
+func (p *StoragePluginPlugin) Client(broker *plugin.MuxBroker, c *rpc.Client) (any, error) {
+	return &StoragePluginRPC{client: c}, nil
+}
+
+// --- End StoragePlugin ---
+
 func init() {
 	gob.Register(map[string]any(nil))
 	gob.Register(map[string]string{})
@@ -485,4 +949,9 @@ func init() {
 	gob.Register(time.Time{})
 	gob.Register([]any{})
 	gob.Register(time.Duration(0))
+	gob.Register(StorageMeta{})
+	gob.Register(StorageEntry{})
+	gob.Register([]StorageEntry{})
+	gob.Register(StorageURL{})
+	gob.Register([]StorageURL{})
 }

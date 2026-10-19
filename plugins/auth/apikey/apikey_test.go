@@ -2,6 +2,7 @@ package apikey
 
 import (
 	"fmt"
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -14,7 +15,8 @@ func TestAPIKeyAuthPlugin_Init(t *testing.T) {
 		settings := map[string]any{
 			"keys": []string{"key1", "key2"},
 		}
-		schema, err := plugin.Init(settings)
+		info, err := plugin.Init(settings, easyrest.HostRPC{})
+		schema := info.Schema
 		require.NoError(t, err)
 		require.NotNil(t, schema)
 		assert.Equal(t, "apiKey", schema["type"])
@@ -31,7 +33,8 @@ func TestAPIKeyAuthPlugin_Init(t *testing.T) {
 			"keys":        []string{"key1"},
 			"header_name": "My-Custom-API-Header",
 		}
-		schema, err := plugin.Init(settings)
+		info, err := plugin.Init(settings, easyrest.HostRPC{})
+		schema := info.Schema
 		require.NoError(t, err)
 		require.NotNil(t, schema)
 		assert.Equal(t, "apiKey", schema["type"])
@@ -45,7 +48,8 @@ func TestAPIKeyAuthPlugin_Init(t *testing.T) {
 		settings := map[string]any{
 			"keys": []any{"key1", "key2"},
 		}
-		schema, err := plugin.Init(settings)
+		info, err := plugin.Init(settings, easyrest.HostRPC{})
+		schema := info.Schema
 		require.NoError(t, err)
 		require.NotNil(t, schema)
 		expectedKeys := map[string]struct{}{"key1": {}, "key2": {}}
@@ -57,7 +61,7 @@ func TestAPIKeyAuthPlugin_Init(t *testing.T) {
 		settings := map[string]any{
 			"keys": []any{"key1", 123},
 		}
-		_, err := plugin.Init(settings)
+		_, err := plugin.Init(settings, easyrest.HostRPC{})
 		require.Error(t, err)
 		assert.EqualError(t, err, "keys array contains non-string element at index 1")
 	})
@@ -65,7 +69,7 @@ func TestAPIKeyAuthPlugin_Init(t *testing.T) {
 	t.Run("Initialization with missing keys setting", func(t *testing.T) {
 		plugin := &APIKeyAuthPlugin{}
 		settings := map[string]any{}
-		_, err := plugin.Init(settings)
+		_, err := plugin.Init(settings, easyrest.HostRPC{})
 		require.Error(t, err)
 		assert.EqualError(t, err, "keys setting is required and must be a []string")
 	})
@@ -75,7 +79,7 @@ func TestAPIKeyAuthPlugin_Init(t *testing.T) {
 		settings := map[string]any{
 			"keys": "not-a-slice",
 		}
-		_, err := plugin.Init(settings)
+		_, err := plugin.Init(settings, easyrest.HostRPC{})
 		require.Error(t, err)
 		assert.EqualError(t, err, "keys setting must be a []string or []any (with string elements)")
 	})
@@ -85,7 +89,7 @@ func TestAPIKeyAuthPlugin_Init(t *testing.T) {
 		settings := map[string]any{
 			"keys": []string{},
 		}
-		_, err := plugin.Init(settings)
+		_, err := plugin.Init(settings, easyrest.HostRPC{})
 		require.Error(t, err)
 		assert.EqualError(t, err, "keys list cannot be empty")
 	})
@@ -95,7 +99,7 @@ func TestAPIKeyAuthPlugin_Init(t *testing.T) {
 		settings := map[string]any{
 			"keys": []string{"key1", ""},
 		}
-		_, err := plugin.Init(settings)
+		_, err := plugin.Init(settings, easyrest.HostRPC{})
 		require.Error(t, err)
 		assert.EqualError(t, err, "API key cannot be empty or just whitespace")
 	})
@@ -105,7 +109,7 @@ func TestAPIKeyAuthPlugin_Init(t *testing.T) {
 		settings := map[string]any{
 			"keys": []string{"key1", "   "},
 		}
-		_, err := plugin.Init(settings)
+		_, err := plugin.Init(settings, easyrest.HostRPC{})
 		require.Error(t, err)
 		assert.EqualError(t, err, "API key cannot be empty or just whitespace")
 	})
@@ -116,7 +120,8 @@ func TestAPIKeyAuthPlugin_Init(t *testing.T) {
 			"keys":        []string{"key1"},
 			"header_name": "   ", // Whitespace, should use default
 		}
-		schema, err := plugin.Init(settings)
+		info, err := plugin.Init(settings, easyrest.HostRPC{})
+		schema := info.Schema
 		require.NoError(t, err)
 		assert.Equal(t, "X-API-Key", schema["name"])
 		assert.Equal(t, "X-API-Key", plugin.headerName)
@@ -128,7 +133,7 @@ func TestAPIKeyAuthPlugin_Authenticate(t *testing.T) {
 	validKeys := []string{"secret-key-1", "secret-key-2"}
 	customHeader := "X-My-Token"
 
-	_, err := plugin.Init(map[string]any{"keys": validKeys, "header_name": customHeader})
+	_, err := plugin.Init(map[string]any{"keys": validKeys, "header_name": customHeader}, easyrest.HostRPC{})
 	require.NoError(t, err)
 
 	t.Run("Successful authentication with custom header", func(t *testing.T) {
@@ -202,7 +207,7 @@ func TestAPIKeyAuthPlugin_Authenticate(t *testing.T) {
 
 	t.Run("Default header X-API-Key", func(t *testing.T) {
 		pluginDefault := &APIKeyAuthPlugin{}
-		_, initErr := pluginDefault.Init(map[string]any{"keys": []string{"defaultKey"}})
+		_, initErr := pluginDefault.Init(map[string]any{"keys": []string{"defaultKey"}}, easyrest.HostRPC{})
 		require.NoError(t, initErr)
 
 		headers := map[string]string{

@@ -10,6 +10,8 @@ import (
 	"slices"
 	"sort"
 	"strings"
+
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
 
 // AWSSigV4AuthPlugin implements an authentication plugin for AWS Signature Version 4.
@@ -17,6 +19,7 @@ import (
 // Full cryptographic validation of the signature requires access to the http.Request object,
 // which is typically not provided directly to a simple Authenticate(authHeader string) method.
 type AWSSigV4AuthPlugin struct {
+	host                       easyrest.HostRPC
 	ConfiguredAccessKeyID      string
 	ConfiguredSecretAccessKey  string
 	PerformSignatureValidation bool
@@ -26,7 +29,16 @@ type AWSSigV4AuthPlugin struct {
 // It returns an OpenAPI security schema definition for AWS SigV4.
 // It now also accepts 'aws_access_key_id' and 'aws_secret_access_key' in settings
 // to enable server-side signature validation.
-func (p *AWSSigV4AuthPlugin) Init(settings map[string]any) (map[string]any, error) {
+func (p *AWSSigV4AuthPlugin) Init(settings map[string]any, host easyrest.HostRPC) (easyrest.AuthInfo, error) {
+	p.host = host
+	schema, err := p.initSettings(settings)
+	if err != nil {
+		return easyrest.AuthInfo{}, err
+	}
+	return easyrest.NewAuthInfo(schema), nil
+}
+
+func (p *AWSSigV4AuthPlugin) initSettings(settings map[string]any) (map[string]any, error) {
 	if keyID, ok := settings["aws_access_key_id"].(string); ok && keyID != "" {
 		p.ConfiguredAccessKeyID = keyID
 	}

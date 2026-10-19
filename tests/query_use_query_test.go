@@ -59,14 +59,8 @@ func TestUseQueryEnabled(t *testing.T) {
 	defer os.Remove(dbPath)
 	defer server.StopPlugins()
 
-	os.Setenv("ER_DB_TEST", "sqlite://"+dbPath)
-	os.Setenv("ER_USE_QUERY_TEST", "1")
-	os.Setenv("ER_CHECK_SCOPE", "0")
-	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
-	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
-
 	registerSQLitePreservedPlugins()
-	server.ReloadConfig()
+	applyTestConfig(t, testSQLiteYAML("sqlite://"+dbPath, false, "    use_query: true\n"))
 
 	cfg := server.GetConfig()
 	cfg.PluginMap["test"] = config.PluginConfig{
@@ -134,14 +128,8 @@ func TestUseQueryDisabled(t *testing.T) {
 	defer os.Remove(dbPath)
 	defer server.StopPlugins()
 
-	os.Unsetenv("ER_USE_QUERY_TEST")
-	os.Setenv("ER_DB_TEST", "sqlite://"+dbPath)
-	os.Setenv("ER_CHECK_SCOPE", "0")
-	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
-	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
-
 	registerSQLitePreservedPlugins()
-	server.ReloadConfig()
+	applyTestConfig(t, testSQLiteYAML("sqlite://"+dbPath, false, ""))
 
 	cfg := server.GetConfig()
 	cfg.PluginMap["test"] = config.PluginConfig{

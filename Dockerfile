@@ -18,6 +18,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 COPY internal ./internal
 COPY plugin ./plugin
 COPY plugins ./plugins
+COPY embed ./embed
 COPY cmd ./cmd
 COPY Makefile ./
 

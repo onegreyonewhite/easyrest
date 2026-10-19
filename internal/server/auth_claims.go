@@ -18,6 +18,14 @@ import (
 
 var authPluginOrder atomic.Pointer[[]string]
 
+// authCredential is where one loaded auth plugin reads its secret.
+type authCredential struct {
+	Key      string
+	IsCookie bool
+}
+
+var authCredentials atomic.Pointer[map[string]authCredential]
+
 // claimsCacheEntry stores claims and user_id for a token
 // Used for caching in Authenticate
 // Claims is jwt.MapClaims, UserID is string
@@ -80,7 +88,7 @@ func DecodeTokenWithoutValidation(tokenStr string) (jwt.MapClaims, error) {
 // authPluginTrialOrder returns plugin names in a deterministic order: local/cheap
 // auth first, then network-bound plugins, then any others alphabetically.
 func authPluginTrialOrder(plugins map[string]easyrest.AuthPlugin) []string {
-	priority := []string{"jwt", "basic", "apikey", "oidc", "awssigv4"}
+	priority := []string{"jwt", "jwtsession", "basic", "apikey", "dbsession", "oidc", "awssigv4"}
 	seen := make(map[string]struct{}, len(plugins))
 	order := make([]string, 0, len(plugins))
 	for _, name := range priority {
@@ -99,6 +107,73 @@ func authPluginTrialOrder(plugins map[string]easyrest.AuthPlugin) []string {
 	return append(order, rest...)
 }
 
+func credentialFrom(info easyrest.AuthInfo) authCredential {
+	key := info.Key
+	if key == "" {
+		key = "Authorization"
+	}
+	return authCredential{Key: key, IsCookie: info.IsCookie}
+}
+
+func authCredentialValue(r *http.Request, src authCredential) string {
+	key := src.Key
+	if key == "" {
+		key = "Authorization"
+	}
+	if !src.IsCookie {
+		return r.Header.Get(key)
+	}
+	cookie, err := r.Cookie(key)
+	if err != nil {
+		return ""
+	}
+	return cookie.Value
+}
+
+func authCacheKey(r *http.Request) string {
+	sources := authCredentials.Load()
+	if sources == nil || len(*sources) == 0 {
+		return r.Header.Get("Authorization")
+	}
+	names := make([]string, 0, len(*sources))
+	for name := range *sources {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		value := authCredentialValue(r, (*sources)[name])
+		if value == "" {
+			continue
+		}
+		parts = append(parts, name+"="+value)
+	}
+	return strings.Join(parts, "\n")
+}
+
+func authHeadersForPlugins(r *http.Request) (map[string]string, map[string]any) {
+	headers, pluginHeaders := buildRequestHeaderMaps(r.Header)
+	sources := authCredentials.Load()
+	if sources == nil {
+		return headers, pluginHeaders
+	}
+	for _, src := range *sources {
+		if !src.IsCookie {
+			continue
+		}
+		value := authCredentialValue(r, src)
+		if value == "" {
+			continue
+		}
+		key := src.Key
+		if key == "" {
+			key = "Authorization"
+		}
+		headers[strings.ToLower(key)] = value
+	}
+	return headers, pluginHeaders
+}
+
 // CheckScope verifies if the claims contain the required scope.
 func CheckScope(claims jwt.MapClaims, required string) bool {
 	scopeVal, ok := claims["scope"]
@@ -109,8 +184,7 @@ func CheckScope(claims jwt.MapClaims, required string) bool {
 	if !ok {
 		return false
 	}
-	scopes := strings.Fields(scopesStr)
-	for _, s := range scopes {
+	for s := range strings.FieldsSeq(scopesStr) {
 		if s == required {
 			return true
 		}

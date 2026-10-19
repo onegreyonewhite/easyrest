@@ -1,0 +1,165 @@
+// Package embed runs the easyrest server inside another program.
+// It uses the same setup and listen path as the easyrest-server binary
+// and can add routes, plugin factories, and Go rest handlers.
+package embed
+
+import (
+	"net/http"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/onegreyonewhite/easyrest/internal/server"
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
+)
+
+type (
+	// Call is one invocation of a Go rest handler.
+	Call = server.Call
+	// RestHandler replaces a rest table call or function call.
+	// The name is RestHandler because Handler is the HTTP handler constructor.
+	RestHandler = server.Handler
+	// HandlerError is a rest handler failure with an HTTP status.
+	HandlerError = server.HandlerError
+	// PluginCaller is the in-process internal RPC available to a rest handler.
+	PluginCaller = server.PluginCaller
+)
+
+// Option configures one embedded server before it loads config.
+type Option func(*settings)
+
+type settings struct {
+	routes     func(chi.Router)
+	handlers   map[string]RestHandler
+	db         map[string]func() easyrest.DBPlugin
+	query      map[string]func() easyrest.DBQueryPlugin
+	auth       map[string]func() easyrest.AuthPlugin
+	middleware map[string]func() easyrest.MiddlewarePlugin
+	content    map[string]func() easyrest.ContentPlugin
+	storage    map[string]func() easyrest.StoragePlugin
+}
+
+// WithRoutes adds routes after the built-in routes on every router build,
+// including a SIGHUP reload. Mount a chi.Router here for a separate tree.
+// Leave /, /api, /health, /restapi, and /media to the server.
+func WithRoutes(mount func(chi.Router)) Option {
+	return func(s *settings) { s.routes = mount }
+}
+
+// WithDB registers an in-process database plugin under a URI scheme.
+func WithDB(scheme string, factory func() easyrest.DBPlugin) Option {
+	return func(s *settings) {
+		if s.db == nil {
+			s.db = map[string]func() easyrest.DBPlugin{}
+		}
+		s.db[scheme] = factory
+	}
+}
+
+// WithQuery registers an in-process query plugin under a URI scheme.
+func WithQuery(scheme string, factory func() easyrest.DBQueryPlugin) Option {
+	return func(s *settings) {
+		if s.query == nil {
+			s.query = map[string]func() easyrest.DBQueryPlugin{}
+		}
+		s.query[scheme] = factory
+	}
+}
+
+// WithAuth registers an in-process auth plugin under an auth_plugins key.
+func WithAuth(name string, factory func() easyrest.AuthPlugin) Option {
+	return func(s *settings) {
+		if s.auth == nil {
+			s.auth = map[string]func() easyrest.AuthPlugin{}
+		}
+		s.auth[name] = factory
+	}
+}
+
+// WithMiddleware registers an in-process middleware plugin under its driver name.
+func WithMiddleware(name string, factory func() easyrest.MiddlewarePlugin) Option {
+	return func(s *settings) {
+		if s.middleware == nil {
+			s.middleware = map[string]func() easyrest.MiddlewarePlugin{}
+		}
+		s.middleware[name] = factory
+	}
+}
+
+// WithContent registers an in-process content plugin under a content_plugins key.
+func WithContent(name string, factory func() easyrest.ContentPlugin) Option {
+	return func(s *settings) {
+		if s.content == nil {
+			s.content = map[string]func() easyrest.ContentPlugin{}
+		}
+		s.content[name] = factory
+	}
+}
+
+// WithStorage registers an in-process storage plugin under its driver name.
+func WithStorage(name string, factory func() easyrest.StoragePlugin) Option {
+	return func(s *settings) {
+		if s.storage == nil {
+			s.storage = map[string]func() easyrest.StoragePlugin{}
+		}
+		s.storage[name] = factory
+	}
+}
+
+// WithRestHandler registers a Go function for a rest action handler name.
+// The config field handler selects it. Register it before the server loads config.
+func WithRestHandler(name string, handler RestHandler) Option {
+	return func(s *settings) {
+		if s.handlers == nil {
+			s.handlers = map[string]RestHandler{}
+		}
+		s.handlers[name] = handler
+	}
+}
+
+// Handler loads config and returns the HTTP handler Run would serve.
+// A later call rebuilds the router and keeps routes from WithRoutes.
+func Handler(overlay string, files []string, opts ...Option) (http.Handler, error) {
+	if err := configure(overlay, files, opts...); err != nil {
+		return nil, err
+	}
+	return server.LiveHandler(), nil
+}
+
+// Run loads config and serves it until SIGINT or SIGTERM.
+// SIGHUP reloads the same files and overlay and rebuilds routes.
+func Run(overlay string, files []string, opts ...Option) error {
+	if err := configure(overlay, files, opts...); err != nil {
+		return err
+	}
+	server.Run()
+	return nil
+}
+
+func configure(overlay string, files []string, opts ...Option) error {
+	var cfg settings
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	for name, factory := range cfg.db {
+		server.PreservedDbPlugins[name] = factory
+	}
+	for name, factory := range cfg.query {
+		server.PreservedQueryPlugins[name] = factory
+	}
+	for name, factory := range cfg.auth {
+		server.PreservedAuthPlugins[name] = factory
+	}
+	for name, factory := range cfg.middleware {
+		server.PreservedMiddlewarePlugins[name] = factory
+	}
+	for name, factory := range cfg.content {
+		server.PreservedContentPlugins[name] = factory
+	}
+	for name, factory := range cfg.storage {
+		server.PreservedStoragePlugins[name] = factory
+	}
+	server.SetRoutes(cfg.routes)
+	server.SetRestHandlers(cfg.handlers)
+	return server.SetupApplication(overlay, files)
+}

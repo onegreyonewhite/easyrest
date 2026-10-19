@@ -1,0 +1,252 @@
+port: "8081"
+check_scope: true
+
+internal_rpc:
+  network: unix
+  address: ./easyrest.sock
+
+content_plugins:
+  yaml: {}
+
+auth_plugins:
+  jwt:
+    settings:
+      jwt_secret: change-me
+  dbsession:
+    settings:
+      plugin: app
+      table: sessions
+
+middleware_plugins:
+  dbqueryhook:
+    settings:
+      by_key:
+        app:
+          pre_request: app.pre_request
+  cache-postgres:
+    settings:
+      uri: postgres://app_conn:app_conn@127.0.0.1:5432/easyrest_app?sslmode=disable&autoCleanup=true
+      ttl: 24h
+      invalidation_map:
+        app:
+          app.archive_user: [users, todos]
+  ratelimit:
+    settings:
+      limit: 100
+      period: 1m
+      key: global
+
+storage_plugins:
+  static:
+    settings:
+      path: ./static
+  media:
+    plugin: local
+    settings:
+      dir: ./media
+  avatars_inline:
+    plugin: local
+    settings:
+      dir: ./avatars
+      inline: true
+  photos:
+    plugin: s3
+    settings:
+      endpoint: http://127.0.0.1:9000
+      region: us-east-1
+      bucket: easyrest-photos
+      access_key: minio
+      secret_key: minio-secret
+      path_style: true
+      public_base: http://127.0.0.1:9000/easyrest-photos
+
+plugins:
+  app:
+    uri: postgres://app_conn:app_conn@127.0.0.1:5432/easyrest_app?sslmode=disable&search_path=app
+    internal: true
+    db_tx_end: commit-allow-override
+  public:
+    uri: sqlite://./public.db
+    title: Public catalog
+
+application:
+  template_path: ./page.html
+  version: v1
+  auth: jwt
+  source: app
+  storage: media
+  parsers: [json, yaml]
+  renderers: [json, yaml]
+  api:
+    v1:
+      auth: [dbsession, jwt]
+      anon_claims:
+        sub: ""
+      middlewares: [dbqueryhook, cache-postgres, ratelimit]
+      endpoints:
+        users:
+          table: users
+          auth: [dbsession, jwt]
+          required_scopes: [users-read]
+          actions:
+            list:
+              fields: [id, name, email]
+            retrieve: {}
+            create:
+              storage: avatars_inline
+              required_scopes: [users-write]
+              extra_fields:
+                avatar:
+                  type: string
+                  format: binary
+                note:
+                  type: string
+                  readOnly: true
+            update: {}
+            destroy: {}
+          detail_actions:
+            archive:
+              func: app.archive_user
+              required_scopes: [users-write]
+              fields:
+                reason:
+                  type: string
+          list_actions:
+            export:
+              func: app.export_users
+              fields:
+                format:
+                  type: string
+                rows:
+                  type: integer
+                  readOnly: true
+                secret:
+                  type: string
+                  writeOnly: true
+          state_actions:
+            settings:
+              source_field: settings
+              fields:
+                theme:
+                  type: string
+                locale:
+                  type: string
+        todos:
+          table: todos
+          auth: [dbsession, jwt]
+          public: true
+          filters:
+            done:
+              op: eq
+          actions:
+            list: {}
+            retrieve: {}
+            create:
+              type: func
+              fields: [title]
+            update: {}
+            destroy: {}
+        me:
+          actions:
+            placeholder: {}
+          auth: [dbsession, jwt]
+          state_actions:
+            settings:
+              func: app.my_settings
+              fields:
+                theme:
+                  type: string
+                locale:
+                  type: string
+        discovery:
+          url: .well-known
+          auth: []
+          public: true
+          actions:
+            placeholder: {}
+          state_actions:
+            openid_configuration:
+              url: openid-configuration
+              func: app.openid_configuration
+              no_trailing_slash: true
+              fields:
+                issuer:
+                  type: string
+        login:
+          url: /
+          auth: []
+          public: true
+          actions:
+            placeholder: {}
+          list_actions:
+            login:
+              func: app.login
+              auth: []
+              fields:
+                email:
+                  type: string
+                password:
+                  type: string
+                  writeOnly: true
+                sub:
+                  type: string
+                  readOnly: true
+                error:
+                  type: string
+                  readOnly: true
+            logout:
+              func: app.logout
+              auth: []
+              fields:
+                ok:
+                  type: boolean
+                  readOnly: true
+        photos:
+          table: photos
+          auth: [dbsession, jwt]
+          storage: photos
+          actions:
+            list: {}
+            retrieve: {}
+            create:
+              extra_fields:
+                image:
+                  type: string
+                  format: binary
+            update: {}
+            destroy: {}
+        directory:
+          table: user_directory
+          auth: []
+          public: true
+          filters:
+            city:
+              op: eq
+          actions:
+            list:
+              fields: [id, name]
+              parsers: [json]
+              renderers: [csv]
+        labels:
+          table: todos
+          auth: []
+          public: true
+          actions:
+            list:
+              fields: [id, title]
+              parsers: []
+              renderers: [json]
+        org_users:
+          url: orgs/{org_id}/users
+          table: users
+          auth: [dbsession, jwt]
+    v2:
+      auth: [jwt]
+      middlewares: [dbqueryhook]
+      endpoints:
+        todos:
+          table: todos
+          required_scopes: [todos-read]
+          actions:
+            list: {}
+            retrieve: {}

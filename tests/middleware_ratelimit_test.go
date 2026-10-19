@@ -32,12 +32,8 @@ func setupRatelimitIntegration(t *testing.T, settings map[string]any) (http.Hand
 	}
 
 	dbPath := setupTestDB(t)
-	os.Setenv("ER_DB_TEST", "sqlite://"+dbPath)
-	os.Setenv("ER_CHECK_SCOPE", "0")
-	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
-	os.Setenv("ER_TOKEN_USER_SEARCH", "sub")
-
-	cfg := config.Load()
+	applyTestConfig(t, testSQLiteYAML("sqlite://"+dbPath, false, ""))
+	cfg := server.GetConfig()
 	cfg.MiddlewarePlugins = map[string]config.MiddlewareConfig{
 		"ratelimit": {Settings: settings},
 	}

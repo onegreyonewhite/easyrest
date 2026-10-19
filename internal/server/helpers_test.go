@@ -51,8 +51,8 @@ func (f *fakeQueryPlugin) QueryCall(string, map[string]any) ([]map[string]any, e
 
 type fakeAuthPlugin struct{}
 
-func (f *fakeAuthPlugin) Init(map[string]any) (map[string]any, error) {
-	return map[string]any{"type": "apiKey"}, nil
+func (f *fakeAuthPlugin) Init(map[string]any, easyrest.HostRPC) (easyrest.AuthInfo, error) {
+	return easyrest.NewAuthInfo(map[string]any{"type": "apiKey"}), nil
 }
 func (f *fakeAuthPlugin) Authenticate(map[string]string, string, string, string) (map[string]any, error) {
 	return map[string]any{"sub": "u"}, nil
@@ -60,8 +60,8 @@ func (f *fakeAuthPlugin) Authenticate(map[string]string, string, string, string)
 
 type failAuthPlugin struct{}
 
-func (f *failAuthPlugin) Init(map[string]any) (map[string]any, error) {
-	return nil, errors.New("auth init failed")
+func (f *failAuthPlugin) Init(map[string]any, easyrest.HostRPC) (easyrest.AuthInfo, error) {
+	return easyrest.AuthInfo{}, errors.New("auth init failed")
 }
 func (f *failAuthPlugin) Authenticate(map[string]string, string, string, string) (map[string]any, error) {
 	return nil, nil
@@ -69,7 +69,12 @@ func (f *failAuthPlugin) Authenticate(map[string]string, string, string, string)
 
 type fakeMWPlugin struct{ initErr error }
 
-func (f *fakeMWPlugin) Init(map[string]any) error { return f.initErr }
+func (f *fakeMWPlugin) Init(map[string]any, easyrest.HostRPC) (easyrest.MiddlewareInfo, error) {
+	if f.initErr != nil {
+		return easyrest.MiddlewareInfo{}, f.initErr
+	}
+	return easyrest.NewMiddlewareInfo(), nil
+}
 func (f *fakeMWPlugin) PreRequest(string, map[string]any) (map[string]any, *int, error) {
 	return map[string]any{}, nil, nil
 }
@@ -82,9 +87,9 @@ type fakeRPC struct {
 	err error
 }
 
-func (f fakeRPC) Close() error                         { return nil }
-func (f fakeRPC) Ping() error                          { return nil }
-func (f fakeRPC) Dispense(string) (interface{}, error) { return f.raw, f.err }
+func (f fakeRPC) Close() error                 { return nil }
+func (f fakeRPC) Ping() error                  { return nil }
+func (f fakeRPC) Dispense(string) (any, error) { return f.raw, f.err }
 
 func TestProcessSelectAndWhere(t *testing.T) {
 	fields, group, err := processSelectParam("", nil, nil)
@@ -314,6 +319,14 @@ func TestLoadPluginsPreserved(t *testing.T) {
 			"cache-lru": {},
 			"broken":    {},
 			"missing":   {},
+			"mw_a": {
+				Plugin:   "cache-lru",
+				Settings: map[string]any{"tag": "a"},
+			},
+			"mw_b": {
+				Plugin:   "cache-lru",
+				Settings: map[string]any{"tag": "b"},
+			},
 		},
 	})
 	LoadPlugins()
@@ -331,6 +344,12 @@ func TestLoadPluginsPreserved(t *testing.T) {
 	}
 	if _, ok := (*MiddlewarePlugins.Load())["cache-lru"]; !ok {
 		t.Fatal("expected preserved middleware")
+	}
+	if _, ok := (*MiddlewarePlugins.Load())["mw_a"]; !ok {
+		t.Fatal("expected mw_a alias to cache-lru driver")
+	}
+	if _, ok := (*MiddlewarePlugins.Load())["mw_b"]; !ok {
+		t.Fatal("expected mw_b alias to cache-lru driver")
 	}
 	if _, ok := (*MiddlewarePlugins.Load())["broken"]; ok {
 		t.Fatal("failed middleware init should not be stored")
@@ -528,6 +547,19 @@ func assertVaryAcceptAndContentType(t *testing.T, h http.Header) {
 	}
 }
 
+func TestMakeResponseJSONIndentFromAccept(t *testing.T) {
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Accept", "application/json; indent=2")
+	makeResponse(w, req, http.StatusOK, map[string]any{"a": 1})
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("content type %q", ct)
+	}
+	if body := w.Body.String(); !strings.Contains(body, "\n  \"a\": 1\n") {
+		t.Fatalf("body %q", body)
+	}
+}
+
 func TestMakeResponseAlwaysVariesAcceptAndContentType(t *testing.T) {
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -638,19 +670,25 @@ func TestRespondJSONHTMLEscape(t *testing.T) {
 	t.Cleanup(func() { SetConfig(orig) })
 
 	payload := map[string]any{"x": "<a>&"}
+	write := func(plug easyrest.ContentPlugin, media string, v any) string {
+		t.Helper()
+		w := httptest.NewRecorder()
+		ref := contentPluginRef{Plugin: plug, ContentInfo: easyrest.NewContentInfo(media, media, "")}
+		cw := newContentWriter(w, httptest.NewRequest(http.MethodGet, "/", nil), "", nil, nil, ref, false)
+		if err := cw.Write(http.StatusOK, v, nil); err != nil {
+			t.Fatal(err)
+		}
+		return w.Body.String()
+	}
 
 	SetConfig(config.Config{Server: config.ServerConfig{DisableHTMLEscape: false}})
-	escaped := httptest.NewRecorder()
-	respondJSON(escaped, http.StatusOK, payload)
-	body := escaped.Body.String()
+	body := write(builtinJSON(), easyrest.MediaTypeJSON, payload)
 	if !strings.Contains(body, `\u003c`) || !strings.Contains(body, `\u0026`) {
 		t.Fatalf("expected HTML-escaped JSON, got %q", body)
 	}
 
 	SetConfig(config.Config{Server: config.ServerConfig{DisableHTMLEscape: true}})
-	raw := httptest.NewRecorder()
-	respondJSON(raw, http.StatusOK, payload)
-	body = raw.Body.String()
+	body = write(builtinJSON(), easyrest.MediaTypeJSON, payload)
 	if strings.Contains(body, `\u003c`) || strings.Contains(body, `\u0026`) {
 		t.Fatalf("expected unescaped JSON, got %q", body)
 	}
@@ -659,15 +697,13 @@ func TestRespondJSONHTMLEscape(t *testing.T) {
 	}
 
 	SetConfig(config.Config{Server: config.ServerConfig{DisableHTMLEscape: false}})
-	ndjsonEscaped := httptest.NewRecorder()
-	respondNDJSON(ndjsonEscaped, http.StatusOK, map[string]any{"x": "<a>&"})
-	if !strings.Contains(ndjsonEscaped.Body.String(), `\u003c`) {
-		t.Fatalf("expected HTML-escaped NDJSON, got %q", ndjsonEscaped.Body.String())
+	ndjsonEscaped := write(builtinNDJSON(), easyrest.MediaTypeNDJSON, map[string]any{"x": "<a>&"})
+	if !strings.Contains(ndjsonEscaped, `\u003c`) {
+		t.Fatalf("expected HTML-escaped NDJSON, got %q", ndjsonEscaped)
 	}
 	SetConfig(config.Config{Server: config.ServerConfig{DisableHTMLEscape: true}})
-	ndjsonRaw := httptest.NewRecorder()
-	respondNDJSON(ndjsonRaw, http.StatusOK, map[string]any{"x": "<a>&"})
-	if !strings.Contains(ndjsonRaw.Body.String(), `<a>&`) {
-		t.Fatalf("expected unescaped NDJSON, got %q", ndjsonRaw.Body.String())
+	ndjsonRaw := write(builtinNDJSON(), easyrest.MediaTypeNDJSON, map[string]any{"x": "<a>&"})
+	if !strings.Contains(ndjsonRaw, `<a>&`) {
+		t.Fatalf("expected unescaped NDJSON, got %q", ndjsonRaw)
 	}
 }

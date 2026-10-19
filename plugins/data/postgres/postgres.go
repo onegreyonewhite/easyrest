@@ -362,6 +362,9 @@ func (p *pgPlugin) processRows(rows pgx.Rows, loc *time.Location) ([]map[string]
 				rowMap[name] = string(v)
 			case string, int, int8, int16, int32, int64, float32, float64, bool:
 				rowMap[name] = v
+			case map[string]any, []any:
+				// jsonb arrives as a map. Keep it so clients see an object, not "map[...]".
+				rowMap[name] = v
 			default:
 				rowMap[name] = fmt.Sprintf("%v", v)
 			}
@@ -445,8 +448,32 @@ func (p *pgPlugin) TableGet(userID, table string, selectFields []string, where m
 	}
 	finalQuery := convertPlaceholders(query)
 
+	mode := easyrest.CountPreference(ctx)
+	var inner string
+	var countArgs []any
+	if mode != "" {
+		built, cargs, cerr := easyrest.BuildSelectQuery(table, selectFields, where, nil, groupBy, 0, 0, easyrest.SelectOptions{})
+		if cerr != nil {
+			return nil, nil, cerr
+		}
+		inner = built
+		countArgs = cargs
+	}
+
 	var results []map[string]any
+	var total int64
+	counted := false
 	outCtx, err := p.withTx(queryCtx, ctx, "commit", func(tx pgx.Tx, loc *time.Location) error {
+		if mode != "" {
+			got, ok, rerr := resolveCount(queryCtx, tx, mode, ctx, inner, countArgs, "EXPLAIN (FORMAT JSON) ", postgresPlanRows)
+			if rerr != nil {
+				return rerr
+			}
+			if ok {
+				total = got
+				counted = true
+			}
+		}
 		rows, qerr := tx.Query(queryCtx, finalQuery, args...)
 		if qerr != nil {
 			return qerr
@@ -458,7 +485,73 @@ func (p *pgPlugin) TableGet(userID, table string, selectFields []string, where m
 	if err != nil {
 		return nil, nil, err
 	}
+	if counted {
+		if outCtx == nil {
+			outCtx = ctx
+		}
+		outCtx = easyrest.WithTotal(outCtx, total)
+	}
 	return results, outCtx, nil
+}
+
+func resolveCount(ctx context.Context, tx pgx.Tx, mode string, pluginCtx map[string]any, inner string, args []any, explainPrefix string, parse func([]byte) (int64, error)) (int64, bool, error) {
+	var planned int64
+	hasPlanned := false
+	if mode == "planned" || mode == "estimated" {
+		var raw string
+		if err := tx.QueryRow(ctx, explainPrefix+convertPlaceholders(inner), args...).Scan(&raw); err != nil {
+			return 0, false, fmt.Errorf("failed to explain query: %w", err)
+		}
+		n, err := parse([]byte(raw))
+		if err != nil {
+			return 0, false, err
+		}
+		planned = n
+		hasPlanned = true
+	}
+	return easyrest.CountFromEstimate(mode, planned, hasPlanned, easyrest.CountMaxRows(pluginCtx), func() (int64, error) {
+		var n int64
+		if err := tx.QueryRow(ctx, convertPlaceholders(easyrest.CountSQL(inner)), args...).Scan(&n); err != nil {
+			return 0, fmt.Errorf("failed to count rows: %w", err)
+		}
+		return n, nil
+	})
+}
+
+func postgresPlanRows(raw []byte) (int64, error) {
+	var plans []map[string]any
+	if err := json.Unmarshal(raw, &plans); err != nil {
+		return 0, fmt.Errorf("failed to parse explain: %w", err)
+	}
+	if len(plans) == 0 {
+		return 0, fmt.Errorf("failed to parse explain: empty plan")
+	}
+	plan, ok := plans[0]["Plan"].(map[string]any)
+	if !ok {
+		return 0, fmt.Errorf("failed to parse explain: missing Plan")
+	}
+	value, ok := plan["Plan Rows"]
+	if !ok {
+		return 0, fmt.Errorf("failed to parse explain: missing Plan Rows")
+	}
+	n, ok := jsonFloat(value)
+	if !ok {
+		return 0, fmt.Errorf("failed to parse explain: Plan Rows is %T", value)
+	}
+	return easyrest.RoundCount(n), nil
+}
+
+func jsonFloat(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	default:
+		return 0, false
+	}
 }
 
 // TableCreate performs an INSERT operation on the specified table

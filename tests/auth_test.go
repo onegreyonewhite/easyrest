@@ -134,7 +134,7 @@ func TestEmptyTokenSecretWithoutToken(t *testing.T) {
 	defer server.StopPlugins()
 
 	// Setup server
-	server.ReloadConfig()
+	applyTestConfig(t, testSQLiteYAML("sqlite://"+dbPath, false, ""))
 	router := server.SetupRouter()
 
 	// Test 1: POST request to table without token

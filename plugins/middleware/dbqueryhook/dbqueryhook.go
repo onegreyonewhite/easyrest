@@ -2,6 +2,7 @@ package dbqueryhook
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
@@ -20,6 +21,7 @@ type hookRules struct {
 
 // Plugin sets db.pre-request / db.post-request from Init-compiled YAML rules.
 type Plugin struct {
+	host   easyrest.HostRPC
 	byType map[string]hookRules
 	byKey  map[string]hookRules
 }
@@ -30,7 +32,15 @@ func New() *Plugin {
 }
 
 // Init compiles by_type and by_key routine rules. Invalid non-empty names fail Init.
-func (p *Plugin) Init(settings map[string]any) error {
+func (p *Plugin) Init(settings map[string]any, host easyrest.HostRPC) (easyrest.MiddlewareInfo, error) {
+	p.host = host
+	if err := p.initSettings(settings); err != nil {
+		return easyrest.MiddlewareInfo{}, err
+	}
+	return easyrest.NewMiddlewareInfo(), nil
+}
+
+func (p *Plugin) initSettings(settings map[string]any) error {
 	if settings == nil {
 		settings = map[string]any{}
 	}
@@ -58,9 +68,7 @@ func (p *Plugin) PreRequest(dbKey string, ctx map[string]any) (map[string]any, *
 		out = map[string]any{}
 	} else {
 		out = make(map[string]any, len(ctx)+2)
-		for k, v := range ctx {
-			out[k] = v
-		}
+		maps.Copy(out, ctx)
 	}
 	if pre.set {
 		if pre.val == "" {

@@ -6,7 +6,6 @@ BIN_OUT = $(addprefix $(BUILD_DIR)/$(PREFIX), $(BINARIES))
 COVERAGE ?= cover.out
 export PATH := $(BUILD_DIR):$(PATH)
 export CGO_ENABLED := 0
-export ER_TOKEN_CACHE_TTL := 20
 
 all: $(BIN_OUT)
 
@@ -16,17 +15,19 @@ $(BUILD_DIR)/$(PREFIX)%: $(SRC_DIR)/%/*.go
 	mkdir -p $(BUILD_DIR)
 	go build -trimpath -ldflags="-s -w" -o $@ $(SRC_DIR)/$*
 
+$(BUILD_DIR)/$(PREFIX)content-yaml: $(wildcard $(SRC_DIR)/content-yaml/yamlcodec/*.go)
+
 clean:
 	rm -rf $(BUILD_DIR)
 
 COVERPKG ?= $(shell go list ./... | grep -v '/cmd/' | tr '\n' ',' | sed 's/,$$//')
 
-test: plugin-sqlite auth-jwt
+test: plugin-sqlite auth-jwt content-yaml
 	go test -v -coverpkg=$(COVERPKG) -coverprofile=$(COVERAGE) ./...
 	go tool cover -func=$(COVERAGE)
 
-bench:
-	go test -cpuprofile cpu.prof -bench=. -benchmem ./tests/benchmark_test.go
+bench: plugin-sqlite auth-jwt content-yaml
+	go test -cpuprofile cpu.prof -bench=. -benchmem -run '^$$' ./tests/
 
 run: plugin-sqlite auth-jwt
 	go run cmd/gateway/main.go --config test_config.yaml

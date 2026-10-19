@@ -3,6 +3,7 @@ package awssigv4
 import (
 	"encoding/hex"
 	"fmt"
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 	"sort"
 	"strings"
 	"testing"
@@ -51,7 +52,9 @@ func TestAWSSigV4AuthPlugin_Init(t *testing.T) {
 	plugin := &AWSSigV4AuthPlugin{}
 	settings := map[string]any{} // No specific settings for this version
 
-	schema, err := plugin.Init(settings)
+	info, err := plugin.Init(settings, easyrest.HostRPC{})
+
+	schema := info.Schema
 	require.NoError(t, err)
 	require.NotNil(t, schema)
 
@@ -66,7 +69,8 @@ func TestAWSSigV4AuthPlugin_Init(t *testing.T) {
 		"aws_access_key_id":     testAccessKeyID,
 		"aws_secret_access_key": testSecretKey,
 	}
-	schemaWithCreds, err := pluginWithCreds.Init(credsSettings)
+	info, err = pluginWithCreds.Init(credsSettings, easyrest.HostRPC{})
+	schemaWithCreds := info.Schema
 	require.NoError(t, err)
 	require.NotNil(t, schemaWithCreds)
 	assert.True(t, pluginWithCreds.PerformSignatureValidation)
@@ -79,14 +83,14 @@ func TestAWSSigV4AuthPlugin_Init(t *testing.T) {
 	partialCredsSettings := map[string]any{
 		"aws_access_key_id": testAccessKeyID,
 	}
-	_, err = pluginWithPartialCreds.Init(partialCredsSettings)
+	_, err = pluginWithPartialCreds.Init(partialCredsSettings, easyrest.HostRPC{})
 	require.NoError(t, err)
 	assert.False(t, pluginWithPartialCreds.PerformSignatureValidation)
 }
 
 func TestAWSSigV4AuthPlugin_Authenticate(t *testing.T) {
 	plugin := &AWSSigV4AuthPlugin{}
-	_, err := plugin.Init(map[string]any{})
+	_, err := plugin.Init(map[string]any{}, easyrest.HostRPC{})
 	require.NoError(t, err)
 
 	validHeaderBase := "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20230301/us-east-1/execute-api/aws4_request, SignedHeaders=%s, Signature=%s"
@@ -432,7 +436,7 @@ func TestAWSSigV4AuthPlugin_Authenticate(t *testing.T) {
 	}
 
 	tempPluginForSigCalc := &AWSSigV4AuthPlugin{}
-	_, initErrForSigCalc := tempPluginForSigCalc.Init(map[string]any{"aws_access_key_id": testAccessKeyID, "aws_secret_access_key": testSecretKey})
+	_, initErrForSigCalc := tempPluginForSigCalc.Init(map[string]any{"aws_access_key_id": testAccessKeyID, "aws_secret_access_key": testSecretKey}, easyrest.HostRPC{})
 	require.NoError(t, initErrForSigCalc, "Setup: Init for sig calc failed")
 
 	calculatedValidSignature, sigCalcErr := testSigV4Signer(tempPluginForSigCalc,
@@ -461,7 +465,7 @@ func TestAWSSigV4AuthPlugin_Authenticate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			currentPlugin := &AWSSigV4AuthPlugin{}
-			_, initErr := currentPlugin.Init(tt.pluginSettings)
+			_, initErr := currentPlugin.Init(tt.pluginSettings, easyrest.HostRPC{})
 			require.NoError(t, initErr, "Plugin Init failed")
 
 			normalizedRequestHeaders := make(map[string]string)

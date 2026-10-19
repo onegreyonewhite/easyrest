@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -60,8 +59,7 @@ func TestRPCWithoutClaims(t *testing.T) {
 	defer server.StopPlugins()
 
 	// Setup server
-	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
-	server.ReloadConfig()
+	applyTestConfig(t, testSecretYAML(false))
 	router := server.SetupRouter()
 
 	// Disable scope checking for test
@@ -149,8 +147,7 @@ func TestRPCWithFormData(t *testing.T) {
 	defer server.StopPlugins()
 
 	// Setup server
-	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
-	server.ReloadConfig()
+	applyTestConfig(t, testSecretYAML(false))
 	router := server.SetupRouter()
 
 	// Disable scope checking for test
@@ -234,8 +231,7 @@ func TestRPCAllowList(t *testing.T) {
 	}
 	defer server.StopPlugins()
 
-	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
-	server.ReloadConfig()
+	applyTestConfig(t, testSecretYAML(false))
 	router := server.SetupRouter()
 
 	cfg := server.GetConfig()
@@ -304,8 +300,7 @@ func TestRPCRejectsMaliciousArgKey(t *testing.T) {
 	}
 	defer server.StopPlugins()
 
-	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
-	server.ReloadConfig()
+	applyTestConfig(t, testSecretYAML(false))
 	router := server.SetupRouter()
 
 	cfg := server.GetConfig()
@@ -347,8 +342,7 @@ func TestRPCFormatQueryParam(t *testing.T) {
 	}
 	defer server.StopPlugins()
 
-	os.Setenv("ER_TOKEN_SECRET", "mytestsecret")
-	server.ReloadConfig()
+	applyTestConfig(t, testSecretYAML(false))
 	router := server.SetupRouter()
 
 	cfg := server.GetConfig()

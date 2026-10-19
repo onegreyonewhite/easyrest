@@ -41,6 +41,7 @@ type windowCount struct {
 
 // RateLimitPlugin is a built-in middleware that enforces a fixed-window rate limit.
 type RateLimitPlugin struct {
+	host       easyrest.HostRPC
 	mu         sync.Mutex
 	cache      *lru.Cache[string, windowCount]
 	limit      int
@@ -56,7 +57,15 @@ func New() *RateLimitPlugin {
 }
 
 // Init validates settings and creates the LRU counter cache.
-func (p *RateLimitPlugin) Init(settings map[string]any) error {
+func (p *RateLimitPlugin) Init(settings map[string]any, host easyrest.HostRPC) (easyrest.MiddlewareInfo, error) {
+	p.host = host
+	if err := p.initSettings(settings); err != nil {
+		return easyrest.MiddlewareInfo{}, err
+	}
+	return easyrest.NewMiddlewareInfo(), nil
+}
+
+func (p *RateLimitPlugin) initSettings(settings map[string]any) error {
 	if settings == nil {
 		settings = map[string]any{}
 	}
