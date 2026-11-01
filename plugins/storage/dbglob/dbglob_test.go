@@ -24,18 +24,27 @@ func TestPutGetBin(t *testing.T) {
 		t.Fatalf("root %q inline %v", root, inline)
 	}
 	stored, _, err := plug.Put("ignored", []byte("hello"), nil)
+	want := easyrest.FormatDataURL("", []byte("hello"))
+	if err != nil || stored != want {
+		t.Fatalf("stored %q err %v", stored, err)
+	}
+	body, mime, _, err := plug.GetBin(stored, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored != "aGVsbG8=" {
-		t.Fatalf("stored %q", stored)
+	if !bytes.Equal(body, []byte("hello")) || mime != "text/plain; charset=utf-8" {
+		t.Fatalf("body %q mime %q", body, mime)
 	}
-	body, _, _, err := plug.GetBin(stored, nil)
-	if err != nil {
-		t.Fatal(err)
+	typed, _, err := plug.Put("ignored", []byte("hello"), map[string]any{easyrest.CtxStorageMIME: "image/png"})
+	if err != nil || typed != easyrest.FormatDataURL("image/png", []byte("hello")) {
+		t.Fatalf("typed %q err %v", typed, err)
 	}
-	if !bytes.Equal(body, []byte("hello")) {
-		t.Fatalf("body %q", body)
+	body, mime, _, err = plug.GetBin(typed, nil)
+	if err != nil || !bytes.Equal(body, []byte("hello")) || mime != "image/png" {
+		t.Fatalf("body %q mime %q err %v", body, mime, err)
+	}
+	if _, _, _, err := plug.GetBin("aGVsbG8=", nil); err == nil {
+		t.Fatal("expected plain base64 to fail")
 	}
 	if _, err := plug.List("", nil); err == nil {
 		t.Fatal("expected list to fail")

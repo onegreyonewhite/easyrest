@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"time"
 
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 	cache "github.com/patrickmn/go-cache"
 )
 
@@ -70,7 +71,7 @@ func (p *SimpleCachePlugin) Set(key string, value string, ttl time.Duration) err
 func (p *SimpleCachePlugin) Get(key string) (string, error) {
 	val, found := p.cache.Get(key)
 	if !found {
-		return "", fmt.Errorf("cache key not found: %s", key)
+		return "", fmt.Errorf("%w: %s", easyrest.ErrCacheMiss, key)
 	}
 
 	// Check if the stored value is actually a string
@@ -81,4 +82,12 @@ func (p *SimpleCachePlugin) Get(key string) (string, error) {
 	}
 
 	return strVal, nil
+}
+
+// Delete removes the key. A missing key is not an error.
+func (p *SimpleCachePlugin) Delete(key string) error {
+	if p.cache != nil {
+		p.cache.Delete(key)
+	}
+	return nil
 }

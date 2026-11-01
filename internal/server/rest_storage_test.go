@@ -2,7 +2,6 @@ package server
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"mime/multipart"
 	"net/http"
@@ -133,7 +132,7 @@ func TestRestStorageMultipartAndBase64(t *testing.T) {
 	plugin := &restRecPlugin{schema: usersSchema(), updated: 1}
 	router := serveRest(t, storageUsersConfig("memory"), map[string]easyrest.DBPlugin{"db": plugin})
 
-	body, contentType := multipartBody(t, `{"title":"ada","thumb":"`+base64.StdEncoding.EncodeToString([]byte("png"))+`"}`, map[string][]byte{
+	body, contentType := multipartBody(t, `{"title":"ada","thumb":"`+easyrest.FormatDataURL("image/png", []byte("png"))+`"}`, map[string][]byte{
 		"avatar": []byte("one"),
 		"photos": []byte("p1"),
 	})
@@ -196,7 +195,7 @@ func TestRestStorageMultipartAndBase64(t *testing.T) {
 	creates := plugin.creates
 	router.ServeHTTP(badW, bad)
 	if badW.Code != http.StatusBadRequest || plugin.creates != creates {
-		t.Fatalf("bad base64 %d creates %d", badW.Code, plugin.creates)
+		t.Fatalf("bad data url %d creates %d", badW.Code, plugin.creates)
 	}
 
 	patchBody, patchType := multipartBody(t, `{"title":"ada"}`, map[string][]byte{"avatar": []byte("two")})
@@ -247,7 +246,8 @@ func TestRestStorageDBGlob(t *testing.T) {
 	useStoragePlugins(t, map[string]storagePluginRef{"dbglob": dbglobStorageRef(t)})
 	plugin := &restRecPlugin{schema: usersSchema(), updated: 1}
 	router := serveRest(t, storageUsersConfig("dbglob"), map[string]easyrest.DBPlugin{"db": plugin})
-	payload := `{"title":"ada","thumb":"` + base64.StdEncoding.EncodeToString([]byte("png")) + `"}`
+	thumb := easyrest.FormatDataURL("image/png", []byte("png"))
+	payload := `{"title":"ada","thumb":"` + thumb + `"}`
 	req := httptest.NewRequest(http.MethodPost, "/restapi/v1/users/", strings.NewReader(payload))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -255,11 +255,10 @@ func TestRestStorageDBGlob(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create %d %s", w.Code, w.Body.String())
 	}
-	want := base64.StdEncoding.EncodeToString([]byte("png"))
-	if plugin.createData[0]["thumb"] != want {
+	if plugin.createData[0]["thumb"] != thumb {
 		t.Fatalf("stored %#v", plugin.createData[0])
 	}
-	if !strings.Contains(w.Body.String(), want) {
+	if !strings.Contains(w.Body.String(), thumb) {
 		t.Fatalf("response %s", w.Body.String())
 	}
 
@@ -268,8 +267,8 @@ func TestRestStorageDBGlob(t *testing.T) {
 	if specW.Code != http.StatusOK {
 		t.Fatalf("spec %d", specW.Code)
 	}
-	if !strings.Contains(specW.Body.String(), `"format":"base64"`) {
-		t.Fatalf("spec missing base64 format: %s", specW.Body.String())
+	if !strings.Contains(specW.Body.String(), `"format":"data-url"`) {
+		t.Fatalf("spec missing data-url format: %s", specW.Body.String())
 	}
 	if strings.Contains(specW.Body.String(), `"format":"uri"`) {
 		t.Fatalf("dbglob spec used uri: %s", specW.Body.String())

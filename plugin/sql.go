@@ -10,6 +10,8 @@ import (
 type SelectOptions struct {
 	WhereRewriter    func(map[string]any) map[string]any
 	OffsetNeedsLimit bool
+	// Dialect renders JSON -> / ->> filters. Empty means PostgreSQL.
+	Dialect string
 }
 
 func writeJoined(sb *strings.Builder, parts []string, sep string) {
@@ -50,7 +52,7 @@ func BuildSelectQuery(table string, selectFields []string, where map[string]any,
 	sb.WriteString(" FROM ")
 	sb.WriteString(table)
 
-	whereClause, args, err := BuildWhereClauseSorted(where)
+	whereClause, args, err := BuildWhereClauseSortedFor(where, opts.Dialect)
 	if err != nil {
 		return "", nil, err
 	}

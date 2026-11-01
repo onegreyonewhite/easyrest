@@ -277,6 +277,12 @@ func looksLikeJSON(b []byte) bool {
 }
 
 func scanRows(r rowScanner) ([]map[string]any, error) {
+	return scanRowsText(r, nil)
+}
+
+// scanRowsText is scanRows, but columns in textCols stay strings.
+// ->> extracts must not be decoded just because the text looks like JSON.
+func scanRowsText(r rowScanner, textCols map[string]struct{}) ([]map[string]any, error) {
 	cols, err := r.Columns()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get columns: %w", err)
@@ -299,6 +305,10 @@ func scanRows(r rowScanner) ([]map[string]any, error) {
 			if t, ok := val.(time.Time); ok {
 				rowMap[colName] = easyrest.FormatSQLTime(t)
 			} else if b, ok := val.([]byte); ok {
+				if _, keepText := textCols[colName]; keepText {
+					rowMap[colName] = string(b)
+					continue
+				}
 				if looksLikeJSON(b) {
 					var jsonData any
 					err := json.Unmarshal(b, &jsonData)
@@ -984,7 +994,17 @@ func jsonFloat(v any) (float64, bool) {
 func (m *mysqlPlugin) TableGet(userID, table string, selectFields []string, where map[string]any,
 	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, map[string]any, error) {
 
-	selectOpts := easyrest.SelectOptions{WhereRewriter: convertILIKEtoLower}
+	originalFields := selectFields
+	selectFields, err := easyrest.RewriteJSONSelectFields(selectFields, easyrest.DialectMySQL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to build SELECT: %w", err)
+	}
+	groupBy, err = easyrest.RewriteJSONSelectFields(groupBy, easyrest.DialectMySQL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to build SELECT: %w", err)
+	}
+	selectOpts := easyrest.SelectOptions{WhereRewriter: convertILIKEtoLower, Dialect: easyrest.DialectMySQL}
+	textCols := easyrest.JSONTextColumns(originalFields)
 	query, args, err := easyrest.BuildSelectQuery(table, selectFields, where, ordering, groupBy, limit, offset, selectOpts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to build WHERE: %w", err)
@@ -1041,10 +1061,11 @@ func (m *mysqlPlugin) TableGet(userID, table string, selectFields []string, wher
 		return nil, nil, fmt.Errorf("failed to execute query: %w", err)
 	}
 	defer rows.Close()
-	result, err := scanRows(rows)
+	result, err := scanRowsText(rows, textCols)
 	if err != nil {
 		return nil, nil, err
 	}
+	easyrest.NormalizeJSONArrowRows(result, originalFields)
 	if err := runContextRoutine(tx, ctx, easyrest.CtxDBPostRequest); err != nil {
 		return nil, nil, err
 	}
@@ -1150,7 +1171,7 @@ func (m *mysqlPlugin) TableUpdate(userID, table string, data map[string]any, whe
 		updateSB.WriteString(strings.Join(setParts, ", "))
 		updateQ := updateSB.String()
 		processedWhere := convertILIKEtoLower(where)
-		whereClause, whereArgs, err := easyrest.BuildWhereClauseSorted(processedWhere)
+		whereClause, whereArgs, err := easyrest.BuildWhereClauseSortedFor(processedWhere, easyrest.DialectMySQL)
 		if err != nil {
 			// Error in building WHERE clause, transaction will be rolled back
 			return 0, fmt.Errorf("failed to build WHERE: %w", err)
@@ -1187,7 +1208,7 @@ func (m *mysqlPlugin) TableUpdate(userID, table string, data map[string]any, whe
 func (m *mysqlPlugin) TableDelete(userID, table string, where map[string]any, ctx map[string]any) (int, map[string]any, error) {
 	res, outCtx, err := m.handleTransaction(ctx, func(tx *sql.Tx) (any, error) {
 		processedWhere := convertILIKEtoLower(where)
-		whereClause, whereArgs, err := easyrest.BuildWhereClauseSorted(processedWhere)
+		whereClause, whereArgs, err := easyrest.BuildWhereClauseSortedFor(processedWhere, easyrest.DialectMySQL)
 		if err != nil {
 			// Error in building WHERE clause, transaction will be rolled back
 			return 0, fmt.Errorf("failed to build WHERE: %w", err)
@@ -1224,6 +1245,7 @@ var mysqlCacheDialect = sqlcache.Dialect{
 	DeleteExpired: "DELETE FROM easyrest_cache WHERE expires_at <= NOW()",
 	Upsert:        "INSERT INTO easyrest_cache (`key`, value, expires_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value), expires_at = VALUES(expires_at)",
 	SelectLive:    "SELECT value FROM easyrest_cache WHERE `key` = ? AND expires_at > NOW()",
+	DeleteKey:     "DELETE FROM easyrest_cache WHERE `key` = ?",
 }
 
 // mysqlCachePlugin stores ETag version tokens in MySQL.
@@ -1306,11 +1328,22 @@ func (p *mysqlCachePlugin) Get(key string) (string, error) {
 	value, err := p.store.Get(context.Background(), key)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", sql.ErrNoRows
+			return "", err
 		}
 		return "", fmt.Errorf("failed to get cache entry: %w", err)
 	}
 	return value, nil
+}
+
+func (p *mysqlCachePlugin) Delete(key string) error {
+	if p.dbPluginPointer.db == nil {
+		return errors.New("database connection not available for cache delete")
+	}
+	p.bindStore()
+	if err := p.store.Delete(context.Background(), key); err != nil {
+		return fmt.Errorf("failed to delete cache entry: %w", err)
+	}
+	return nil
 }
 
 func NewMysqlPlugin() *mysqlPlugin {

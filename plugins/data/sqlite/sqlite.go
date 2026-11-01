@@ -37,6 +37,7 @@ var sqliteCacheDialect = sqlcache.Dialect{
 	DeleteExpired: "DELETE FROM easyrest_cache WHERE expires_at <= CURRENT_TIMESTAMP",
 	Upsert:        "INSERT OR REPLACE INTO easyrest_cache (key, value, expires_at) VALUES (?, ?, ?)",
 	SelectLive:    "SELECT value FROM easyrest_cache WHERE key = ? AND expires_at > ? ORDER BY expires_at LIMIT 1",
+	DeleteKey:     "DELETE FROM easyrest_cache WHERE key = ?",
 	GetUsesNowArg: true,
 }
 
@@ -219,6 +220,10 @@ func (s *sqliteCachePlugin) Set(key string, value string, ttl time.Duration) err
 
 func (s *sqliteCachePlugin) Get(key string) (string, error) {
 	return s.store.Get(backgroundCtx, key)
+}
+
+func (s *sqliteCachePlugin) Delete(key string) error {
+	return s.store.Delete(backgroundCtx, key)
 }
 
 // Get prepared statement from cache or create new
@@ -426,6 +431,7 @@ func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, whe
 	opts := easyrest.SelectOptions{
 		WhereRewriter:    convertILIKEtoLike,
 		OffsetNeedsLimit: true,
+		Dialect:          easyrest.DialectSQLite,
 	}
 	query, args, err := easyrest.BuildSelectQuery(table, selectFields, where, ordering, groupBy, limit, offset, opts)
 	if err != nil {
@@ -450,7 +456,11 @@ func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, whe
 	defer rows.Close()
 
 	result, err := scanResultRows(rows, limit)
-	return result, nil, err
+	if err != nil {
+		return nil, nil, err
+	}
+	easyrest.NormalizeJSONArrowRows(result, selectFields)
+	return result, nil, nil
 }
 
 func sqliteStatTotal(stat string) (int64, bool) {
@@ -537,6 +547,7 @@ func (s *sqlitePlugin) tableGetWithTotal(userID, table string, selectFields []st
 	if err != nil {
 		return nil, nil, err
 	}
+	easyrest.NormalizeJSONArrowRows(result, selectFields)
 	if err := rows.Close(); err != nil {
 		return nil, nil, err
 	}
@@ -629,7 +640,7 @@ func (s *sqlitePlugin) TableUpdate(userID, table string, data map[string]any, wh
 		sb.WriteString(" SET ")
 		sb.WriteString(strings.Join(setParts, ", "))
 		where = convertILIKEtoLike(where)
-		whereClause, whereArgs, err := easyrest.BuildWhereClauseSorted(where)
+		whereClause, whereArgs, err := easyrest.BuildWhereClauseSortedFor(where, easyrest.DialectSQLite)
 		if err != nil {
 			return 0, err
 		}
@@ -669,7 +680,7 @@ func (s *sqlitePlugin) TableDelete(userID, table string, where map[string]any, c
 	run := func(tx *sql.Tx) (any, error) {
 		ctxQuery := context.WithValue(backgroundCtx, userIDKey, userID)
 		where = convertILIKEtoLike(where)
-		whereClause, whereArgs, err := easyrest.BuildWhereClauseSorted(where)
+		whereClause, whereArgs, err := easyrest.BuildWhereClauseSortedFor(where, easyrest.DialectSQLite)
 		if err != nil {
 			return 0, err
 		}

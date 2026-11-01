@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
 
 func testDialect() Dialect {
@@ -16,6 +17,7 @@ func testDialect() Dialect {
 		DeleteExpired: "DELETE FROM cache",
 		Upsert:        "UPSERT cache",
 		SelectLive:    "SELECT value FROM cache WHERE key = ?",
+		DeleteKey:     "DELETE FROM cache WHERE key = ?",
 	}
 }
 
@@ -99,6 +101,9 @@ func TestStoreSetGetAndCleanup(t *testing.T) {
 	if err := store.DeleteExpired(ctx); err != nil || lastQuery != "DELETE FROM cache" {
 		t.Fatalf("delete: %q %v", lastQuery, err)
 	}
+	if err := store.Delete(ctx, "k"); err != nil || lastQuery != store.Dialect.DeleteKey || len(lastArgs) != 1 || lastArgs[0] != "k" {
+		t.Fatalf("delete key: %q %#v %v", lastQuery, lastArgs, err)
+	}
 	if err := store.Set(ctx, "k", "v", time.Minute); err != nil {
 		t.Fatal(err)
 	}
@@ -141,6 +146,7 @@ func TestStorePrepareAndPreparedGetSet(t *testing.T) {
 
 	get := mock.ExpectPrepare("SELECT value FROM cache WHERE key = ?")
 	set := mock.ExpectPrepare("UPSERT cache")
+	del := mock.ExpectPrepare("DELETE FROM cache WHERE key = ?")
 	if err := store.Prepare(db); err != nil {
 		t.Fatal(err)
 	}
@@ -161,8 +167,13 @@ func TestStorePrepareAndPreparedGetSet(t *testing.T) {
 		t.Fatalf("prepared get now: %q %v", got, err)
 	}
 
+	del.ExpectExec().WithArgs("k").WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := store.Delete(context.Background(), "k"); err != nil {
+		t.Fatal(err)
+	}
 	get.WillBeClosed()
 	set.WillBeClosed()
+	del.WillBeClosed()
 	store.Stop()
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -180,7 +191,7 @@ func TestStoreSetGetErrors(t *testing.T) {
 	if err := store.Set(context.Background(), "k", "v", time.Second); err == nil {
 		t.Fatal("expected set error")
 	}
-	if _, err := store.Get(context.Background(), "k"); !errors.Is(err, sql.ErrNoRows) {
+	if _, err := store.Get(context.Background(), "k"); !errors.Is(err, sql.ErrNoRows) || !errors.Is(err, easyrest.ErrCacheMiss) {
 		t.Fatalf("expected miss: %v", err)
 	}
 }

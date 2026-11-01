@@ -2,6 +2,8 @@ package embed_test
 
 import (
 	"database/sql"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -11,7 +13,10 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/goccy/go-json"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
+	lrustore "github.com/onegreyonewhite/easyrest/plugins/data/lru"
 	sqliteplugin "github.com/onegreyonewhite/easyrest/plugins/data/sqlite"
+	cachemw 	"github.com/onegreyonewhite/easyrest/plugins/middleware/cache"
+	memstorage "github.com/onegreyonewhite/easyrest/plugins/storage/memory"
 
 	"github.com/onegreyonewhite/easyrest/embed"
 )
@@ -67,6 +72,28 @@ application:
         users:
           actions:
             list:
+              handler: missing
+`, nil)
+	if err == nil || !strings.Contains(err.Error(), `handler "missing" is not registered`) {
+		t.Fatalf("error: %v", err)
+	}
+}
+
+func TestHandler_UnknownView(t *testing.T) {
+	_, err := embed.Handler(`
+plugins:
+  app:
+    uri: sqlite://./missing.db
+application:
+  source: app
+  api:
+    v1:
+      endpoints:
+        users:
+          views:
+            sse:
+              path: "{id}/sse"
+              methods: [GET]
               handler: missing
 `, nil)
 	if err == nil || !strings.Contains(err.Error(), `handler "missing" is not registered`) {
@@ -134,6 +161,351 @@ application:
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/restapi/v1/users/", nil))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "ada") {
+		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandler_ViewBesideCRUD(t *testing.T) {
+	t.Cleanup(func() {
+		_, _ = embed.Handler("port: \"1\"\n", nil)
+	})
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	handler, err := embed.Handler(`
+check_scope: false
+plugins:
+  app:
+    uri: "sqlite://`+path+`"
+application:
+  source: app
+  public: true
+  api:
+    v1:
+      auth: []
+      endpoints:
+        users:
+          table: users
+          actions:
+            list:
+              handler: listUsers
+          views:
+            sse:
+              path: "{id}/sse"
+              methods: [GET]
+              handler: userEvents
+`, nil,
+		embed.WithDB("sqlite", func() easyrest.DBPlugin { return sqliteplugin.NewSqlitePlugin() }),
+		embed.WithRestHandler("listUsers", func(embed.Call) (any, error) {
+			return map[string]any{"ok": true}, nil
+		}),
+		embed.WithView("userEvents", func(w http.ResponseWriter, call embed.Call) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("data: " + call.Params["id"] + "\n\n"))
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sse := httptest.NewRecorder()
+	handler.ServeHTTP(sse, httptest.NewRequest(http.MethodGet, "/restapi/v1/users/7/sse/", nil))
+	if sse.Code != http.StatusOK || sse.Header().Get("Content-Type") != "text/event-stream" || sse.Body.String() != "data: 7\n\n" {
+		t.Fatalf("sse status %d type %q body %q", sse.Code, sse.Header().Get("Content-Type"), sse.Body.String())
+	}
+	list := httptest.NewRecorder()
+	handler.ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/restapi/v1/users/", nil))
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), "ok") {
+		t.Fatalf("list status %d body %s", list.Code, list.Body.String())
+	}
+}
+
+func TestHandler_ViewReadsBodyAndTable(t *testing.T) {
+	t.Cleanup(func() {
+		_, _ = embed.Handler("port: \"1\"\n", nil)
+	})
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO users (name) VALUES ('ada')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	handler, err := embed.Handler(`
+check_scope: false
+plugins:
+  app:
+    uri: "sqlite://`+path+`"
+application:
+  source: app
+  public: true
+  api:
+    v1:
+      auth: []
+      endpoints:
+        users:
+          table: users
+          actions:
+            list:
+              handler: listUsers
+          views:
+            note:
+              path: "{id}/note"
+              methods: [POST]
+              handler: noteUser
+`, nil,
+		embed.WithDB("sqlite", func() easyrest.DBPlugin { return sqliteplugin.NewSqlitePlugin() }),
+		embed.WithRestHandler("listUsers", func(embed.Call) (any, error) {
+			return map[string]any{"ok": true}, nil
+		}),
+		embed.WithView("noteUser", func(w http.ResponseWriter, call embed.Call) {
+			raw, err := io.ReadAll(call.Request.Body)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			res, err := call.Plugins.TableGet(easyrest.HostCall{DB: "app", Name: "users"})
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+			_, _ = w.Write(raw)
+			_, _ = w.Write(res.Body)
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	note := httptest.NewRecorder()
+	handler.ServeHTTP(note, httptest.NewRequest(http.MethodPost, "/restapi/v1/users/7/note/", strings.NewReader("Z")))
+	if note.Code != http.StatusOK || !strings.Contains(note.Body.String(), "Z") || !strings.Contains(note.Body.String(), "ada") {
+		t.Fatalf("note status %d body %s", note.Code, note.Body.String())
+	}
+	list := httptest.NewRecorder()
+	handler.ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/restapi/v1/users/", nil))
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), "ok") {
+		t.Fatalf("list status %d body %s", list.Code, list.Body.String())
+	}
+}
+
+func TestHandler_ViewHead(t *testing.T) {
+	t.Cleanup(func() {
+		_, _ = embed.Handler("port: \"1\"\n", nil)
+	})
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var feedMethod string
+	var feedCalls, headCalls int
+	handler, err := embed.Handler(`
+check_scope: false
+plugins:
+  app:
+    uri: "sqlite://`+path+`"
+application:
+  source: app
+  public: true
+  api:
+    v1:
+      auth: []
+      endpoints:
+        users:
+          actions:
+            list: {}
+          views:
+            feed:
+              path: "{id}/sse"
+              methods: [GET]
+              handler: feedUser
+            probe:
+              path: "{id}/peek"
+              methods: [HEAD]
+              handler: headUser
+`, nil,
+		embed.WithDB("sqlite", func() easyrest.DBPlugin { return sqliteplugin.NewSqlitePlugin() }),
+		embed.WithView("feedUser", func(w http.ResponseWriter, call embed.Call) {
+			feedCalls++
+			feedMethod = call.Request.Method
+			w.WriteHeader(http.StatusOK)
+		}),
+		embed.WithView("headUser", func(w http.ResponseWriter, call embed.Call) {
+			headCalls++
+			if call.Request.Method != http.MethodHead {
+				http.Error(w, call.Request.Method, http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headFeed := httptest.NewRecorder()
+	handler.ServeHTTP(headFeed, httptest.NewRequest(http.MethodHead, "/restapi/v1/users/7/sse/", nil))
+	if headFeed.Code != http.StatusOK || feedCalls != 1 || feedMethod != http.MethodHead || headCalls != 0 {
+		t.Fatalf("feed head status %d method %q feed %d head %d", headFeed.Code, feedMethod, feedCalls, headCalls)
+	}
+	headProbe := httptest.NewRecorder()
+	handler.ServeHTTP(headProbe, httptest.NewRequest(http.MethodHead, "/restapi/v1/users/7/peek/", nil))
+	if headProbe.Code != http.StatusNoContent || headCalls != 1 || feedCalls != 1 {
+		t.Fatalf("probe head status %d feed %d head %d body %s", headProbe.Code, feedCalls, headCalls, headProbe.Body.String())
+	}
+}
+
+func TestHandler_CacheKey(t *testing.T) {
+	t.Cleanup(func() {
+		_, _ = embed.Handler("port: \"1\"\n", nil)
+	})
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	handler, err := embed.Handler(`
+check_scope: false
+plugins:
+  app:
+    uri: "sqlite://`+path+`"
+middleware_plugins:
+  cache-lru:
+    settings:
+      ttl: 1m
+application:
+  source: app
+  public: true
+  api:
+    v1:
+      auth: []
+      endpoints:
+        users:
+          table: users
+          actions:
+            list:
+              handler: readCache
+`, nil,
+		embed.WithDB("sqlite", func() easyrest.DBPlugin { return sqliteplugin.NewSqlitePlugin() }),
+		embed.WithMiddleware("cache-lru", func() easyrest.MiddlewarePlugin {
+			return cachemw.New(lrustore.NewSimpleCachePlugin())
+		}),
+		embed.WithRestHandler("readCache", func(call embed.Call) (any, error) {
+			if err := call.Plugins.CacheSet("cache-lru", "k", "cached", nil); err != nil {
+				return nil, err
+			}
+			got, err := call.Plugins.CacheGet("cache-lru", "k")
+			if err != nil {
+				return nil, err
+			}
+			if err := call.Plugins.CacheDelete("cache-lru", "k"); err != nil {
+				return nil, err
+			}
+			_, err = call.Plugins.CacheGet("cache-lru", "k")
+			if !errors.Is(err, embed.ErrCacheMiss) {
+				return nil, err
+			}
+			return got, nil
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/restapi/v1/users/", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "cached") {
+		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandler_Storage(t *testing.T) {
+	t.Cleanup(func() {
+		_, _ = embed.Handler("port: \"1\"\n", nil)
+	})
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	handler, err := embed.Handler(`
+check_scope: false
+plugins:
+  app:
+    uri: "sqlite://`+path+`"
+storage_plugins:
+  files:
+    plugin: memory
+application:
+  source: app
+  public: true
+  api:
+    v1:
+      auth: []
+      endpoints:
+        users:
+          table: users
+          actions:
+            list:
+              handler: useStorage
+`, nil,
+		embed.WithDB("sqlite", func() easyrest.DBPlugin { return sqliteplugin.NewSqlitePlugin() }),
+		embed.WithStorage("memory", func() easyrest.StoragePlugin { return memstorage.New() }),
+		embed.WithRestHandler("useStorage", func(call embed.Call) (any, error) {
+			const relPath = "embed/obj.bin"
+			if _, _, err := call.Plugins.StoragePut("files", relPath, []byte("stored"), nil); err != nil {
+				return nil, err
+			}
+			body, _, _, err := call.Plugins.StorageGetBin("files", relPath, nil)
+			if err != nil || string(body) != "stored" {
+				return nil, err
+			}
+			if err := call.Plugins.StorageDelete("files", relPath, nil); err != nil {
+				return nil, err
+			}
+			return "done", nil
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/restapi/v1/users/", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "done") {
 		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
 	}
 }

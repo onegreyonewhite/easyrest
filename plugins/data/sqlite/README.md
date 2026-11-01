@@ -33,6 +33,10 @@ SQLite has no session variables. The plugin does not inject `request.*` or `erct
 
 Host flattening rules (`erctx.claims_sub`, dropping values that contain `;` or `--`) are in the [server README](../../../README.md#context-round-trip).
 
+## JSON arrows
+
+SQLite 3.38 and later accept the same `->` and `->>` chain as PostgreSQL, including `json_data->'phones'->0->>'number'`. Comparisons are parenthesized because those operators bind looser than `=` and `>`. `->>` compares as text. `->` equality uses `json(?)`. Ordering a `->` number uses `CAST((json_data->>'age') AS REAL)` so that `9` is not greater than `20`. Ordering a JSON string uses `->>`. Bool, null, object, and array values cannot be ordered this way. `->` results are decoded into JSON values after the query. `->>` numbers come back as text.
+
 ## Count
 
 `exact` runs `SELECT count(*)` over the filtered select, including `WHERE` and `GROUP BY`, without `LIMIT`, `OFFSET`, or `ORDER BY`.

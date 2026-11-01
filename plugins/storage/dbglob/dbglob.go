@@ -1,5 +1,5 @@
-// Package dbglob stores object bytes as a standard base64 string.
-// The host writes that string to the database and returns it unchanged.
+// Package dbglob stores object bytes.
+// Inline mode returns a data URL. Table mode stores standard base64 in the data column.
 package dbglob
 
 import (
@@ -13,7 +13,7 @@ import (
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
 
-// Plugin stores object bytes. Without a table it returns base64 inline.
+// Plugin stores object bytes. Without a table it returns a data URL.
 // With plugin and table it stores a row through HostRPC.
 type Plugin struct {
 	host    easyrest.HostRPC
@@ -71,10 +71,11 @@ func dbglobSetting(settings map[string]any, key, fallback string) string {
 	return value
 }
 
-// Put stores body. Inline mode returns base64. Table mode returns the path.
+// Put stores body. Inline mode returns a data URL. Table mode returns the path.
 func (p *Plugin) Put(relPath string, body []byte, ctx map[string]any) (string, map[string]any, error) {
 	if p.table == "" {
-		return base64.StdEncoding.EncodeToString(body), ctx, nil
+		mediaType, _ := easyrest.CtxString(ctx, easyrest.CtxStorageMIME)
+		return easyrest.FormatDataURL(mediaType, body), ctx, nil
 	}
 	rel, err := easyrest.CleanStorageRel(relPath)
 	if err != nil {
@@ -241,11 +242,14 @@ func (p *Plugin) GetMetadata(stored string, ctx map[string]any) (easyrest.Storag
 // GetBin returns file bytes. Table mode reads only the data column.
 func (p *Plugin) GetBin(stored string, ctx map[string]any) ([]byte, string, map[string]any, error) {
 	if p.table == "" {
-		body, err := base64.StdEncoding.DecodeString(stored)
+		mediaType, body, err := easyrest.ParseDataURL(stored)
 		if err != nil {
 			return nil, "", ctx, fmt.Errorf("storage dbglob: %w", err)
 		}
-		return body, http.DetectContentType(body), ctx, nil
+		if mediaType == "" {
+			mediaType = http.DetectContentType(body)
+		}
+		return body, mediaType, ctx, nil
 	}
 	client, err := easyrest.DialHost(p.host)
 	if err != nil {

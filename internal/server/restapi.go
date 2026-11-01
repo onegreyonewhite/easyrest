@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/onegreyonewhite/easyrest/internal/config"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
@@ -50,6 +51,7 @@ type restQueryFilter struct {
 	field string
 	op    string
 	not   bool
+	claim string
 }
 
 type restTableAction struct {
@@ -86,6 +88,9 @@ type restTableAction struct {
 	actionScopes    []string
 	handler         string
 	successStatus   int
+	checks          map[string]*jsonschema.Resolved
+	required        []string
+	order           map[string]struct{}
 }
 
 func restPathParamNames(urlPath string) []string {
@@ -127,13 +132,21 @@ func (a restTableAction) detailWhere(r *http.Request) map[string]any {
 	return whereEquals(values)
 }
 
-func (a restTableAction) authorize(w http.ResponseWriter, r *http.Request, read bool) (string, *http.Request, bool) {
+type authzRequest struct {
+	names      *[]string
+	anon       map[string]any
+	checkScope bool
+	public     bool
+	scopes     []string
+}
+
+func authorizeHTTP(w http.ResponseWriter, r *http.Request, in authzRequest) (string, *http.Request, bool) {
 	var (
 		userID string
 		err    error
 	)
-	if names := a.allowedAuth(); names != nil {
-		userID, r, err = authenticateAllowed(r, *names, a.appAnon)
+	if in.names != nil {
+		userID, r, err = authenticateAllowed(r, *in.names, in.anon)
 	} else {
 		userID, r, err = Authenticate(r)
 	}
@@ -141,11 +154,11 @@ func (a restTableAction) authorize(w http.ResponseWriter, r *http.Request, read 
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return "", r, false
 	}
-	if !a.checkScope || a.public {
+	if !in.checkScope || in.public {
 		return userID, r, true
 	}
 	claims := getTokenClaims(r)
-	for _, scope := range restRequiredScopes(a.actionScopes, a.endpointScopes, a.endpointName, read) {
+	for _, scope := range in.scopes {
 		if CheckScope(claims, scope) {
 			continue
 		}
@@ -153,6 +166,16 @@ func (a restTableAction) authorize(w http.ResponseWriter, r *http.Request, read 
 		return "", r, false
 	}
 	return userID, r, true
+}
+
+func (a restTableAction) authorize(w http.ResponseWriter, r *http.Request, read bool) (string, *http.Request, bool) {
+	return authorizeHTTP(w, r, authzRequest{
+		names:      a.allowedAuth(),
+		anon:       a.appAnon,
+		checkScope: a.checkScope,
+		public:     a.public,
+		scopes:     restRequiredScopes(a.actionScopes, a.endpointScopes, a.endpointName, read),
+	})
 }
 
 func (a restTableAction) allowedAuth() *[]string {
@@ -221,6 +244,13 @@ func (a restTableAction) finishContext(w http.ResponseWriter, r *http.Request, c
 	applyContextResponseHeaders(w, ctx)
 	status = statusFromPluginContext(ctx, status)
 	if out.err != nil {
+		var handled *HandlerError
+		if errors.As(out.err, &handled) && handled.ContentType != "" {
+			w.Header().Set("Content-Type", handled.ContentType)
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(handled.Message))
+			return
+		}
 		http.Error(w, out.err.Error(), status)
 		return
 	}
@@ -323,15 +353,50 @@ func compileRestFilters(filters map[string]config.RestFilter) []restQueryFilter 
 		if !ok {
 			continue
 		}
-		out = append(out, restQueryFilter{name: name, field: field, op: op, not: filter.Not})
+		out = append(out, restQueryFilter{name: name, field: field, op: op, not: filter.Not, claim: filter.Claim})
 	}
 	return out
 }
 
-func (a restTableAction) listWhere(r *http.Request) map[string]any {
+var (
+	errClaimMissing  = errors.New("claim is missing")
+	errClaimConflict = errors.New("claim conflicts")
+)
+
+func (a restTableAction) applyClaims(r *http.Request, where map[string]any) error {
+	claims := getTokenClaims(r)
+	if claims["scheduler"] == true {
+		return nil
+	}
+	for _, filter := range a.filters {
+		if filter.claim == "" {
+			continue
+		}
+		raw, _ := claims[filter.claim].(string)
+		if raw == "" {
+			return errClaimMissing
+		}
+		field := filter.field
+		if filter.not {
+			field = "NOT " + field
+		}
+		if existing, ok := where[field].(map[string]any); ok {
+			if prev, ok := existing[filter.op]; ok && fmt.Sprint(prev) != raw {
+				return errClaimConflict
+			}
+		}
+		where[field] = map[string]any{filter.op: raw}
+	}
+	return nil
+}
+
+func (a restTableAction) listWhere(r *http.Request) (map[string]any, error) {
 	where := a.whereFromPath(r)
 	query := r.URL.Query()
 	for _, filter := range a.filters {
+		if filter.claim != "" {
+			continue
+		}
 		values, ok := query[filter.name]
 		if !ok || len(values) == 0 {
 			continue
@@ -342,7 +407,46 @@ func (a restTableAction) listWhere(r *http.Request) map[string]any {
 		}
 		where[field] = map[string]any{filter.op: values[0]}
 	}
-	return where
+	if err := a.applyClaims(r, where); err != nil {
+		return nil, err
+	}
+	return where, nil
+}
+
+func (a restTableAction) scopedWhere(w http.ResponseWriter, r *http.Request, where map[string]any) (map[string]any, bool) {
+	if err := a.applyClaims(r, where); err != nil {
+		writeClaimError(w, err)
+		return nil, false
+	}
+	return where, true
+}
+
+func writeClaimError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errClaimConflict) {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+	http.Error(w, "Unauthorized", http.StatusUnauthorized)
+}
+
+func (a restTableAction) stampClaims(w http.ResponseWriter, r *http.Request, row map[string]any) bool {
+	claims := getTokenClaims(r)
+	for _, filter := range a.filters {
+		if filter.claim == "" {
+			continue
+		}
+		raw, _ := claims[filter.claim].(string)
+		if raw == "" {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return false
+		}
+		if body, exists := row[filter.field]; exists && fmt.Sprint(body) != raw {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return false
+		}
+		row[filter.field] = raw
+	}
+	return true
 }
 
 func restListLimitOffset(r *http.Request, source string, pluginCtx map[string]any) (int, int, bool) {
@@ -377,13 +481,17 @@ func restListLimitOffset(r *http.Request, source string, pluginCtx map[string]an
 	return limit, offset, false
 }
 
-func restListOrdering(w http.ResponseWriter, raw string, allowed []string) ([]string, bool) {
+func orderFields(fields []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(fields))
+	for _, field := range fields {
+		out[field] = struct{}{}
+	}
+	return out
+}
+
+func restListOrdering(w http.ResponseWriter, raw string, allowed map[string]struct{}) ([]string, bool) {
 	if raw == "" {
 		return nil, true
-	}
-	known := make(map[string]struct{}, len(allowed))
-	for _, field := range allowed {
-		known[field] = struct{}{}
 	}
 	parts := ParseCSV(raw)
 	ordering := make([]string, 0, len(parts))
@@ -394,7 +502,7 @@ func restListOrdering(w http.ResponseWriter, raw string, allowed []string) ([]st
 			desc = true
 			name = strings.TrimPrefix(part, "-")
 		}
-		if _, ok := known[name]; !ok {
+		if _, ok := allowed[name]; !ok {
 			http.Error(w, "invalid ordering", http.StatusBadRequest)
 			return nil, false
 		}
@@ -416,13 +524,20 @@ func (a restTableAction) list(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	ordering, ok := restListOrdering(w, r.URL.Query().Get("ordering"), a.selectFields)
+	ordering, ok := restListOrdering(w, r.URL.Query().Get("ordering"), a.order)
 	if !ok {
+		return
+	}
+	if !a.checkFilters(w, r) {
 		return
 	}
 	pluginCtx := a.dbContext(ctx)
 	limit, offset, usedHeader := restListLimitOffset(r, a.source, pluginCtx)
-	where := a.listWhere(r)
+	where, whereErr := a.listWhere(r)
+	if whereErr != nil {
+		writeClaimError(w, whereErr)
+		return
+	}
 	choice := a.contentChoice(r)
 	serveContentRead(contentRead{
 		w:            w,
@@ -512,19 +627,86 @@ func restListLinks(ctx map[string]any, r *http.Request, limit, offset int, total
 	return next, prev
 }
 
+func (a restTableAction) prepareCreateRows(w http.ResponseWriter, r *http.Request) ([]map[string]any, bool) {
+	if a.hasBinaryField() && isMultipart(r.Header.Get("Content-Type")) {
+		row, ok := a.prepareWriteRow(w, r, true)
+		if !ok {
+			return nil, false
+		}
+		return []map[string]any{row}, true
+	}
+	parsed, err := a.readContent(w, r, false)
+	if err != nil {
+		http.Error(w, err.Error(), storageStatus(err))
+		return nil, false
+	}
+	rows, err := coerceWriteRows(parsed)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return nil, false
+	}
+	for i := range rows {
+		if !a.finishCreateRow(w, r, rows[i], i, len(rows)) {
+			return nil, false
+		}
+	}
+	return rows, true
+}
+
+// rowPrefixWriter labels an error body when a create request holds more than one object.
+type rowPrefixWriter struct {
+	http.ResponseWriter
+	prefix []byte
+}
+
+func (w *rowPrefixWriter) Write(p []byte) (int, error) {
+	if len(w.prefix) > 0 {
+		if _, err := w.ResponseWriter.Write(w.prefix); err != nil {
+			return 0, err
+		}
+		w.prefix = nil
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+func (a restTableAction) finishCreateRow(w http.ResponseWriter, r *http.Request, row map[string]any, index, count int) bool {
+	if count > 1 {
+		w = &rowPrefixWriter{ResponseWriter: w, prefix: []byte(fmt.Sprintf("row %d: ", index))}
+	}
+	if !a.acceptWriteFiles(w, row, nil) {
+		return false
+	}
+	if len(a.storageKinds()) > 0 {
+		ref, ok := storagePluginByName(a.storageName)
+		if !ok {
+			http.Error(w, fmt.Sprintf("storage plugin %q is not loaded", a.storageName), http.StatusInternalServerError)
+			return false
+		}
+		reqCtx := map[string]any{"request": requestPublic(r)}
+		if err := storeObjectFields(r.Context(), row, nil, a.storageKinds(), ref, a.table, reqCtx); err != nil {
+			http.Error(w, err.Error(), storageStatus(err))
+			return false
+		}
+		a.omitReadOnly(row)
+	}
+	for name, value := range a.pathValues(r) {
+		row[name] = value
+	}
+	return a.stampClaims(w, r, row)
+}
+
 func (a restTableAction) prepareWriteRow(w http.ResponseWriter, r *http.Request, includePath bool) (map[string]any, bool) {
 	row, ok := a.parseWriteObject(w, r)
 	if !ok {
 		return nil, false
 	}
-	if a.rejectUnknownWriteKeys(w, row) {
-		return nil, false
-	}
-	a.omitReadOnly(row)
 	if includePath {
 		for name, value := range a.pathValues(r) {
 			row[name] = value
 		}
+	}
+	if !a.stampClaims(w, r, row) {
+		return nil, false
 	}
 	return row, true
 }
@@ -538,11 +720,11 @@ func (a restTableAction) create(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	row, ok := a.prepareWriteRow(w, r, true)
+	rowsIn, ok := a.prepareCreateRows(w, r)
 	if !ok {
 		return
 	}
-	rows, returned, err := plug.TableCreate("", a.table, []map[string]any{row}, a.dbContext(ctx))
+	rows, returned, err := plug.TableCreate("", a.table, rowsIn, a.dbContext(ctx))
 	if err != nil {
 		a.finishContext(w, r, ctx, restWrite{returned: returned, err: err})
 		return
@@ -599,10 +781,6 @@ func (a restTableAction) detailCall(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if a.rejectUnknownWriteKeys(w, row) {
-		return
-	}
-	a.omitReadOnly(row)
 	for name, value := range a.pathValues(r) {
 		row[name] = value
 	}
@@ -634,7 +812,11 @@ func (a restTableAction) stateGet(w http.ResponseWriter, r *http.Request) {
 		a.stateFuncGet(w, r, plug, ctx)
 		return
 	}
-	rows, returned, err := plug.TableGet("", a.table, []string{a.sourceField}, a.detailWhere(r), nil, nil, 0, 0, a.dbContext(ctx))
+	where, ready := a.scopedWhere(w, r, a.detailWhere(r))
+	if !ready {
+		return
+	}
+	rows, returned, err := plug.TableGet("", a.table, []string{a.sourceField}, where, nil, nil, 0, 0, a.dbContext(ctx))
 	if err != nil {
 		a.finishContext(w, r, ctx, restWrite{returned: returned, err: err})
 		return
@@ -713,7 +895,11 @@ func (a restTableAction) statePut(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	updated, returned, err := plug.TableUpdate("", a.table, map[string]any{a.sourceField: row}, a.detailWhere(r), a.dbContext(ctx))
+	where, ready := a.scopedWhere(w, r, a.detailWhere(r))
+	if !ready {
+		return
+	}
+	updated, returned, err := plug.TableUpdate("", a.table, map[string]any{a.sourceField: row}, where, a.dbContext(ctx))
 	if err != nil {
 		a.finishContext(w, r, ctx, restWrite{returned: returned, err: err})
 		return
@@ -750,7 +936,11 @@ func (a restTableAction) retrieve(w http.ResponseWriter, r *http.Request) {
 	}
 	stripPreferCount(ctx)
 	dbCtx := a.dbContext(ctx)
-	rows, returned, err := plug.TableGet(userID, a.table, a.selectFields, a.detailWhere(r), nil, nil, 2, 0, dbCtx)
+	where, ready := a.scopedWhere(w, r, a.detailWhere(r))
+	if !ready {
+		return
+	}
+	rows, returned, err := plug.TableGet(userID, a.table, a.selectFields, where, nil, nil, 2, 0, dbCtx)
 	if err != nil {
 		a.finishContext(w, r, dbCtx, restWrite{returned: returned, err: err})
 		return
@@ -808,7 +998,11 @@ func (a restTableAction) update(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	updated, returned, err := plug.TableUpdate("", a.table, row, a.detailWhere(r), a.dbContext(ctx))
+	where, ready := a.scopedWhere(w, r, a.detailWhere(r))
+	if !ready {
+		return
+	}
+	updated, returned, err := plug.TableUpdate("", a.table, row, where, a.dbContext(ctx))
 	if err != nil {
 		a.finishContext(w, r, ctx, restWrite{returned: returned, err: err})
 		return
@@ -817,7 +1011,7 @@ func (a restTableAction) update(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a restTableAction) destroy(w http.ResponseWriter, r *http.Request) {
-	_, _, ctx, ok := a.openContext(w, r, false, "")
+	_, r, ctx, ok := a.openContext(w, r, false, "")
 	if !ok {
 		return
 	}
@@ -825,7 +1019,11 @@ func (a restTableAction) destroy(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	_, returned, err := plug.TableDelete("", a.table, a.detailWhere(r), a.dbContext(ctx))
+	where, ready := a.scopedWhere(w, r, a.detailWhere(r))
+	if !ready {
+		return
+	}
+	_, returned, err := plug.TableDelete("", a.table, where, a.dbContext(ctx))
 	if err != nil {
 		a.finishContext(w, r, ctx, restWrite{returned: returned, err: err})
 		return
@@ -854,11 +1052,19 @@ func (a restTableAction) allowedContent() []contentPluginRef {
 }
 
 func (a restTableAction) readParsed(w http.ResponseWriter, r *http.Request, expectArray bool) (any, error) {
+	parsed, err := a.readContent(w, r, expectArray)
+	if err != nil {
+		return nil, err
+	}
+	return coerceParsed(parsed, expectArray)
+}
+
+func (a restTableAction) readContent(w http.ResponseWriter, r *http.Request, expectArray bool) (any, error) {
 	cfg := currentConfig()
 	if cfg.Server.MaxBodySize > 0 {
 		r.Body = http.MaxBytesReader(w, r.Body, cfg.Server.MaxBodySize)
 	}
-	return readParsedBody(r, a.contentChoice(r), expectArray)
+	return readContentBody(r, a.contentChoice(r), expectArray)
 }
 
 func (a restTableAction) pluginContentNames() []string {
@@ -891,6 +1097,13 @@ func (a restTableAction) parseWriteObject(w http.ResponseWriter, r *http.Request
 		http.Error(w, "Invalid data format", http.StatusBadRequest)
 		return nil, false
 	}
+	names := make([]string, len(files))
+	for i, file := range files {
+		names[i] = file.Name
+	}
+	if !a.acceptWriteFiles(w, row, names) {
+		return nil, false
+	}
 	if len(a.storageKinds()) == 0 {
 		return row, true
 	}
@@ -904,6 +1117,7 @@ func (a restTableAction) parseWriteObject(w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), storageStatus(err))
 		return nil, false
 	}
+	a.omitReadOnly(row)
 	return row, true
 }
 
@@ -954,7 +1168,7 @@ func restReadProperties(props map[string]any, inline bool) map[string]any {
 	out := make(map[string]any, len(props))
 	format := "uri"
 	if inline {
-		format = "base64"
+		format = "data-url"
 	}
 	for name, raw := range props {
 		out[name] = restReadProperty(raw, format)
@@ -1086,8 +1300,20 @@ func (a restTableAction) rejectUnknownWriteKeys(w http.ResponseWriter, row map[s
 		if _, ok := pathSet[key]; ok {
 			continue
 		}
+		if a.claimField(key) {
+			continue
+		}
 		http.Error(w, "unknown field "+key, http.StatusBadRequest)
 		return true
+	}
+	return false
+}
+
+func (a restTableAction) claimField(name string) bool {
+	for _, filter := range a.filters {
+		if filter.claim != "" && filter.field == name {
+			return true
+		}
 	}
 	return false
 }
@@ -1481,25 +1707,34 @@ func restSelectFields(tables map[string]any, table string, fields []string) []st
 	return out
 }
 
-func restModel(tables map[string]any, table string, act config.RestAction, isFunc bool) map[string]any {
+func restColumnProps(tables map[string]any, table string) map[string]any {
+	tableSchema, _ := tables[table].(map[string]any)
+	columns, _ := tableSchema["properties"].(map[string]any)
+	return columns
+}
+
+func restMergedProps(columns map[string]any, fields []string, extra map[string]any, isFunc bool) map[string]any {
 	props := map[string]any{}
 	if !isFunc {
-		tableSchema, _ := tables[table].(map[string]any)
-		columns, _ := tableSchema["properties"].(map[string]any)
-		fields := act.Fields
-		if fields == nil {
-			fields = make([]string, 0, len(columns))
+		names := fields
+		if names == nil {
+			names = make([]string, 0, len(columns))
 			for name := range columns {
-				fields = append(fields, name)
+				names = append(names, name)
 			}
 		}
-		for _, field := range fields {
+		for _, field := range names {
 			if col, ok := columns[field]; ok {
 				props[field] = col
 			}
 		}
 	}
-	maps.Copy(props, act.ExtraFields)
+	maps.Copy(props, extra)
+	return props
+}
+
+func restModel(tables map[string]any, table string, act config.RestAction, isFunc bool) map[string]any {
+	props := restMergedProps(restColumnProps(tables, table), act.Fields, act.ExtraFields, isFunc)
 	model := map[string]any{"type": "object"}
 	if len(props) > 0 {
 		model["properties"] = props
@@ -1546,6 +1781,7 @@ func restContentRefs(levels []contentLevel, pluginNames, defaults []string) ([]c
 }
 
 func compileRestRouter(cfg *config.Config) http.Handler {
+	chi.RegisterMethod("QUERY")
 	r := chi.NewRouter()
 	snap := &restSpecSnapshot{Docs: map[string]map[string]any{}}
 	if cfg == nil {
@@ -1672,27 +1908,35 @@ func compileRestRouter(cfg *config.Config) http.Handler {
 				listAction.actionAuth = listAct.Auth
 				listAction.actionScopes = listAct.RequiredScopes
 				listAction = bindRestContent(listAction, cfg, app, ep, listAct.Parsers, listAct.Renderers)
-				noSlash := restActionNoSlash(ep, "list")
-				if listAct.Handler != "" {
-					listAction.handler = listAct.Handler
-					r.Get(route("", noSlash), listAction.serveGo)
+				filterProps := restFilterProps(restMergedProps(restColumnProps(tables, listAction.table), nil, listAct.ExtraFields, false), listAction.filters)
+				checks, checkErr := compileFieldChecks(filterProps)
+				if checkErr != nil {
+					stdlog.Printf("restapi %s %s list skipped: %v", apiName, name, checkErr)
 				} else {
-					r.Get(route("", noSlash), listAction.list)
+					listAction.checks = checks
+					listAction.order = orderFields(listAction.selectFields)
+					noSlash := restActionNoSlash(ep, "list")
+					if listAct.Handler != "" {
+						listAction.handler = listAct.Handler
+						r.Get(route("", noSlash), listAction.serveGo)
+					} else {
+						r.Get(route("", noSlash), listAction.list)
+					}
+					listOp := restListOperation(
+						ep,
+						name,
+						tables,
+						listAction.table,
+						listAction.selectFields,
+						listAct.ExtraFields,
+						storageInline(listAction.storageName),
+					)
+					put(specRoute("", noSlash), "get", listOp, restOpAuth{
+						auth:   listAct.Auth,
+						scopes: listAct.RequiredScopes,
+						read:   true,
+					})
 				}
-				listOp := restListOperation(
-					ep,
-					name,
-					tables,
-					listAction.table,
-					listAction.selectFields,
-					listAct.ExtraFields,
-					storageInline(listAction.storageName),
-				)
-				put(specRoute("", noSlash), "get", listOp, restOpAuth{
-					auth:   listAct.Auth,
-					scopes: listAct.RequiredScopes,
-					read:   true,
-				})
 			}
 			if restActionEnabled(ep, "create") {
 				createAct := ep.Actions["create"]
@@ -1700,24 +1944,36 @@ func compileRestRouter(cfg *config.Config) http.Handler {
 				createAction.table = restActionTable(ep, table, "create")
 				createAction.writeKeys = restWriteKeys(ep, "create")
 				createAction.readOnly = restReadOnlyKeys(ep, "create")
-				createAction = restAssignStorage(createAction, app.Storage, ep.Storage, createAct.Storage, cfg.DefaultStoragePlugin, restModelProps(restModel(tables, createAction.table, createAct, createAct.Type == "func")))
+				createAction.cache = source != "" && restExplicitTable(ep, "create") != ""
+				createProps := restModelProps(restModel(tables, createAction.table, createAct, createAct.Type == "func"))
+				createAction = restAssignStorage(createAction, app.Storage, ep.Storage, createAct.Storage, cfg.DefaultStoragePlugin, createProps)
 				createAction.actionAuth = createAct.Auth
 				createAction.actionScopes = createAct.RequiredScopes
 				createAction = bindRestContent(createAction, cfg, app, ep, createAct.Parsers, createAct.Renderers)
-				noSlash := restActionNoSlash(ep, "create")
-				if createAct.Handler != "" {
-					createAction.handler = createAct.Handler
-					createAction.successStatus = http.StatusCreated
-					r.Post(route("", noSlash), createAction.serveGo)
-				} else if ep.Actions["create"].Type == "func" {
-					r.Post(route("", noSlash), createAction.callCreate)
+				checks, checkErr := compileFieldChecks(createProps)
+				if checkErr != nil {
+					stdlog.Printf("restapi %s %s create skipped: %v", apiName, name, checkErr)
 				} else {
-					r.Post(route("", noSlash), createAction.create)
+					createAction.checks = checks
+					if createAct.Type != "func" {
+						tableSchema, _ := tables[createAction.table].(map[string]any)
+						createAction.required = restCreateRequired(tableSchema, createProps, createAction.pathParams, createAction.filters, createAction.readOnly)
+					}
+					noSlash := restActionNoSlash(ep, "create")
+					if createAct.Handler != "" {
+						createAction.handler = createAct.Handler
+						createAction.successStatus = http.StatusCreated
+						r.Post(route("", noSlash), createAction.serveGo)
+					} else if ep.Actions["create"].Type == "func" {
+						r.Post(route("", noSlash), createAction.callCreate)
+					} else {
+						r.Post(route("", noSlash), createAction.create)
+					}
+					put(specRoute("", noSlash), "post", restOperation(ep, "create", name), restOpAuth{
+						auth:   createAct.Auth,
+						scopes: createAct.RequiredScopes,
+					})
 				}
-				put(specRoute("", noSlash), "post", restOperation(ep, "create", name), restOpAuth{
-					auth:   createAct.Auth,
-					scopes: createAct.RequiredScopes,
-				})
 			}
 			if restActionEnabled(ep, "retrieve") {
 				retrieveAct := ep.Actions["retrieve"]
@@ -1756,21 +2012,28 @@ func compileRestRouter(cfg *config.Config) http.Handler {
 				updateAction.cache = source != "" && restExplicitTable(ep, "update") != ""
 				updateAction.writeKeys = restWriteKeys(ep, "update")
 				updateAction.readOnly = restReadOnlyKeys(ep, "update")
-				updateAction = restAssignStorage(updateAction, app.Storage, ep.Storage, updateAct.Storage, cfg.DefaultStoragePlugin, restModelProps(restModel(tables, updateAction.table, updateAct, false)))
+				updateProps := restModelProps(restModel(tables, updateAction.table, updateAct, false))
+				updateAction = restAssignStorage(updateAction, app.Storage, ep.Storage, updateAct.Storage, cfg.DefaultStoragePlugin, updateProps)
 				updateAction.actionAuth = updateAct.Auth
 				updateAction.actionScopes = updateAct.RequiredScopes
 				updateAction = bindRestContent(updateAction, cfg, app, ep, updateAct.Parsers, updateAct.Renderers)
-				noSlash := restActionNoSlash(ep, "update")
-				if updateAct.Handler != "" {
-					updateAction.handler = updateAct.Handler
-					r.Patch(route("{id}", noSlash), updateAction.serveGo)
+				checks, checkErr := compileFieldChecks(updateProps)
+				if checkErr != nil {
+					stdlog.Printf("restapi %s %s update skipped: %v", apiName, name, checkErr)
 				} else {
-					r.Patch(route("{id}", noSlash), updateAction.update)
+					updateAction.checks = checks
+					noSlash := restActionNoSlash(ep, "update")
+					if updateAct.Handler != "" {
+						updateAction.handler = updateAct.Handler
+						r.Patch(route("{id}", noSlash), updateAction.serveGo)
+					} else {
+						r.Patch(route("{id}", noSlash), updateAction.update)
+					}
+					put(specRoute("{id}", noSlash), "patch", restOperation(ep, "update", name), restOpAuth{
+						auth:   updateAct.Auth,
+						scopes: updateAct.RequiredScopes,
+					})
 				}
-				put(specRoute("{id}", noSlash), "patch", restOperation(ep, "update", name), restOpAuth{
-					auth:   updateAct.Auth,
-					scopes: updateAct.RequiredScopes,
-				})
 			}
 			if restActionEnabled(ep, "destroy") {
 				destroyAct := ep.Actions["destroy"]
@@ -1808,6 +2071,12 @@ func compileRestRouter(cfg *config.Config) http.Handler {
 				detailCall.actionAuth = call.Auth
 				detailCall.actionScopes = call.RequiredScopes
 				detailCall = bindRestContent(detailCall, cfg, app, ep, call.Parsers, call.Renderers)
+				checks, checkErr := compileFieldChecks(call.Fields)
+				if checkErr != nil {
+					stdlog.Printf("restapi %s %s detail action %s skipped: %v", apiName, name, key, checkErr)
+					continue
+				}
+				detailCall.checks = checks
 				noSlash := ep.NoTrailingSlash || call.NoTrailingSlash
 				if call.Handler != "" {
 					r.Post(route("{id}/"+segment, noSlash), detailCall.serveGo)
@@ -1834,6 +2103,12 @@ func compileRestRouter(cfg *config.Config) http.Handler {
 				listCall.actionAuth = call.Auth
 				listCall.actionScopes = call.RequiredScopes
 				listCall = bindRestContent(listCall, cfg, app, ep, call.Parsers, call.Renderers)
+				checks, checkErr := compileFieldChecks(call.Fields)
+				if checkErr != nil {
+					stdlog.Printf("restapi %s %s list action %s skipped: %v", apiName, name, key, checkErr)
+					continue
+				}
+				listCall.checks = checks
 				noSlash := ep.NoTrailingSlash || call.NoTrailingSlash
 				if call.Handler != "" {
 					r.Post(route(segment, noSlash), listCall.serveGo)
@@ -1864,6 +2139,12 @@ func compileRestRouter(cfg *config.Config) http.Handler {
 				stateAction.actionAuth = state.Auth
 				stateAction.actionScopes = state.RequiredScopes
 				stateAction = bindRestContent(stateAction, cfg, app, ep, state.Parsers, state.Renderers)
+				checks, checkErr := compileFieldChecks(state.Fields)
+				if checkErr != nil {
+					stdlog.Printf("restapi %s %s state action %s skipped: %v", apiName, name, key, checkErr)
+					continue
+				}
+				stateAction.checks = checks
 				noSlash := ep.NoTrailingSlash || state.NoTrailingSlash
 				suffix := "{id}/" + segment
 				if state.Func != "" || state.Handler != "" {
@@ -1900,6 +2181,43 @@ func compileRestRouter(cfg *config.Config) http.Handler {
 					auth:   state.Auth,
 					scopes: state.RequiredScopes,
 				})
+			}
+			for key, view := range ep.Views {
+				methods, methodErr := config.RestViewMethods(view.Methods)
+				if _, pathErr := config.RestViewPath(view.Path); pathErr != nil || methodErr != nil || view.Handler == "" || !config.RestNameOK(key) {
+					stdlog.Printf("restapi %s %s view %s skipped", apiName, name, key)
+					continue
+				}
+				viewAction := action
+				viewAction.handler = view.Handler
+				viewAction.actionAuth = view.Auth
+				viewAction.actionScopes = view.RequiredScopes
+				noSlash := ep.NoTrailingSlash || view.NoTrailingSlash
+				description := view.Description
+				if description == "" {
+					description = "View response"
+				}
+				pattern := route(view.Path, noSlash)
+				specPath := specRoute(view.Path, noSlash)
+				for _, method := range config.RestViewRouteMethods(methods) {
+					r.Method(method, pattern, http.HandlerFunc(viewAction.serveView))
+				}
+				for _, method := range methods {
+					op := map[string]any{
+						"responses": map[string]any{
+							"200": map[string]any{"description": description},
+						},
+					}
+					if view.Description != "" {
+						op["description"] = view.Description
+					}
+					read := method == http.MethodGet || method == http.MethodHead || method == "QUERY"
+					put(specPath, strings.ToLower(method), op, restOpAuth{
+						auth:   view.Auth,
+						scopes: view.RequiredScopes,
+						read:   read,
+					})
+				}
 			}
 		}
 	}

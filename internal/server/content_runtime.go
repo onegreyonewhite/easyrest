@@ -52,6 +52,14 @@ func builtinJSON() easyrest.ContentPlugin { return jsoncodec.New() }
 func builtinNDJSON() easyrest.ContentPlugin { return ndjsoncodec.New() }
 
 func readParsedBody(r *http.Request, choice contentChoice, expectArray bool) (any, error) {
+	parsed, err := readContentBody(r, choice, expectArray)
+	if err != nil {
+		return nil, err
+	}
+	return coerceParsed(parsed, expectArray)
+}
+
+func readContentBody(r *http.Request, choice contentChoice, expectArray bool) (any, error) {
 	if choice.ParseErr != nil {
 		return nil, choice.ParseErr
 	}
@@ -73,7 +81,7 @@ func readParsedBody(r *http.Request, choice contentChoice, expectArray bool) (an
 	if err != nil {
 		return nil, err
 	}
-	return coerceParsed(parsed, expectArray)
+	return parsed, nil
 }
 
 func coerceParsed(parsed any, expectArray bool) (any, error) {
@@ -94,6 +102,35 @@ func coerceParsed(parsed any, expectArray bool) (any, error) {
 	case []any:
 		if !expectArray {
 			return nil, fmt.Errorf("JSON parse error: expected object")
+		}
+		rows := make([]map[string]any, len(data))
+		for i, item := range data {
+			row, ok := item.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("Invalid data format")
+			}
+			rows[i] = row
+		}
+		return rows, nil
+	default:
+		return nil, fmt.Errorf("Invalid data format")
+	}
+}
+
+// coerceWriteRows accepts one object or an array of objects.
+// An empty array and a non-object element are rejected.
+func coerceWriteRows(parsed any) ([]map[string]any, error) {
+	switch data := parsed.(type) {
+	case map[string]any:
+		return []map[string]any{data}, nil
+	case []map[string]any:
+		if len(data) == 0 {
+			return nil, fmt.Errorf("Invalid data format")
+		}
+		return data, nil
+	case []any:
+		if len(data) == 0 {
+			return nil, fmt.Errorf("Invalid data format")
 		}
 		rows := make([]map[string]any, len(data))
 		for i, item := range data {

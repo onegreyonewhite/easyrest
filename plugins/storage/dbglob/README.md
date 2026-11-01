@@ -2,7 +2,7 @@
 
 Preserved by the server package. Two modes. There is no `cmd/` binary.
 
-Without `plugin` and `table`, `Put` returns standard base64. The host writes that string to the database and returns it unchanged. Nothing is mounted at `/media/dbglob`. GET schemas use `format: base64`.
+Without `plugin` and `table`, `Put` returns a data URL. The host writes that string to the database and returns it unchanged. Nothing is mounted at `/media/dbglob`. GET schemas use `format: data-url`. With `plugin` and `table`, the data column stays standard base64.
 
 With both `plugin` and `table`, the plugin stores a row through the internal RPC server and `Put` returns the relative path. `plugin` is a connection name under `plugins:`, not a binary name. Setting only one of them fails init. The listener must be configured. See [Internal RPC](../../../internal/config/README.md#internal-rpc).
 

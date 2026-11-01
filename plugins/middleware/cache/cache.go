@@ -38,6 +38,7 @@ type Store interface {
 	InitConnection(uri string) error
 	Set(key string, value string, ttl time.Duration) error
 	Get(key string) (string, error)
+	Delete(key string) error
 }
 
 // Plugin is an ETag middleware that stores version tokens in a Store.
@@ -103,6 +104,38 @@ func (p *Plugin) initSettings(settings map[string]any) error {
 	p.ttl = ttl
 	p.invalidation = inv
 	return nil
+}
+
+// Get reads a raw cache key.
+func (p *Plugin) Get(key string) (string, error) {
+	if p.store == nil {
+		return "", errors.New("cache store is not initialized")
+	}
+	return p.store.Get(key)
+}
+
+// Set writes a raw cache key. A nil ttl uses the plugin TTL.
+// A non-nil ttl must be greater than zero.
+func (p *Plugin) Set(key, value string, ttl *time.Duration) error {
+	if p.store == nil || p.ttl <= 0 {
+		return errors.New("cache store is not initialized")
+	}
+	lifetime := p.ttl
+	if ttl != nil {
+		if *ttl <= 0 {
+			return errors.New("ttl must be greater than 0")
+		}
+		lifetime = *ttl
+	}
+	return p.store.Set(key, value, lifetime)
+}
+
+// Delete removes a raw cache key. A missing key is not an error.
+func (p *Plugin) Delete(key string) error {
+	if p.store == nil {
+		return errors.New("cache store is not initialized")
+	}
+	return p.store.Delete(key)
 }
 
 // PreRequest implements If-None-Match (304) and lost-update checks for table routes.

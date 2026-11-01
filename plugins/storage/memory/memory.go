@@ -1,7 +1,6 @@
 package memory
 
 import (
-	"encoding/base64"
 	"fmt"
 	"mime"
 	"net/http"
@@ -83,7 +82,7 @@ func (p *Plugin) Put(relPath string, body []byte, ctx map[string]any) (string, m
 		mod:     now,
 	}
 	if p.inline {
-		return base64.StdEncoding.EncodeToString(body), ctx, nil
+		return easyrest.FormatDataURL(inlineMediaType(rel, copied, ctx), copied), ctx, nil
 	}
 	return rel, ctx, nil
 }
@@ -247,6 +246,13 @@ func (p *Plugin) isDir(rel string) bool {
 		}
 	}
 	return false
+}
+
+func inlineMediaType(rel string, body []byte, ctx map[string]any) string {
+	if mediaType, ok := easyrest.CtxString(ctx, easyrest.CtxStorageMIME); ok && mediaType != "" {
+		return mediaType
+	}
+	return contentType(rel, body)
 }
 
 func contentType(rel string, body []byte) string {

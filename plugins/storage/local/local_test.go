@@ -65,11 +65,13 @@ func TestInlineSetting(t *testing.T) {
 		t.Fatal("expected inline")
 	}
 	got, _, err := plug.Put("a.txt", []byte("hi"), nil)
-	if err != nil {
-		t.Fatal(err)
+	want := easyrest.FormatDataURL("text/plain; charset=utf-8", []byte("hi"))
+	if err != nil || got != want {
+		t.Fatalf("stored %q err %v", got, err)
 	}
-	if got != "aGk=" {
-		t.Fatalf("stored %q", got)
+	typed, _, err := plug.Put("b.bin", []byte{0x00, 0x01}, map[string]any{easyrest.CtxStorageMIME: "image/png"})
+	if err != nil || typed != easyrest.FormatDataURL("image/png", []byte{0x00, 0x01}) {
+		t.Fatalf("typed %q err %v", typed, err)
 	}
 	body, _, _, err := plug.GetBin("a.txt", nil)
 	if err != nil || string(body) != "hi" {

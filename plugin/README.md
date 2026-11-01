@@ -139,7 +139,7 @@ List(path string, ctx map[string]any) ([]StorageEntry, error)
 Delete(path string, ctx map[string]any) error
 ```
 
-`Init` returns the storage root and whether values are stored inline. A non-empty root with `inline` false mounts `GET /media/{name}/*`. The root string itself is not part of the URL. `inline` true means `Put`'s return value is the database cell and the response. The host does not call `GetUrl` and does not mount `/media` for that plugin.
+`Init` returns the storage root and whether values are stored inline. A non-empty root with `inline` false mounts `GET /media/{name}/*`. The root string itself is not part of the URL. `inline` true means `Put`'s return value is the database cell and the response. That value is a data URL (`data:<media-type>;base64,<data>`). `ctx["storage.mime"]`, when it is a non-empty string, is the media type. The host does not call `GetUrl` and does not mount `/media` for that plugin.
 
 There is no `cmd/storage-*` binary in this repo. A process that serves the memory driver looks like this:
 

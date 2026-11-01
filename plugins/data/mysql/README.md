@@ -32,6 +32,10 @@ Before the statement returns, known response variables are harvested: `response.
 
 `db.pre-request` and `db.post-request` run as `CALL name()`. See [dbqueryhook](../../middleware/dbqueryhook/README.md).
 
+## JSON arrows
+
+MySQL has `->` and `->>`, but the right side is one JSON path. `json_data->'phones'->0->>'number'` is sent as `json_data->>'$.phones[0].number'`. `->` filters use `CAST(? AS JSON)`, so numbers compare numerically. `->>` compares as text. Quoted select aliases are rewritten with backticks.
+
 ## Count
 
 `exact` runs `SELECT count(*)` over the unbounded filtered select in the same transaction as the page.

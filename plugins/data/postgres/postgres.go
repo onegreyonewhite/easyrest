@@ -485,6 +485,7 @@ func (p *pgPlugin) TableGet(userID, table string, selectFields []string, where m
 	if err != nil {
 		return nil, nil, err
 	}
+	easyrest.NormalizeJSONArrowRows(results, selectFields)
 	if counted {
 		if outCtx == nil {
 			outCtx = ctx
@@ -1194,6 +1195,7 @@ var pgCacheDialect = sqlcache.Dialect{
 		value = EXCLUDED.value,
 		expires_at = EXCLUDED.expires_at;`,
 	SelectLive: `SELECT value FROM easyrest_cache WHERE key = $1 AND expires_at > NOW()`,
+	DeleteKey:  `DELETE FROM easyrest_cache WHERE key = $1`,
 }
 
 // pgCachePlugin stores ETag version tokens in PostgreSQL.
@@ -1293,11 +1295,22 @@ func (p *pgCachePlugin) Get(key string) (string, error) {
 	value, err := p.store.Get(bgCtx, key)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", sql.ErrNoRows
+			return "", err
 		}
 		return "", fmt.Errorf("failed to get cache entry: %w", err)
 	}
 	return value, nil
+}
+
+func (p *pgCachePlugin) Delete(key string) error {
+	if p.dbPluginPointer.db == nil {
+		return errors.New("database connection not available for cache delete")
+	}
+	p.bindStore()
+	if err := p.store.Delete(bgCtx, key); err != nil {
+		return fmt.Errorf("failed to delete cache entry: %w", err)
+	}
+	return nil
 }
 
 func NewPgPlugin() *pgPlugin {

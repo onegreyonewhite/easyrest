@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/go-redis/redismock/v9"
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -138,8 +139,25 @@ func TestGet_CacheMiss(t *testing.T) {
 	require.Error(t, err)
 	// Check if it returns the specific redis.Nil error
 	assert.True(t, errors.Is(err, redis.Nil))
+	assert.True(t, errors.Is(err, easyrest.ErrCacheMiss))
 	assert.Empty(t, val)
 
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDelete_RemovesKey(t *testing.T) {
+	db, mock := redismock.NewClientMock()
+	p := &redisCachePlugin{client: db}
+	defer p.Close()
+
+	mock.ExpectDel("k").SetVal(1)
+	if err := p.Delete("k"); err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectDel("missing").SetVal(0)
+	if err := p.Delete("missing"); err != nil {
+		t.Fatal(err)
+	}
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 

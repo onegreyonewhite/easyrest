@@ -12,7 +12,7 @@ Stores objects in an S3-compatible bucket. Preserved only by `easyrest-server` (
 | `secret_key` | required | Static secret key |
 | `path_style` | `true` when `endpoint` is set and this key is omitted, otherwise `false` | Path-style addressing |
 | `public_base` | empty | Origin without a trailing slash. `GetUrl` returns `public_base` plus the object key |
-| `inline` | false | `true` makes `Put` return standard base64. The column and the response are that string |
+| `inline` | false | `true` makes `Put` return a data URL. The column and the response are that string |
 
 Without `public_base`, `GetUrl` returns path-style `{endpoint}/{bucket}/{key}`, or `https://{bucket}.s3.{region}.amazonaws.com/{key}` when `endpoint` is empty.
 

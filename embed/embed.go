@@ -19,9 +19,14 @@ type (
 	RestHandler = server.Handler
 	// HandlerError is a rest handler failure with an HTTP status.
 	HandlerError = server.HandlerError
+	// View writes the HTTP response for one restapi view.
+	View = server.View
 	// PluginCaller is the in-process internal RPC available to a rest handler.
 	PluginCaller = server.PluginCaller
 )
+
+// ErrCacheMiss is a cache store miss.
+var ErrCacheMiss = easyrest.ErrCacheMiss
 
 // Option configures one embedded server before it loads config.
 type Option func(*settings)
@@ -29,6 +34,7 @@ type Option func(*settings)
 type settings struct {
 	routes     func(chi.Router)
 	handlers   map[string]RestHandler
+	views      map[string]View
 	db         map[string]func() easyrest.DBPlugin
 	query      map[string]func() easyrest.DBQueryPlugin
 	auth       map[string]func() easyrest.AuthPlugin
@@ -104,6 +110,18 @@ func WithStorage(name string, factory func() easyrest.StoragePlugin) Option {
 	}
 }
 
+// WithView registers a Go function for a rest view handler name.
+// The config field handler selects it. Register it before the server loads config.
+// The function writes the response after authentication and request middleware.
+func WithView(name string, view View) Option {
+	return func(s *settings) {
+		if s.views == nil {
+			s.views = map[string]View{}
+		}
+		s.views[name] = view
+	}
+}
+
 // WithRestHandler registers a Go function for a rest action handler name.
 // The config field handler selects it. Register it before the server loads config.
 func WithRestHandler(name string, handler RestHandler) Option {
@@ -161,5 +179,6 @@ func configure(overlay string, files []string, opts ...Option) error {
 	}
 	server.SetRoutes(cfg.routes)
 	server.SetRestHandlers(cfg.handlers)
+	server.SetViews(cfg.views)
 	return server.SetupApplication(overlay, files)
 }

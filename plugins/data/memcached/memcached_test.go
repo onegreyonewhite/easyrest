@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/bradfitz/gomemcache/memcache"
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -159,6 +160,7 @@ func TestGet_CacheMiss(t *testing.T) {
 	val, err := p.Get("missingkey")
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, memcache.ErrCacheMiss))
+	assert.True(t, errors.Is(err, easyrest.ErrCacheMiss))
 	assert.Empty(t, val)
 }
 
@@ -197,6 +199,23 @@ func TestGet_Success(t *testing.T) {
 	val, err := p.Get(key)
 	require.NoError(t, err)
 	assert.Equal(t, expectedValue, val)
+}
+
+func TestDelete_MissingKey(t *testing.T) {
+	p := NewMemcachedCachePlugin()
+	mockClient := &mockMemcacheClient{}
+	p.client = mockClient
+	var deleted string
+	mockClient.DeleteFunc = func(key string) error {
+		deleted = key
+		return memcache.ErrCacheMiss
+	}
+	if err := p.Delete("gone"); err != nil {
+		t.Fatal(err)
+	}
+	if deleted != "gone" {
+		t.Fatalf("deleted %q", deleted)
+	}
 }
 
 func TestClose_ClientNil(t *testing.T) {

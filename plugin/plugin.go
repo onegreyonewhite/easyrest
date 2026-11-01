@@ -1,18 +1,23 @@
 package plugin
 
 import (
+	"errors"
+
 	"github.com/hashicorp/go-plugin"
 )
+
+// ErrCacheMiss is a cache store miss. Backend errors stay wrapped with it.
+var ErrCacheMiss = errors.New("cache miss")
 
 // VersionMajor and VersionMinor are the plugin API version. They are encoded
 // into HTTP ETags; the patch component of Version is not.
 const (
 	VersionMajor = 0
-	VersionMinor = 20
+	VersionMinor = 22
 )
 
 // Version is the plugin version.
-var Version = "v0.21.0"
+var Version = "v0.22.0"
 
 // DBPlugin – interface for DB access plugins.
 // Methods that take ctx may return an updated context map. A nil returned ctx

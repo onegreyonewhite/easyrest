@@ -1,8 +1,11 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"strings"
+
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
 
 func validateSelectAlias(alias, part string) error {
@@ -17,11 +20,12 @@ func validateSelectAlias(alias, part string) error {
 
 // processSelectParam parses the "select" query parameter, performs context substitution,
 // and assigns an alias (defaulting to the field name with dots replaced by underscores) if not provided.
+// JSON arrow paths are rendered as PostgreSQL expressions and alias to the last object key.
 func processSelectParam(param string, flatCtx map[string]string, pluginCtx map[string]any) ([]string, []string, error) {
 	if param == "" {
 		return nil, nil, nil
 	}
-	if !strings.ContainsAny(param, ",:.()") {
+	if !strings.ContainsAny(param, ",:.()") && !strings.Contains(param, "->") {
 		raw := strings.TrimSpace(param)
 		if raw == "" {
 			return nil, nil, nil
@@ -54,6 +58,23 @@ func processSelectParam(param string, flatCtx map[string]string, pluginCtx map[s
 
 		exprBuilder.Reset() // Reset builder for each part
 
+		if strings.Contains(raw, "->") {
+			if alias != "" {
+				if err := validateSelectAlias(alias, part); err != nil {
+					return nil, nil, err
+				}
+			}
+			item, groupExpr, err := easyrest.RenderJSONSelect(raw, alias)
+			if err != nil {
+				if errors.Is(err, easyrest.ErrJSONIndexAlias) {
+					return nil, nil, fmt.Errorf("%w: %s", err, part)
+				}
+				return nil, nil, fmt.Errorf("invalid field name in select field: %s", part)
+			}
+			selectFields = append(selectFields, item)
+			groupBy = append(groupBy, groupExpr)
+			continue
+		}
 		if strings.Contains(raw, ".") && strings.HasSuffix(raw, "()") {
 			// Process function syntax like "amount.sum()"
 			subParts := strings.SplitN(raw, ".", 2)
@@ -155,16 +176,27 @@ func ParseWhereClause(values map[string][]string, flatCtx map[string]string, plu
 			if !found {
 				return nil, fmt.Errorf("invalid where key format: %s", key)
 			}
-			if err := sanitizeIdentifier(field); err != nil {
-				return nil, fmt.Errorf("invalid field name in where clause: %s", key)
-			}
-
 			opCode = strings.ToLower(opCode)
 
 			if _, ok := AllowedOps[opCode]; !ok {
 				return nil, fmt.Errorf("unknown operator: %s", opCode)
 			}
 			op := AllowedOps[opCode]
+
+			asText := true
+			if strings.Contains(field, "->") {
+				expr, text, err := easyrest.PostgresJSONExpr(field)
+				if err != nil {
+					return nil, fmt.Errorf("invalid field name in where clause: %s", key)
+				}
+				if !text && (op == "LIKE" || op == "ILIKE") {
+					return nil, fmt.Errorf("like and ilike require ->>")
+				}
+				field = expr
+				asText = text
+			} else if err := sanitizeIdentifier(field); err != nil {
+				return nil, fmt.Errorf("invalid field name in where clause: %s", key)
+			}
 
 			mapKey := field
 			if isNot {
@@ -182,6 +214,11 @@ func ParseWhereClause(values map[string][]string, flatCtx map[string]string, plu
 					substituted = strings.Join(substituted_arr, ",")
 				} else {
 					substituted = substitutePluginContext(vals[0], flatCtx, pluginCtx)
+				}
+			}
+			if !asText && op != "IS" {
+				if err := easyrest.ValidateJSONArrowValue(op, substituted, easyrest.DialectFromContext(pluginCtx)); err != nil {
+					return nil, err
 				}
 			}
 

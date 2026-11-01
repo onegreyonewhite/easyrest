@@ -3,7 +3,6 @@ package s3storage
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -132,7 +131,7 @@ func (p *Plugin) ensureBucket() error {
 }
 
 // Put writes body at prefix plus the storage-relative path.
-// Inline mode still writes the object and returns standard base64.
+// Inline mode still writes the object and returns a data URL.
 func (p *Plugin) Put(relPath string, body []byte, ctx map[string]any) (string, map[string]any, error) {
 	key, rel, err := p.objectKey(relPath)
 	if err != nil {
@@ -149,7 +148,7 @@ func (p *Plugin) Put(relPath string, body []byte, ctx map[string]any) (string, m
 		return "", ctx, fmt.Errorf("storage s3: %w", err)
 	}
 	if p.inline {
-		return base64.StdEncoding.EncodeToString(body), ctx, nil
+		return easyrest.FormatDataURL(inlineMediaType(ctype, ctx), body), ctx, nil
 	}
 	return rel, ctx, nil
 }
@@ -358,6 +357,13 @@ func (p *Plugin) objectURL(key string) string {
 		return strings.TrimRight(p.endpoint, "/") + "/" + p.bucket + "/" + key
 	}
 	return "https://" + p.bucket + ".s3." + p.region + ".amazonaws.com/" + key
+}
+
+func inlineMediaType(detected string, ctx map[string]any) string {
+	if mediaType, ok := easyrest.CtxString(ctx, easyrest.CtxStorageMIME); ok && mediaType != "" {
+		return mediaType
+	}
+	return detected
 }
 
 func contentType(rel string, body []byte) string {

@@ -36,7 +36,7 @@ A full application can live in the `application` section: your own page on `GET 
 
 ## Quickstart
 
-You need [Go 1.26](https://go.dev/dl/) and Python 3 (for the seed script). Docker and a separate database server are not required.
+You need [Go 1.27.3+](https://go.dev/dl/) and Python 3 (for the seed script). Docker and a separate database server are not required.
 
 ```bash
 make server

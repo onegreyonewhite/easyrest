@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -66,13 +67,22 @@ func (p *redisCachePlugin) Get(key string) (string, error) {
 	val, err := p.client.Get(ctx, key).Result()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
-			// Return redis.Nil directly as go-redis v9 recommends.
-			// EasyREST core or the caller can handle this specific error.
-			return "", redis.Nil // Changed from errors.New("cache miss")
+			return "", fmt.Errorf("%w: %w", easyrest.ErrCacheMiss, err)
 		}
 		return "", fmt.Errorf("failed to get cache entry from Redis for key '%s': %w", key, err)
 	}
 	return val, nil
+}
+
+// Delete removes a key. A missing key is not an error.
+func (p *redisCachePlugin) Delete(key string) error {
+	if p.client == nil {
+		return errors.New("redis client not initialized")
+	}
+	if err := p.client.Del(context.Background(), key).Err(); err != nil {
+		return fmt.Errorf("failed to delete cache entry in Redis for key '%s': %w", key, err)
+	}
+	return nil
 }
 
 // Close cleans up the Redis client connection.

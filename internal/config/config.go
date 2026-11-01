@@ -52,9 +52,11 @@ type ExternalPlugin struct {
 // StoragePluginConfig names a storage driver separately from the instance key.
 // An empty Plugin means the map key is the driver, so "local:" still loads local.
 type StoragePluginConfig struct {
-	Plugin   string         `yaml:"plugin,omitempty"`
-	Path     string         `yaml:"path,omitempty"`
-	Settings map[string]any `yaml:"settings,omitempty"`
+	Plugin     string         `yaml:"plugin,omitempty"`
+	Path       string         `yaml:"path,omitempty"`
+	Settings   map[string]any `yaml:"settings,omitempty"`
+	Auth       []string       `yaml:"auth,omitempty"`
+	AuthScopes []string       `yaml:"auth_scopes,omitempty"`
 }
 
 // MiddlewareConfig is an external plugin reference in middleware_plugins.
@@ -207,6 +209,7 @@ type RestEndpoint struct {
 	DetailActions   map[string]RestCallAction  `yaml:"detail_actions,omitempty"`
 	ListActions     map[string]RestCallAction  `yaml:"list_actions,omitempty"`
 	StateActions    map[string]RestStateAction `yaml:"state_actions,omitempty"`
+	Views           map[string]RestView        `yaml:"views,omitempty"`
 	ContentHandlers []string                   `yaml:"content_handlers,omitempty"`
 	Parsers         *[]string                  `yaml:"parsers,omitempty"`
 	Renderers       *[]string                  `yaml:"renderers,omitempty"`
@@ -251,11 +254,13 @@ type RestStateAction struct {
 	Handler string `yaml:"handler,omitempty"`
 }
 
-// RestFilter is an optional list query filter.
+// RestFilter is a list query filter. Claim, when set, is read from the JWT
+// and always applied. A query value cannot override it.
 type RestFilter struct {
 	Field string `yaml:"field,omitempty"`
 	Op    string `yaml:"op,omitempty"`
 	Not   bool   `yaml:"not,omitempty"`
+	Claim string `yaml:"claim,omitempty"`
 }
 
 // RestAction configures one ModelViewSet-style operation.
@@ -274,6 +279,18 @@ type RestAction struct {
 	RequiredScopes  []string       `yaml:"required_scopes,omitempty"`
 	// Handler is a registered Go function name. It is used by the embed server.
 	Handler string `yaml:"handler,omitempty"`
+}
+
+// RestView is a Go function mounted under one endpoint.
+// Path is relative to the endpoint URL. The function writes the response.
+type RestView struct {
+	Path            string    `yaml:"path,omitempty"`
+	Methods         []string  `yaml:"methods,omitempty"`
+	Handler         string    `yaml:"handler,omitempty"`
+	Description     string    `yaml:"description,omitempty"`
+	NoTrailingSlash bool      `yaml:"no_trailing_slash,omitempty"`
+	Auth            *[]string `yaml:"auth,omitempty"`
+	RequiredScopes  []string  `yaml:"required_scopes,omitempty"`
 }
 
 func LoadPluginConfigs(configs []string) map[string]PluginConfig {
@@ -815,6 +832,11 @@ func validateStorageNames(cfg *Config) error {
 			}
 		}
 	}
+	for name, plug := range cfg.StoragePlugins {
+		if err := requireAuthNameSlice(cfg, "storage_plugins "+name, plug.Auth); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -839,9 +861,10 @@ func storageKnown(cfg *Config, name string) bool {
 }
 
 var (
-	restNamePattern    = regexp.MustCompile(`^[a-z0-9_]+$`)
-	restURLPattern     = regexp.MustCompile(`^[a-z0-9_./{}-]+$`)
-	restSegmentPattern = regexp.MustCompile(`^[a-z0-9_.-]+$`)
+	restNamePattern      = regexp.MustCompile(`^[a-z0-9_]+$`)
+	restURLPattern       = regexp.MustCompile(`^[a-z0-9_./{}-]+$`)
+	restSegmentPattern   = regexp.MustCompile(`^[a-z0-9_.-]+$`)
+	restViewParamPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 )
 
 // RestNameOK reports whether name is a restapi endpoint or action name.
@@ -912,6 +935,9 @@ func validateRestEndpoint(cfg *Config, apiName, key string, app RestAPIApp, ep R
 	}
 	where := "restapi " + apiName + " " + name
 	seen := map[restActionRoute]string{}
+	if err := claimRestCRUD(where, seen, ep); err != nil {
+		return err
+	}
 	for actionName, call := range ep.DetailActions {
 		if err := validateRestCall(where, actionName, pk, call); err != nil {
 			return err
@@ -922,8 +948,7 @@ func validateRestEndpoint(cfg *Config, apiName, key string, app RestAPIApp, ep R
 		}
 		if err := claimRestRoute(where, seen, actionName, restActionRoute{
 			method:  "POST",
-			detail:  true,
-			segment: segment,
+			suffix:  "{id}/" + segment,
 			noSlash: ep.NoTrailingSlash || call.NoTrailingSlash,
 		}); err != nil {
 			return err
@@ -939,7 +964,7 @@ func validateRestEndpoint(cfg *Config, apiName, key string, app RestAPIApp, ep R
 		}
 		if err := claimRestRoute(where, seen, actionName, restActionRoute{
 			method:  "POST",
-			segment: segment,
+			suffix:  segment,
 			noSlash: ep.NoTrailingSlash || call.NoTrailingSlash,
 		}); err != nil {
 			return err
@@ -973,15 +998,23 @@ func validateRestEndpoint(cfg *Config, apiName, key string, app RestAPIApp, ep R
 		if state.Post {
 			writeMethod = "POST"
 		}
+		suffix := segment
+		if state.Func == "" && state.Handler == "" {
+			suffix = "{id}/" + segment
+		}
 		for _, method := range []string{"GET", writeMethod} {
 			if err := claimRestRoute(where, seen, actionName, restActionRoute{
 				method:  method,
-				detail:  state.Func == "" && state.Handler == "",
-				segment: segment,
+				suffix:  suffix,
 				noSlash: ep.NoTrailingSlash || state.NoTrailingSlash,
 			}); err != nil {
 				return err
 			}
+		}
+	}
+	for viewName, view := range ep.Views {
+		if err := validateRestView(where, viewName, urlPath, ep, view, seen); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -989,9 +1022,182 @@ func validateRestEndpoint(cfg *Config, apiName, key string, app RestAPIApp, ep R
 
 type restActionRoute struct {
 	method  string
-	detail  bool
-	segment string
+	suffix  string
 	noSlash bool
+}
+
+func claimRestCRUD(where string, seen map[restActionRoute]string, ep RestEndpoint) error {
+	routes := []struct {
+		name, method, suffix string
+	}{
+		{"list", "GET", ""},
+		{"create", "POST", ""},
+		{"retrieve", "GET", "{id}"},
+		{"update", "PATCH", "{id}"},
+		{"destroy", "DELETE", "{id}"},
+	}
+	for _, route := range routes {
+		if !restCRUDEnabled(ep, route.name) {
+			continue
+		}
+		if err := claimRestRoute(where, seen, route.name, restActionRoute{
+			method:  route.method,
+			suffix:  route.suffix,
+			noSlash: restEndpointActionNoSlash(ep, route.name),
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func restCRUDEnabled(ep RestEndpoint, name string) bool {
+	if len(ep.Actions) == 0 {
+		return true
+	}
+	_, ok := ep.Actions[name]
+	return ok
+}
+
+func restEndpointActionNoSlash(ep RestEndpoint, action string) bool {
+	if ep.NoTrailingSlash {
+		return true
+	}
+	act, ok := ep.Actions[action]
+	if !ok {
+		return false
+	}
+	return act.NoTrailingSlash
+}
+
+func validateRestView(where, viewName, urlPath string, ep RestEndpoint, view RestView, seen map[restActionRoute]string) error {
+	if !RestNameOK(viewName) {
+		return fmt.Errorf("%s view %s name is invalid", where, viewName)
+	}
+	if view.Handler == "" {
+		return fmt.Errorf("%s view %s handler is empty", where, viewName)
+	}
+	params, err := RestViewPath(view.Path)
+	if err != nil {
+		return fmt.Errorf("%s view %s: %w", where, viewName, err)
+	}
+	taken := map[string]struct{}{}
+	for _, name := range restBraceParams(urlPath) {
+		taken[name] = struct{}{}
+	}
+	for _, name := range params {
+		if _, ok := taken[name]; ok {
+			return fmt.Errorf("%s view %s path repeats {%s}", where, viewName, name)
+		}
+	}
+	methods, err := RestViewMethods(view.Methods)
+	if err != nil {
+		return fmt.Errorf("%s view %s: %w", where, viewName, err)
+	}
+	noSlash := ep.NoTrailingSlash || view.NoTrailingSlash
+	for _, method := range RestViewRouteMethods(methods) {
+		if err := claimRestRoute(where, seen, viewName, restActionRoute{
+			method:  method,
+			suffix:  view.Path,
+			noSlash: noSlash,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RestViewPath checks a view path and returns its parameter names.
+// An empty path mounts on the endpoint URL. A segment is a literal
+// matching [a-z0-9_.-]+, or {name} with name matching [a-z][a-z0-9_]*.
+func RestViewPath(path string) ([]string, error) {
+	if path == "" {
+		return nil, nil
+	}
+	if strings.HasPrefix(path, "/") || strings.HasSuffix(path, "/") || strings.Contains(path, "//") {
+		return nil, fmt.Errorf("view path %q is invalid", path)
+	}
+	seen := map[string]struct{}{}
+	var params []string
+	for _, seg := range strings.Split(path, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return nil, fmt.Errorf("view path %q is invalid", path)
+		}
+		if strings.HasPrefix(seg, "{") || strings.HasSuffix(seg, "}") {
+			if len(seg) < 3 || !strings.HasPrefix(seg, "{") || !strings.HasSuffix(seg, "}") {
+				return nil, fmt.Errorf("view path %q is invalid", path)
+			}
+			name := seg[1 : len(seg)-1]
+			if !restViewParamPattern.MatchString(name) {
+				return nil, fmt.Errorf("view path %q is invalid", path)
+			}
+			if _, ok := seen[name]; ok {
+				return nil, fmt.Errorf("view path %q repeats {%s}", path, name)
+			}
+			seen[name] = struct{}{}
+			params = append(params, name)
+			continue
+		}
+		if !restSegmentPattern.MatchString(seg) {
+			return nil, fmt.Errorf("view path %q is invalid", path)
+		}
+	}
+	return params, nil
+}
+
+// RestViewMethods returns methods in uppercase.
+// Allowed methods are GET, HEAD, POST, PUT, PATCH, DELETE, and QUERY.
+func RestViewMethods(methods []string) ([]string, error) {
+	if len(methods) == 0 {
+		return nil, fmt.Errorf("methods are empty")
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(methods))
+	for _, method := range methods {
+		method = strings.ToUpper(method)
+		switch method {
+		case "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "QUERY":
+		default:
+			return nil, fmt.Errorf("method %q is invalid", method)
+		}
+		if _, ok := seen[method]; ok {
+			return nil, fmt.Errorf("method %s is repeated", method)
+		}
+		seen[method] = struct{}{}
+		out = append(out, method)
+	}
+	return out, nil
+}
+
+// RestViewRouteMethods is the set of routes a view registers.
+// A GET view also registers HEAD when HEAD is not listed. The HEAD request
+// calls the same function, and Request.Method stays HEAD.
+func RestViewRouteMethods(methods []string) []string {
+	for _, method := range methods {
+		if method == "HEAD" {
+			return methods
+		}
+	}
+	for _, method := range methods {
+		if method == "GET" {
+			out := make([]string, len(methods)+1)
+			copy(out, methods)
+			out[len(methods)] = "HEAD"
+			return out
+		}
+	}
+	return methods
+}
+
+func restBraceParams(path string) []string {
+	var names []string
+	for _, seg := range strings.Split(path, "/") {
+		if len(seg) < 3 || !strings.HasPrefix(seg, "{") || !strings.HasSuffix(seg, "}") {
+			continue
+		}
+		names = append(names, seg[1:len(seg)-1])
+	}
+	return names
 }
 
 func claimRestRoute(where string, seen map[restActionRoute]string, action string, route restActionRoute) error {
@@ -1085,6 +1291,11 @@ func validateAPIAuth(cfg *Config) error {
 					return err
 				}
 			}
+			for viewName, view := range ep.Views {
+				if err := requireAuthNames(cfg, where+" view "+viewName, view.Auth); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return nil
@@ -1094,7 +1305,11 @@ func requireAuthNames(cfg *Config, where string, names *[]string) error {
 	if names == nil {
 		return nil
 	}
-	for _, name := range *names {
+	return requireAuthNameSlice(cfg, where, *names)
+}
+
+func requireAuthNameSlice(cfg *Config, where string, names []string) error {
+	for _, name := range names {
 		if _, ok := cfg.AuthPlugins[name]; ok {
 			continue
 		}

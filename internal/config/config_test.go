@@ -1776,3 +1776,132 @@ internal_rpc:
 		t.Fatalf("fd and address err = %v", err)
 	}
 }
+
+func TestLoad_RestView(t *testing.T) {
+	base := `
+plugins:
+  app:
+    uri: sqlite://memory
+application:
+  source: app
+  api:
+    v1:
+      endpoints:
+        users:
+`
+	tests := []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{
+			name: "valid sse beside crud",
+			body: `
+          views:
+            sse:
+              path: "{id}/sse"
+              methods: [GET]
+              handler: userEvents
+`,
+		},
+		{
+			name: "invalid path",
+			body: `
+          views:
+            sse:
+              path: "{id}/sse/"
+              methods: [GET]
+              handler: userEvents
+`,
+			wantErr: "sse",
+		},
+		{
+			name: "unknown method",
+			body: `
+          views:
+            sse:
+              path: "{id}/sse"
+              methods: [TRACE]
+              handler: userEvents
+`,
+			wantErr: "sse",
+		},
+		{
+			name: "duplicate method",
+			body: `
+          views:
+            sse:
+              path: "{id}/sse"
+              methods: [GET, get]
+              handler: userEvents
+`,
+			wantErr: "sse",
+		},
+		{
+			name: "empty handler",
+			body: `
+          views:
+            sse:
+              path: "{id}/sse"
+              methods: [GET]
+`,
+			wantErr: "sse",
+		},
+		{
+			name: "overlaps retrieve",
+			body: `
+          views:
+            sse:
+              path: "{id}"
+              methods: [GET]
+              handler: userEvents
+`,
+			wantErr: "sse",
+		},
+		{
+			name: "overlaps detail action",
+			body: `
+          detail_actions:
+            archive:
+              func: app.archive_user
+          views:
+            sse:
+              path: "{id}/archive"
+              methods: [POST]
+              handler: userEvents
+`,
+			wantErr: "sse",
+		},
+		{
+			name: "repeats endpoint param",
+			body: `
+          url: orgs/{org_id}/users
+          views:
+            sse:
+              path: "{org_id}/sse"
+              methods: [GET]
+              handler: userEvents
+`,
+			wantErr: "sse",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeConfig(t, "view.yaml", base+tt.body)
+			cfg, err := Load([]string{path}, "")
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				view := cfg.RestAPI["v1"].Endpoints["users"].Views["sse"]
+				if view.Path != "{id}/sse" || view.Handler != "userEvents" || len(view.Methods) != 1 || view.Methods[0] != "GET" {
+					t.Fatalf("view %#v", view)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Load err = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}

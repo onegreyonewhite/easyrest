@@ -5,7 +5,7 @@ Preserved by the server package, so `easyrest-server` and `easyrest-gateway` bot
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `dir` | required | Directory to create if missing. Must be writable. A path that exists and is not a directory fails init |
-| `inline` | false | `true` stores standard base64 in the column and the response. `false` stores a relative path |
+| `inline` | false | `true` stores a data URL in the column and the response. `false` stores a relative path |
 | `name` | set by the host | Instance name. Do not set this yourself unless you are embedding the plugin |
 
 With `inline: false`, `Put` returns a relative path. A list field is a JSON array of paths. Responses call `GetUrl` and send an absolute URL, or an array of URLs. The host mounts `GET /media/{name}/*` when the root is non-empty and inline is false. GET schemas publish the field as `format: uri`. POST, PATCH, and PUT schemas keep `format: binary` or `base64`. See [Formats](../../../internal/server/README.md#formats).

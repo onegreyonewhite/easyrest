@@ -611,9 +611,9 @@ curl -s -X POST 'http://127.0.0.1:8081/restapi/v1/users/' \
   -F 'avatar=@portrait.png;type=image/png'
 ```
 
-`inline: true` stores standard base64 in the column and in the response. That instance does not mount `/media`. The `photos` plugin leaves `inline` false and sets `public_base`, so GET returns `public_base` plus the object key. If `photos` cannot reach the bucket at startup, that plugin is skipped and a photo upload fails. Avatar upload uses local disk and does not need S3.
+`inline: true` stores a data URL in the column and in the response. That instance does not mount `/media`. The `photos` plugin leaves `inline` false and sets `public_base`, so GET returns `public_base` plus the object key. If `photos` cannot reach the bucket at startup, that plugin is skipped and a photo upload fails. Avatar upload uses local disk and does not need S3.
 
-`format: base64` stays on the ordinary JSON body. The decoded bytes go to the same storage plugin. An empty string leaves the field unset. Invalid base64 is 400. OpenAPI GET schemas use `format: uri` for a stored file. An inline field uses `format: base64` on the response. Request schemas keep `binary` or `base64`.
+`format: base64` stays on the ordinary JSON body. The string is a data URL. The decoded bytes go to the same storage plugin. An empty string leaves the field unset. A value that is not a data URL is 400. OpenAPI GET schemas use `format: uri` for a stored file. An inline field uses `format: data-url` on the response. Request schemas keep `binary` or `base64`.
 
 ## 13. Login and logout with cookies
 
@@ -733,7 +733,7 @@ v1 also includes `ratelimit` at 100 requests per minute for a global key. Over t
 
 `GET /restapi/v1/?format=json` is the v1 document. `GET /restapi/v1/?format=html` is the embedded Swagger page. Each operation has a `security` array of the auth plugins that actually apply. `discovery`, `directory`, `labels`, and `login` emit `"security": []` because their auth list is empty. An `oauth2` scheme would list the effective scopes. The other schemes list no scopes.
 
-A `binary` field stays `binary` on the request schema. On the response, a stored file is `uri`, and an inline file is `base64`.
+A `binary` field stays `binary` on the request schema. On the response, a stored file is `uri`, and an inline file is `data-url`.
 
 A JSON list is one object:
 

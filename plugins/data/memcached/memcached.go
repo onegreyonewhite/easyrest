@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/bradfitz/gomemcache/memcache"
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
 
 // Version can be set during build time
@@ -104,11 +105,23 @@ func (p *memcachedCachePlugin) Get(key string) (string, error) {
 	item, err := p.client.Get(key)
 	if err != nil {
 		if errors.Is(err, memcache.ErrCacheMiss) {
-			return "", memcache.ErrCacheMiss
+			return "", fmt.Errorf("%w: %w", easyrest.ErrCacheMiss, err)
 		}
 		return "", fmt.Errorf("failed to get cache entry from Memcached for key '%s': %w", key, err)
 	}
 	return string(item.Value), nil
+}
+
+// Delete removes a key. A missing key is not an error.
+func (p *memcachedCachePlugin) Delete(key string) error {
+	if p.client == nil {
+		return errors.New("memcached client not initialized")
+	}
+	err := p.client.Delete(key)
+	if err != nil && !errors.Is(err, memcache.ErrCacheMiss) {
+		return fmt.Errorf("failed to delete cache entry in Memcached for key '%s': %w", key, err)
+	}
+	return nil
 }
 
 // Close cleans up the Memcached client connection.

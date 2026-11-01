@@ -9,20 +9,15 @@ import (
 )
 
 // isValidWhereField reports whether field may appear as a WHERE column expression.
-// It accepts plain identifiers and ILIKE rewrite forms produced by data plugins.
+// It accepts plain identifiers, JSON arrow expressions, and ILIKE rewrite forms
+// produced by data plugins.
 func isValidWhereField(field string) bool {
-	if IsValidIdentifier(field) {
+	inner, _, _ := unwrapWhereField(field)
+	if IsValidIdentifier(inner) {
 		return true
 	}
-	const lowerPrefix = "LOWER("
-	if strings.HasPrefix(field, lowerPrefix) && strings.HasSuffix(field, ")") {
-		return IsValidIdentifier(field[len(lowerPrefix) : len(field)-1])
-	}
-	const collateSuffix = " COLLATE NOCASE"
-	if strings.HasSuffix(field, collateSuffix) {
-		return IsValidIdentifier(field[:len(field)-len(collateSuffix)])
-	}
-	return false
+	_, ok := parsePostgresJSONExpr(inner)
+	return ok
 }
 
 // ValidateColumnName returns an error when name is not a safe SQL column identifier.
@@ -177,6 +172,12 @@ type whereCondEntry struct {
 
 // buildWhereCondEntries processes the where map and returns a slice of whereCondEntry.
 func buildWhereCondEntries(where map[string]any) ([]whereCondEntry, error) {
+	return buildWhereCondEntriesFor(where, "")
+}
+
+// buildWhereCondEntriesFor processes the where map for a SQL dialect.
+// An empty dialect renders JSON arrows as PostgreSQL.
+func buildWhereCondEntriesFor(where map[string]any, dialect string) ([]whereCondEntry, error) {
 	entries := make([]whereCondEntry, 0, len(where))
 	var sb strings.Builder
 
@@ -197,6 +198,27 @@ func buildWhereCondEntries(where map[string]any) ([]whereCondEntry, error) {
 		}
 		if !isValidWhereField(baseField) {
 			return nil, fmt.Errorf("invalid field name: %q", field)
+		}
+		if path, lower, nocase, isJSON := jsonWherePath(baseField); isJSON {
+			ops, direct := val.(map[string]any)
+			if !direct {
+				ops = map[string]any{"=": val}
+			}
+			for op, operand := range ops {
+				cond, args, err := jsonCond(path, lower, nocase, op, operand, dialect)
+				if err != nil {
+					return nil, err
+				}
+				sortKey := field + "|" + op
+				if isNot && op != "IN" {
+					cond = "NOT (" + cond + ")"
+					sortKey = field + "|NOT " + op
+				} else if isNot {
+					cond = "NOT (" + cond + ")"
+				}
+				addEntry(cond, args, sortKey)
+			}
+			continue
 		}
 		switch v := val.(type) {
 		case map[string]any:
@@ -281,7 +303,7 @@ func buildWhereCondEntries(where map[string]any) ([]whereCondEntry, error) {
 //
 // It returns the SQL string (starting with " WHERE ") and the list of arguments.
 func BuildWhereClause(where map[string]any) (string, []any, error) {
-	entries, err := buildWhereCondEntries(where)
+	entries, err := buildWhereCondEntriesFor(where, "")
 	if err != nil {
 		return "", nil, err
 	}
@@ -309,7 +331,14 @@ func joinWhereEntries(entries []whereCondEntry) (string, []any) {
 // BuildWhereClauseSorted constructs a SQL WHERE clause from a given where map,
 // but sorts the conditions (and their arguments) by field name and operator for deterministic output.
 func BuildWhereClauseSorted(where map[string]any) (string, []any, error) {
-	entries, err := buildWhereCondEntries(where)
+	return BuildWhereClauseSortedFor(where, "")
+}
+
+// BuildWhereClauseSortedFor is BuildWhereClauseSorted for a SQL dialect.
+// JSON -> / ->> keys stored as PostgreSQL expressions are rendered for that dialect.
+// An empty dialect is PostgreSQL.
+func BuildWhereClauseSortedFor(where map[string]any, dialect string) (string, []any, error) {
+	entries, err := buildWhereCondEntriesFor(where, dialect)
 	if err != nil {
 		return "", nil, err
 	}

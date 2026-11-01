@@ -1,7 +1,6 @@
 package local
 
 import (
-	"encoding/base64"
 	"fmt"
 	"mime"
 	"net/http"
@@ -83,7 +82,7 @@ func (p *Plugin) Put(relPath string, body []byte, ctx map[string]any) (string, m
 		return "", ctx, fmt.Errorf("storage local: %w", err)
 	}
 	if p.inline {
-		return base64.StdEncoding.EncodeToString(body), ctx, nil
+		return easyrest.FormatDataURL(inlineMediaType(contentType(rel, body), ctx), body), ctx, nil
 	}
 	return rel, ctx, nil
 }
@@ -248,6 +247,13 @@ func (p *Plugin) fullPath(relPath string) (full, rel string, err error) {
 		return "", "", fmt.Errorf("storage local: path escapes root")
 	}
 	return full, rel, nil
+}
+
+func inlineMediaType(detected string, ctx map[string]any) string {
+	if mediaType, ok := easyrest.CtxString(ctx, easyrest.CtxStorageMIME); ok && mediaType != "" {
+		return mediaType
+	}
+	return detected
 }
 
 func contentType(rel string, body []byte) string {

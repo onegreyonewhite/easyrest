@@ -44,8 +44,8 @@ func TestStoreObjectFieldsMemory(t *testing.T) {
 	}
 	row := map[string]any{
 		"title": "ada",
-		"thumb": base64.StdEncoding.EncodeToString([]byte("png")),
-		"extra": []any{base64.StdEncoding.EncodeToString([]byte("a")), base64.StdEncoding.EncodeToString([]byte("b"))},
+		"thumb": easyrest.FormatDataURL("image/png", []byte("png")),
+		"extra": []any{easyrest.FormatDataURL("text/plain", []byte("a")), easyrest.FormatDataURL("text/plain", []byte("b"))},
 		"blank": "",
 	}
 	kinds["blank"] = storageValueBase64
@@ -73,7 +73,7 @@ func TestStoreObjectFieldsMemory(t *testing.T) {
 		t.Fatalf("thumb %q", thumb)
 	}
 	if _, ok := row["blank"]; ok {
-		t.Fatal("empty base64 should be unset")
+		t.Fatal("empty file field should be unset")
 	}
 	body, _, _, err := ref.Plugin.GetBin(avatar, nil)
 	if err != nil || string(body) != "one" {
@@ -83,7 +83,12 @@ func TestStoreObjectFieldsMemory(t *testing.T) {
 	bad := map[string]any{"thumb": "@@@"}
 	err = storeObjectFields(context.Background(), bad, nil, map[string]storageValueKind{"thumb": storageValueBase64}, ref, "users", nil)
 	if err == nil || storageStatus(err) != http.StatusBadRequest {
-		t.Fatalf("invalid base64: %v", err)
+		t.Fatalf("invalid data url: %v", err)
+	}
+	plain := map[string]any{"thumb": base64.StdEncoding.EncodeToString([]byte("x"))}
+	err = storeObjectFields(context.Background(), plain, nil, map[string]storageValueKind{"thumb": storageValueBase64}, ref, "users", nil)
+	if err == nil || storageStatus(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "invalid data url") {
+		t.Fatalf("plain base64: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -96,7 +101,8 @@ func TestStoreObjectFieldsMemory(t *testing.T) {
 
 func TestStoreObjectFieldsDBGlob(t *testing.T) {
 	ref := testDBGlobRef(t)
-	row := map[string]any{"thumb": base64.StdEncoding.EncodeToString([]byte("png"))}
+	thumb := easyrest.FormatDataURL("image/png", []byte("png"))
+	row := map[string]any{"thumb": thumb}
 	err := storeObjectFields(context.Background(), row, []multipartFile{{Name: "avatar", Filename: "a.png", Body: []byte("one")}}, map[string]storageValueKind{
 		"avatar": storageValueBinary,
 		"thumb":  storageValueBase64,
@@ -104,10 +110,10 @@ func TestStoreObjectFieldsDBGlob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if row["avatar"] != base64.StdEncoding.EncodeToString([]byte("one")) {
+	if row["avatar"] != easyrest.FormatDataURL("", []byte("one")) {
 		t.Fatalf("avatar %v", row["avatar"])
 	}
-	if row["thumb"] != base64.StdEncoding.EncodeToString([]byte("png")) {
+	if row["thumb"] != thumb {
 		t.Fatalf("thumb %v", row["thumb"])
 	}
 }

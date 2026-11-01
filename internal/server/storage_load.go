@@ -5,6 +5,7 @@ import (
 	stdlog "log"
 	"maps"
 	"net/http"
+	"slices"
 	"strings"
 	"sync/atomic"
 
@@ -15,10 +16,12 @@ import (
 )
 
 type storagePluginRef struct {
-	Name   string
-	Plugin easyrest.StoragePlugin
-	Root   string
-	Inline bool
+	Name       string
+	Plugin     easyrest.StoragePlugin
+	Root       string
+	Inline     bool
+	Auth       []string
+	AuthScopes []string
 }
 
 var storageSwap atomic.Pointer[http.Handler]
@@ -46,7 +49,23 @@ func publishStorage() {
 				continue
 			}
 			plug := ref.Plugin
+			if len(ref.Auth) == 0 {
+				sub.Get("/"+name+"/*", func(w http.ResponseWriter, r *http.Request) {
+					serveStorageFile(w, r, plug)
+				})
+				continue
+			}
+			authNames := slices.Clone(ref.Auth)
+			scopes := storageAuthorizeScopes(ref.AuthScopes)
 			sub.Get("/"+name+"/*", func(w http.ResponseWriter, r *http.Request) {
+				cfg := currentConfig()
+				if _, _, ok := authorizeHTTP(w, r, authzRequest{
+					names:      &authNames,
+					checkScope: cfg.CheckScope,
+					scopes:     scopes,
+				}); !ok {
+					return
+				}
 				serveStorageFile(w, r, plug)
 			})
 		}
@@ -110,7 +129,7 @@ func loadOneStoragePlugin(name string, plugCfg config.StoragePluginConfig, noPlu
 			stdlog.Printf("Storage plugin '%s': no preserved plugin %q and no path. Skipping.", name, driver)
 			return storagePluginRef{}, nil, false
 		}
-		ref, ok := initStoragePlugin(name, factory(), plugCfg.Settings)
+		ref, ok := initStoragePlugin(name, factory(), plugCfg)
 		if ok {
 			stdlog.Printf("Storage plugin '%s' (preserved) initialized.", name)
 		}
@@ -141,7 +160,7 @@ func loadOneStoragePlugin(name string, plugCfg config.StoragePluginConfig, noPlu
 		client.Kill()
 		return storagePluginRef{}, nil, false
 	}
-	ref, ok := initStoragePlugin(name, plug, plugCfg.Settings)
+	ref, ok := initStoragePlugin(name, plug, plugCfg)
 	if !ok {
 		client.Kill()
 		return storagePluginRef{}, nil, false
@@ -150,13 +169,27 @@ func loadOneStoragePlugin(name string, plugCfg config.StoragePluginConfig, noPlu
 	return ref, client, true
 }
 
-func initStoragePlugin(name string, plug easyrest.StoragePlugin, settings map[string]any) (storagePluginRef, bool) {
-	info, err := plug.Init(withPluginName(name, settings), currentHostRPC())
+func initStoragePlugin(name string, plug easyrest.StoragePlugin, plugCfg config.StoragePluginConfig) (storagePluginRef, bool) {
+	info, err := plug.Init(withPluginName(name, plugCfg.Settings), currentHostRPC())
 	if err != nil {
 		stdlog.Printf("Error initializing storage plugin '%s': %v", name, err)
 		return storagePluginRef{}, false
 	}
-	return storagePluginRef{Name: name, Plugin: plug, Root: info.Root, Inline: info.Inline}, true
+	return storagePluginRef{
+		Name:       name,
+		Plugin:     plug,
+		Root:       info.Root,
+		Inline:     info.Inline,
+		Auth:       slices.Clone(plugCfg.Auth),
+		AuthScopes: slices.Clone(plugCfg.AuthScopes),
+	}, true
+}
+
+func storageAuthorizeScopes(authScopes []string) []string {
+	if len(authScopes) > 0 {
+		return authScopes
+	}
+	return []string{"read"}
 }
 
 func withPluginName(name string, settings map[string]any) map[string]any {

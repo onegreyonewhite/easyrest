@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -273,11 +272,11 @@ func storeBase64Field(ctx context.Context, row map[string]any, name string, list
 		}
 		stored := make([]string, 0, len(items))
 		for _, item := range items {
-			body, err := decodeFieldBase64(item)
+			body, mediaType, err := decodeFieldDataURL(item)
 			if err != nil {
 				return storageBadRequest(fmt.Errorf("field %s: %w", name, err))
 			}
-			value, err := putStored(ctx, ref, table, name, "object", body, reqCtx)
+			value, err := putStored(ctx, ref, table, name, "object", body, withStorageMIME(reqCtx, mediaType))
 			if err != nil {
 				return err
 			}
@@ -298,11 +297,11 @@ func storeBase64Field(ctx context.Context, row map[string]any, name string, list
 		delete(row, name)
 		return nil
 	}
-	body, err := decodeFieldBase64(text)
+	body, mediaType, err := decodeFieldDataURL(text)
 	if err != nil {
 		return storageBadRequest(fmt.Errorf("field %s: %w", name, err))
 	}
-	value, err := putStored(ctx, ref, table, name, "object", body, reqCtx)
+	value, err := putStored(ctx, ref, table, name, "object", body, withStorageMIME(reqCtx, mediaType))
 	if err != nil {
 		return err
 	}
@@ -310,12 +309,24 @@ func storeBase64Field(ctx context.Context, row map[string]any, name string, list
 	return nil
 }
 
-func decodeFieldBase64(text string) ([]byte, error) {
-	body, err := base64.StdEncoding.DecodeString(text)
+func decodeFieldDataURL(text string) ([]byte, string, error) {
+	mediaType, body, err := easyrest.ParseDataURL(text)
 	if err != nil {
-		return nil, fmt.Errorf("invalid base64")
+		return nil, "", easyrest.ErrInvalidDataURL
 	}
-	return body, nil
+	return body, mediaType, nil
+}
+
+func withStorageMIME(reqCtx map[string]any, mediaType string) map[string]any {
+	if mediaType == "" {
+		return reqCtx
+	}
+	callCtx := maps.Clone(reqCtx)
+	if callCtx == nil {
+		callCtx = map[string]any{}
+	}
+	callCtx[easyrest.CtxStorageMIME] = mediaType
+	return callCtx
 }
 
 func base64List(raw any) ([]string, error) {

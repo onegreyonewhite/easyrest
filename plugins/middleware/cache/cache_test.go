@@ -15,6 +15,7 @@ type fakeStore struct {
 	values  map[string]string
 	gets    []string
 	sets    []string
+	lastTTL time.Duration
 	initURI string
 	initErr error
 	setErr  error
@@ -33,6 +34,7 @@ func (s *fakeStore) Set(key string, value string, ttl time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sets = append(s.sets, key)
+	s.lastTTL = ttl
 	if s.setErr != nil {
 		return s.setErr
 	}
@@ -49,9 +51,16 @@ func (s *fakeStore) Get(key string) (string, error) {
 	s.gets = append(s.gets, key)
 	v, ok := s.values[key]
 	if !ok {
-		return "", errors.New("miss")
+		return "", easyrest.ErrCacheMiss
 	}
 	return v, nil
+}
+
+func (s *fakeStore) Delete(key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.values, key)
+	return nil
 }
 
 func mustInit(t *testing.T, store Store, settings map[string]any) *Plugin {
@@ -611,5 +620,41 @@ func TestHeaderOfAndParseTTL(t *testing.T) {
 	}
 	if _, err := parseTTL(struct{}{}); err == nil {
 		t.Fatal("expected invalid ttl")
+	}
+}
+
+func TestPlugin_KeyAccess(t *testing.T) {
+	store := newFakeStore()
+	p := mustInit(t, store, map[string]any{"ttl": "30s"})
+	if err := p.Set("k", "v", nil); err != nil {
+		t.Fatal(err)
+	}
+	if store.lastTTL != 30*time.Second {
+		t.Fatalf("ttl = %s", store.lastTTL)
+	}
+	fiveSeconds := 5 * time.Second
+	if err := p.Set("k", "v", &fiveSeconds); err != nil {
+		t.Fatal(err)
+	}
+	if store.lastTTL != fiveSeconds {
+		t.Fatalf("ttl = %s", store.lastTTL)
+	}
+	zero := time.Duration(0)
+	if err := p.Set("k", "v", &zero); err == nil {
+		t.Fatal("expected zero ttl error")
+	}
+	if store.lastTTL != fiveSeconds {
+		t.Fatalf("ttl changed to %s", store.lastTTL)
+	}
+	got, err := p.Get("k")
+	if err != nil || got != "v" {
+		t.Fatalf("Get = %q, %v", got, err)
+	}
+	if err := p.Delete("k"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.Get("k")
+	if !errors.Is(err, easyrest.ErrCacheMiss) {
+		t.Fatalf("Get after delete: %v", err)
 	}
 }

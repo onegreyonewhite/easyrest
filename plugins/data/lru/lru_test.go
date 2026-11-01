@@ -1,8 +1,11 @@
 package cache
 
 import (
+	"errors"
 	"testing"
 	"time"
+
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
 
 func TestSimpleCachePlugin_BasicSetGet(t *testing.T) {
@@ -73,8 +76,28 @@ func TestSimpleCachePlugin_MissingKey(t *testing.T) {
 	}
 
 	_, err := plugin.Get("notfound")
-	if err == nil {
-		t.Errorf("Expected error for missing key, got nil")
+	if !errors.Is(err, easyrest.ErrCacheMiss) {
+		t.Fatalf("Get missing key: %v", err)
+	}
+}
+
+func TestSimpleCachePlugin_Delete(t *testing.T) {
+	plugin := NewSimpleCachePlugin()
+	if err := plugin.InitConnection(""); err != nil {
+		t.Fatal(err)
+	}
+	if err := plugin.Set("k", "v", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := plugin.Delete("k"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := plugin.Get("k")
+	if !errors.Is(err, easyrest.ErrCacheMiss) {
+		t.Fatalf("Get after delete: %v", err)
+	}
+	if err := plugin.Delete("missing"); err != nil {
+		t.Fatalf("delete missing: %v", err)
 	}
 }
 

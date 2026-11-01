@@ -31,6 +31,16 @@ GET /api/app/users/?select=count()
 
 Allowed functions: `count`, `sum`, `avg`, `min`, `max`. Non-aggregated select fields become `GROUP BY`. Identifiers must match `[A-Za-z_][A-Za-z0-9_]*`.
 
+JSON and jsonb columns accept PostgreSQL arrow paths. `->` keeps JSON. `->>` returns text. The response name is the last object key. A path that ends on an array index needs an explicit alias. `->>` is only valid as the last step. Keys are identifiers, and a step that is only digits is an array index, not the object key `"0"`.
+
+```
+GET /api/app/people/?select=id,json_data->>blood_type,json_data->phones
+GET /api/app/people/?select=id,json_data->phones->0->>number
+GET /api/app/people/?select=id,primary_language:languages->0
+```
+
+The server emits the native PostgreSQL operator (`json_data->'phones'->0->>'number'`), not `to_jsonb()`. An index has to match that expression. Composite types and SQL arrays are not coerced. `ordering` still accepts only plain identifiers.
+
 ## Filters and ordering
 
 `where.<op>.<field>=value`, optional `not`:
@@ -48,7 +58,14 @@ GET /api/app/users/?where.in.id=1,2,3
 GET /api/app/users/?where.eq.name=request.claims.sub
 ```
 
-`ordering` is a comma-separated list of plain identifiers. The query language has no `ASC`/`DESC` token or any other way to set sort direction.
+`->>` compares as text, so `where.eq.json_data->>blood_type=A-` matches the string `A-`. `->` compares as JSON: the value must be JSON (`20`, `true`, `null`, `"A-"`), and `where.gt.json_data->age=20` is a numeric comparison. `like` and `ilike` require `->>`. On PostgreSQL, `->` ordering needs a `jsonb` column because `json` has no `>`. SQLite and MySQL render the same path with their own comparison rules. See the plugin notes.
+
+```
+GET /api/app/people/?select=id,json_data->blood_type&where.eq.json_data->>blood_type=A-
+GET /api/app/people/?select=id,json_data->age&where.gt.json_data->age=20
+```
+
+`ordering` is a comma-separated list of plain identifiers. The query language has no `ASC`/`DESC` token or any other way to set sort direction. Arrow paths are not accepted there.
 
 ## Pagination
 
@@ -81,15 +98,17 @@ The parser uses `Content-Type` only. An empty `Content-Type` selects the first a
 
 Which names are allowed comes from the first non-empty list: the REST endpoint `content_handlers`, the REST app `content_handlers`, the db plugin `content_handlers`, then `default_content_handlers`. If every list is empty, the standards are `json`, `ndjson`, `xml`, `csv`, `form`.
 
+Table create accepts one JSON object or an array of those objects. Both go through one `TableCreate`. The response is `201` and a JSON array of the created rows. An empty array, or an array element that is not an object, is `400`.
+
 REST create, update, state PUT, and POST actions can also accept `multipart/form-data` or `multipart/mixed` when the action schema has a field `type: string, format: binary`, or an array of those. That parser is built in and always available. It is not a content plugin and it does not render. One part has no filename. Its `Content-Type` selects the usual parser (`application/json` when the part omits a type). Every other part is a file whose form name is the field name. A list field repeats that name. The file bytes go to the action's storage plugin. `application/x-www-form-urlencoded` is the [form](../../plugins/content/form/README.md) content plugin, not this parser.
 
-A field `type: string, format: base64` stays on the normal content parser. The string is standard base64. The decoded bytes go to the same storage plugin. An empty string leaves the field unset. Invalid base64 is 400.
+A field `type: string, format: base64` stays on the normal content parser. The string is a data URL (`data:[<media-type>][;base64],<data>`). An explicit media type is stored with the file. When the media type is omitted, the storage plugin detects it. The response for an inline field is always `data:<media-type>;base64,<data>` with standard base64. The decoded bytes go to the same storage plugin. An empty string leaves the field unset. A value that is not a data URL is 400.
 
 `local` and `memory` store a relative path. A list is a JSON array of paths. Responses that return the field call `GetUrl` and send an absolute URL, or an array of URLs. GET schemas for list, retrieve, and state publish those fields as `format: uri`. POST, PATCH, and PUT request schemas keep `binary` or `base64`.
 
-`dbglob` inline mode stores standard base64 in the column and returns it unchanged. Nothing is mounted at `/media/dbglob`. GET schemas then use `format: base64`. See [dbglob](../../plugins/storage/dbglob/README.md).
+`dbglob` inline mode stores a data URL in the column and returns it unchanged. Nothing is mounted at `/media/dbglob`. GET schemas then use `format: data-url`. See [dbglob](../../plugins/storage/dbglob/README.md).
 
-`local`, `memory`, and `s3` honor `settings.inline`. `true` still stores the bytes and makes `Put` return standard base64, so the column and the response are that string. `false` and a missing key keep the relative path.
+`local`, `memory`, and `s3` honor `settings.inline`. `true` still stores the bytes and makes `Put` return a data URL, so the column and the response are that string. `false` and a missing key keep the relative path.
 
 Which storage instance a REST action uses is described in [Configuration](../config/README.md#application-and-restapi).
 
@@ -125,6 +144,12 @@ If every plugin fails and `anon_claims` is set, the request continues with those
 `check_scope` (default on) requires a `scope` claim. A claim of `read` or `write` satisfies any required scope that ends with that word (`users-read`, `orders-write`). Per-table `public` lists skip the scope check but still go through `Authenticate`, so unauthenticated public access needs `anon_claims`.
 
 `exclude` hides objects from the API. `allow` is an allow-list: when non-empty, only those tables or functions exist.
+
+## Rest views
+
+A `views` entry runs a Go function after the same authentication, scope check, and request middleware as the other actions on that endpoint. The function is selected by `handler`. `path` and `methods` choose the route. The function receives the `http.ResponseWriter` and writes the status, headers, and body. Content plugins do not render that response, and response middleware does not run. The call's plugin access is the in-process caller: table get, create, update, delete, a function call, cache get, set, and delete, and storage put, get URL, metadata, get bytes, list, and delete. Those calls do not forward the caller's token. The call leaves the parsed body empty, and the raw body stays on the request. The call context is canceled when the client disconnects. `server.write_timeout` bounds the response until the function extends the deadline with `http.NewResponseController(w).SetWriteDeadline`. A method that is not registered on that path returns 405 and sets `Allow`. A `GET` view also serves `HEAD` when `methods` omits `HEAD`, and `Request.Method` on that request is `HEAD`. An explicit `HEAD` method uses its own function. See [Configuration](../config/README.md#application-and-restapi).
+
+A rest action with a registered Go `handler` receives the same in-process caller on `Call.Plugins` instead of writing the response directly.
 
 ## See also
 

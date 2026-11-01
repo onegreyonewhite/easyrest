@@ -3,10 +3,13 @@ package sqlcache
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
 	"time"
+
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
 
 // Dialect holds backend-specific SQL for the easyrest_cache table.
@@ -15,6 +18,7 @@ type Dialect struct {
 	DeleteExpired string
 	Upsert        string
 	SelectLive    string
+	DeleteKey     string
 	GetUsesNowArg bool
 }
 
@@ -32,6 +36,7 @@ type Store struct {
 	stopOnce sync.Once
 	setStmt  *sql.Stmt
 	getStmt  *sql.Stmt
+	delStmt  *sql.Stmt
 }
 
 func (s *Store) EnsureTable(ctx context.Context) error {
@@ -48,8 +53,18 @@ func (s *Store) Prepare(db *sql.DB) error {
 		getStmt.Close()
 		return fmt.Errorf("failed to prepare set cache statement: %w", err)
 	}
+	var delStmt *sql.Stmt
+	if s.Dialect.DeleteKey != "" {
+		delStmt, err = db.Prepare(s.Dialect.DeleteKey)
+		if err != nil {
+			getStmt.Close()
+			setStmt.Close()
+			return fmt.Errorf("failed to prepare delete cache statement: %w", err)
+		}
+	}
 	s.getStmt = getStmt
 	s.setStmt = setStmt
+	s.delStmt = delStmt
 	return nil
 }
 
@@ -73,6 +88,10 @@ func (s *Store) Stop() {
 	if s.setStmt != nil {
 		s.setStmt.Close()
 		s.setStmt = nil
+	}
+	if s.delStmt != nil {
+		s.delStmt.Close()
+		s.delStmt = nil
 	}
 }
 
@@ -105,6 +124,17 @@ func (s *Store) Set(ctx context.Context, key, value string, ttl time.Duration) e
 	return s.Exec.Exec(ctx, s.Dialect.Upsert, key, value, expiresAt)
 }
 
+func (s *Store) Delete(ctx context.Context, key string) error {
+	if s.delStmt != nil {
+		_, err := s.delStmt.Exec(key)
+		return err
+	}
+	if s.Dialect.DeleteKey == "" {
+		return errors.New("cache delete is not configured")
+	}
+	return s.Exec.Exec(ctx, s.Dialect.DeleteKey, key)
+}
+
 func (s *Store) Get(ctx context.Context, key string) (string, error) {
 	if s.getStmt != nil {
 		var value string
@@ -113,11 +143,19 @@ func (s *Store) Get(ctx context.Context, key string) (string, error) {
 			args = append(args, time.Now())
 		}
 		err := s.getStmt.QueryRow(args...).Scan(&value)
-		return value, err
+		return value, cacheMiss(err)
 	}
 	args := []any{key}
 	if s.Dialect.GetUsesNowArg {
 		args = append(args, time.Now())
 	}
-	return s.Exec.QueryValue(ctx, s.Dialect.SelectLive, args...)
+	value, err := s.Exec.QueryValue(ctx, s.Dialect.SelectLive, args...)
+	return value, cacheMiss(err)
+}
+
+func cacheMiss(err error) error {
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: %w", easyrest.ErrCacheMiss, err)
+	}
+	return err
 }

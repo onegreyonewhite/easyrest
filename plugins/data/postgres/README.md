@@ -39,6 +39,10 @@ Before `COMMIT`, the plugin harvests `response.*` (including `response.headers` 
 
 `db.pre-request` and `db.post-request` run as `SELECT name()`. The name comes from [dbqueryhook](../../middleware/dbqueryhook/README.md) or from anything else that set those context keys.
 
+## JSON arrows
+
+`->` and `->>` are sent to PostgreSQL as written (`json_data->'age'`, `json_data->>'blood_type'`). The filter value for `->` is cast on the right only (`?::jsonb`), so an index on `(json_data->'age')` can still match. The column must be `jsonb` for `>`, `<`, and the other ordering operators. `json` can still be selected and filtered with `->>`. The plugin does not wrap the column in `to_jsonb()`.
+
 ## Count
 
 `exact` runs `SELECT count(*)` over the unbounded filtered select in the same transaction as the page.

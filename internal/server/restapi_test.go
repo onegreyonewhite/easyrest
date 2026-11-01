@@ -142,6 +142,7 @@ func serveRest(t *testing.T, cfg config.Config, plugins map[string]easyrest.DBPl
 	}
 	SetConfig(cfg)
 	DbPlugins.Store(&plugins)
+	chi.RegisterMethod("QUERY")
 	r := chi.NewRouter()
 	mountRestAPI(r)
 	publishRestAPI()
@@ -1146,7 +1147,8 @@ func TestRestAPI_ListOrdering(t *testing.T) {
 			"tables": map[string]any{
 				"users": map[string]any{
 					"properties": map[string]any{
-						"name": map[string]any{"type": "string"},
+						"name":  map[string]any{"type": "string"},
+						"email": map[string]any{"type": "string"},
 					},
 				},
 			},
@@ -1158,6 +1160,9 @@ func TestRestAPI_ListOrdering(t *testing.T) {
 				Source: "db",
 				Endpoints: map[string]config.RestEndpoint{
 					"users": {
+						Filters: map[string]config.RestFilter{
+							"email": {Op: "eq"},
+						},
 						Actions: map[string]config.RestAction{
 							"list": {Fields: []string{"name"}},
 						},
@@ -1181,7 +1186,7 @@ func TestRestAPI_ListOrdering(t *testing.T) {
 	calls := plugin.getCalls
 	bad := httptest.NewRecorder()
 	router.ServeHTTP(bad, httptest.NewRequest(http.MethodGet, "/restapi/v1/users/?ordering=email", nil))
-	if bad.Code != http.StatusBadRequest {
+	if bad.Code != http.StatusBadRequest || !strings.Contains(bad.Body.String(), "invalid ordering") {
 		t.Fatalf("status %d body %q", bad.Code, bad.Body.String())
 	}
 	if plugin.getCalls != calls {
@@ -1850,6 +1855,77 @@ func TestRestAPI_CreateReturnsCreated(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0]["name"] != "ada" {
 		t.Fatalf("rows %#v", rows)
+	}
+}
+
+func TestRestAPI_CreateAcceptsObjectArray(t *testing.T) {
+	plugin := &restRecPlugin{}
+	router := serveRest(t, restUsersConfig(), map[string]easyrest.DBPlugin{"db": plugin})
+
+	req := httptest.NewRequest(http.MethodPost, "/restapi/v1/users/", strings.NewReader(`[{"name":"ada"},{"name":"bea"}]`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status %d body %q", w.Code, w.Body.String())
+	}
+	if plugin.creates != 1 || len(plugin.createData) != 2 || plugin.createData[0]["name"] != "ada" || plugin.createData[1]["name"] != "bea" {
+		t.Fatalf("creates %d data %#v", plugin.creates, plugin.createData)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decode %v body %q", err, w.Body.String())
+	}
+	if len(rows) != 2 || rows[0]["name"] != "ada" || rows[1]["name"] != "bea" {
+		t.Fatalf("rows %#v", rows)
+	}
+}
+
+func TestRestAPI_CreateRejectsEmptyArray(t *testing.T) {
+	plugin := &restRecPlugin{}
+	router := serveRest(t, restUsersConfig(), map[string]easyrest.DBPlugin{"db": plugin})
+
+	req := httptest.NewRequest(http.MethodPost, "/restapi/v1/users/", strings.NewReader(`[]`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "Invalid data format") {
+		t.Fatalf("status %d body %q", w.Code, w.Body.String())
+	}
+	if plugin.creates != 0 {
+		t.Fatalf("creates %d", plugin.creates)
+	}
+}
+
+func TestRestAPI_CreateRejectsNonObjectArray(t *testing.T) {
+	plugin := &restRecPlugin{}
+	router := serveRest(t, restUsersConfig(), map[string]easyrest.DBPlugin{"db": plugin})
+
+	req := httptest.NewRequest(http.MethodPost, "/restapi/v1/users/", strings.NewReader(`[1,{"name":"ada"}]`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "Invalid data format") {
+		t.Fatalf("status %d body %q", w.Code, w.Body.String())
+	}
+	if plugin.creates != 0 {
+		t.Fatalf("creates %d", plugin.creates)
+	}
+}
+
+func TestRestAPI_UpdateRejectsObjectArray(t *testing.T) {
+	plugin := &restRecPlugin{updated: 1}
+	router := serveRest(t, restUsersConfig(), map[string]easyrest.DBPlugin{"db": plugin})
+
+	req := httptest.NewRequest(http.MethodPatch, "/restapi/v1/users/5/", strings.NewReader(`[{"name":"ada"},{"name":"bea"}]`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status %d body %q", w.Code, w.Body.String())
+	}
+	if plugin.updateCalls != 0 {
+		t.Fatalf("updates %d", plugin.updateCalls)
 	}
 }
 

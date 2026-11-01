@@ -7,7 +7,7 @@ This directory contains a self-contained Docker Compose stack and scripts to col
 - Docker with Compose v2
 - `curl`
 - Python 3
-- Go 1.26+ (for rebuilding with PGO)
+- Go 1.27.3+ (for rebuilding with PGO)
 
 ## Quick start
 

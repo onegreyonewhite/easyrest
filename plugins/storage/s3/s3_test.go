@@ -279,8 +279,13 @@ func TestInlineStoresAndReturnsBase64(t *testing.T) {
 		t.Fatalf("inline %v err %v", inline, err)
 	}
 	got, _, err := plug.Put("a.txt", []byte("hi"), nil)
-	if err != nil || got != "aGk=" {
+	want := easyrest.FormatDataURL("text/plain; charset=utf-8", []byte("hi"))
+	if err != nil || got != want {
 		t.Fatalf("stored %q err %v", got, err)
+	}
+	typed, _, err := plug.Put("b.bin", []byte{0x00, 0x01}, map[string]any{easyrest.CtxStorageMIME: "image/png"})
+	if err != nil || typed != easyrest.FormatDataURL("image/png", []byte{0x00, 0x01}) {
+		t.Fatalf("typed %q err %v", typed, err)
 	}
 	body, _, _, err := plug.GetBin("a.txt", nil)
 	if err != nil || string(body) != "hi" {

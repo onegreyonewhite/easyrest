@@ -12,6 +12,9 @@ const (
 	StorageTypeFile = "file"
 	// StorageTypeDir is a List entry that names a directory.
 	StorageTypeDir = "dir"
+	// CtxStorageMIME is the media type of a file passed to StoragePlugin.Put.
+	// Inline Put uses it in the returned data URL when it is a non-empty string.
+	CtxStorageMIME = "storage.mime"
 )
 
 // StorageMeta is the metadata a storage plugin reports for one object.
@@ -42,6 +45,7 @@ type StorageURL struct {
 // A non-empty root tells the host to mount GET /media/{name}/* when inline
 // is false. The root string itself is not part of the URL.
 // inline true means Put's return value is the database cell and the response.
+// That value is a data URL. CtxStorageMIME, when set, supplies its media type.
 // The host does not call GetUrl and does not mount /media for that plugin.
 // Put and GetBin exchange file bytes so an external plugin can carry them over RPC.
 // A nil ctx map from Put or GetBin means the caller keeps its existing context.
