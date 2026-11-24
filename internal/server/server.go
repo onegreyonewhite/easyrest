@@ -179,6 +179,11 @@ func buildPluginContext(r *http.Request, dbKey, table, fn string) map[string]any
 	pluginCtx["client_ip"] = clientIP
 	pluginCtx[easyrest.CtxDBType] = easyrest.DBTypeFromURI(dbConfig.Uri)
 	pluginCtx["request"] = requestPublic(r)
+	if internalCall(r) {
+		if id := r.Header.Get(sharedTxHeader); id != "" {
+			pluginCtx[easyrest.SharedTxKey] = id
+		}
+	}
 	return pluginCtx
 }
 
@@ -504,7 +509,17 @@ func SetupRouter() chi.Router {
 }
 
 // buildRouter initializes the router and endpoints from the active config.
+// A rest spec hook error is logged. The router is still returned.
 func buildRouter() chi.Router {
+	r, err := newRouter()
+	if err != nil {
+		stdlog.Printf("restapi spec hook: %v", err)
+	}
+	return r
+}
+
+// newRouter builds the router and returns a rest spec hook error with that router.
+func newRouter() (chi.Router, error) {
 	cfg := GetConfig()
 	// Initialize claims cache with default expiration and cleanup interval
 	if claimsCache == nil && cfg.TokenCacheTTL > 0 {
@@ -560,12 +575,14 @@ func buildRouter() chi.Router {
 	r.Get("/health", healthHandler)
 	mountRestAPI(r)
 	mountStorage(r)
-	publishRestAPI()
+	if err := publishRestAPI(); err != nil {
+		return r, err
+	}
 	publishStorage()
 	if mount := routeHook.Load(); mount != nil && *mount != nil {
 		(*mount)(r)
 	}
-	return r
+	return r, nil
 }
 
 func InitOtel(otelCfg config.OtelConfig) (shutdown func(context.Context) error, err error) {
@@ -612,21 +629,34 @@ func (s *swapHandler) store(h http.Handler) {
 
 // LiveHandler builds the HTTP handler from the active config.
 // Run serves this handler and swaps it in again after SIGHUP.
-func LiveHandler() http.Handler {
+func LiveHandler() (http.Handler, error) {
 	return buildLiveHandler(GetConfig())
 }
 
 // buildLiveHandler builds the swappable request handler. Plugins are already loaded.
-func buildLiveHandler(cfg config.Config) http.Handler {
-	var handler http.Handler = buildRouter()
+// A rest spec hook error is returned with the handler that was built.
+func buildLiveHandler(cfg config.Config) (http.Handler, error) {
+	router, err := newRouter()
+	var handler http.Handler = router
 	if cfg.AccessLogOn {
 		handler = AccessLogMiddleware(handler)
 	}
-	return handler
+	return handler, err
 }
 
 // Run starts the HTTP server from the configuration set by SetupApplication.
+// It stops on SIGINT or SIGTERM. SIGHUP reloads config without stopping.
 func Run() {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := Serve(ctx); err != nil {
+		stdlog.Fatalf("server: %v", err)
+	}
+}
+
+// Serve runs the HTTP server until ctx is canceled.
+// SIGHUP reloads config and rebuilds routes. Listen failures are returned.
+func Serve(ctx context.Context) error {
 	conf := GetConfig()
 	var otelShutdown func(context.Context) error
 	if conf.Otel.Enabled {
@@ -637,13 +667,16 @@ func Run() {
 		}
 	}
 	swap := &swapHandler{}
-	swap.store(buildLiveHandler(conf))
+	live, err := buildLiveHandler(conf)
+	if err != nil {
+		return err
+	}
+	swap.store(live)
 	var handler http.Handler = swap
 	if otelShutdown != nil {
 		handler = otelhttp.NewHandler(handler, "server-request")
 	}
 
-	// Create server with optimized settings
 	srv := &http.Server{
 		Addr:              ":" + conf.Port,
 		Handler:           handler,
@@ -655,13 +688,11 @@ func Run() {
 		ConnState: func(conn net.Conn, state http.ConnState) {
 			switch state {
 			case http.StateNew:
-				// Set TCP keepalive
 				if tcpConn, ok := conn.(*net.TCPConn); ok {
 					tcpConn.SetKeepAlive(true)
 					tcpConn.SetKeepAlivePeriod(conf.Server.KeepAlivePeriod)
 				}
 			case http.StateIdle:
-				// Clear buffers when idle
 				if tcpConn, ok := conn.(*net.TCPConn); ok {
 					tcpConn.SetReadBuffer(0)
 					tcpConn.SetWriteBuffer(0)
@@ -681,67 +712,78 @@ func Run() {
 		PermitProhibitedCipherSuites: conf.Server.HTTP2PermitProhibitedCipherSuites,
 	}
 
-	// Create context with timeout for graceful shutdown
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// Run server in a goroutine
 	rpcLis, err := listenInternalRPC(conf.InternalRPC)
 	if err != nil {
-		stdlog.Fatalf("internal rpc: %v", err)
+		return fmt.Errorf("internal rpc: %w", err)
 	}
 	if rpcLis != nil {
 		go serveInternalRPC(rpcLis)
 	}
+
+	listenErr := make(chan error, 1)
 	go func() {
 		if conf.TLSEnabled {
 			http2.ConfigureServer(srv, h2s)
 			stdlog.Printf("TLS server listening on port %s...", conf.Port)
-			if err := srv.ListenAndServeTLS(conf.TLSCertFile, conf.TLSKeyFile); err != nil && err != http.ErrServerClosed {
-				stdlog.Fatalf("Server error: %v", err)
+			err := srv.ListenAndServeTLS(conf.TLSCertFile, conf.TLSKeyFile)
+			if err != nil && err != http.ErrServerClosed {
+				listenErr <- err
 			}
-		} else {
-			stdlog.Printf("Server listening on port %s...", conf.Port)
-			srv.Handler = h2c.NewHandler(handler, h2s)
-			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				stdlog.Fatalf("Server error: %v", err)
-			}
+			return
+		}
+		stdlog.Printf("Server listening on port %s...", conf.Port)
+		srv.Handler = h2c.NewHandler(handler, h2s)
+		err := srv.ListenAndServe()
+		if err != nil && err != http.ErrServerClosed {
+			listenErr <- err
 		}
 	}()
 
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	signal.Notify(sigChan, syscall.SIGHUP)
+	defer signal.Stop(sigChan)
 
 	for {
-		sig := <-sigChan
-		if sig == syscall.SIGHUP {
-			stdlog.Println("Received SIGHUP - reloading configuration")
-			if err := reloadApplication(); err != nil {
-				stdlog.Printf("reload config: %v", err)
-				continue
-			}
-			swap.store(buildLiveHandler(GetConfig()))
-		} else {
-			stdlog.Printf("Received signal %v - shutting down the server", sig)
+		select {
+		case <-ctx.Done():
+			stdlog.Println("Shutting down the server")
 			if rpcLis != nil {
-				rpcLis.Close()
+				_ = rpcLis.Close()
 			}
-			if err := srv.Shutdown(ctx); err != nil {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			if err := srv.Shutdown(shutdownCtx); err != nil {
 				stdlog.Printf("Forced server shutdown due to error: %v", err)
 			}
+			cancel()
 			StopPlugins()
-			break
+			if otelShutdown != nil {
+				ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+				if err := otelShutdown(ctx2); err != nil {
+					stdlog.Printf("Error shutting down OpenTelemetry: %v", err)
+				}
+				cancel2()
+			}
+			stdlog.Println("Server exiting")
+			return nil
+		case err := <-listenErr:
+			if err != nil {
+				return fmt.Errorf("listen: %w", err)
+			}
+		case sig := <-sigChan:
+			if sig == syscall.SIGHUP {
+				stdlog.Println("Received SIGHUP - reloading configuration")
+				if err := reloadApplication(); err != nil {
+					stdlog.Printf("reload config: %v", err)
+					continue
+				}
+				reloaded, hookErr := buildLiveHandler(GetConfig())
+				if hookErr != nil {
+					stdlog.Printf("restapi spec hook: %v", hookErr)
+				}
+				if reloaded != nil {
+					swap.store(reloaded)
+				}
+			}
 		}
 	}
-
-	// graceful shutdown OpenTelemetry
-	if otelShutdown != nil {
-		ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel2()
-		if err := otelShutdown(ctx2); err != nil {
-			stdlog.Printf("Error shutting down OpenTelemetry: %v", err)
-		}
-	}
-
-	stdlog.Println("Server exiting")
 }

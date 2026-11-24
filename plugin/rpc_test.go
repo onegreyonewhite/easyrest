@@ -708,3 +708,62 @@ func TestGetTxPreference(t *testing.T) {
 		t.Fatalf("empty prefer: %q %v", tx, err)
 	}
 }
+
+type recordingTx struct {
+	stubDBPlugin
+	seen    []string
+	commits int
+}
+
+func (r *recordingTx) BeginTx(ctx map[string]any) (string, map[string]any, error) {
+	return "sess-1", map[string]any{"begun": true}, nil
+}
+
+func (r *recordingTx) CommitTx(id string, ctx map[string]any) (map[string]any, error) {
+	if id != "sess-1" {
+		return nil, ErrSharedTxNotFound
+	}
+	r.commits++
+	return map[string]any{"committed": true}, nil
+}
+
+func (r *recordingTx) RollbackTx(id string) error { return nil }
+
+func (r *recordingTx) TableGet(userID, table string, selectFields []string, where map[string]any,
+	ordering []string, groupBy []string, limit, offset int, ctx map[string]any) ([]map[string]any, map[string]any, error) {
+	id, _ := SharedTxID(ctx)
+	r.seen = append(r.seen, id)
+	return r.stubDBPlugin.TableGet(userID, table, selectFields, where, ordering, groupBy, limit, offset, ctx)
+}
+
+func TestDBTransactorRPC(t *testing.T) {
+	plain, cleanup := startRPCServer(t, &DBPluginRPCServer{Impl: &stubDBPlugin{}})
+	defer cleanup()
+	unsupported := &DBPluginRPC{client: plain}
+	if _, _, err := unsupported.BeginTx(nil); err == nil || !strings.Contains(err.Error(), ErrSharedTxUnsupported.Error()) {
+		t.Fatalf("unsupported: %v", err)
+	}
+
+	rec := &recordingTx{}
+	client, cleanupRec := startRPCServer(t, &DBPluginRPCServer{Impl: rec})
+	defer cleanupRec()
+	db := &DBPluginRPC{client: client}
+	id, begun, err := db.BeginTx(nil)
+	if err != nil || id != "sess-1" || begun["begun"] != true {
+		t.Fatalf("begin: id=%q ctx=%v err=%v", id, begun, err)
+	}
+	ctx := map[string]any{SharedTxKey: id}
+	if _, _, err := db.TableGet("u", "users", nil, nil, nil, nil, 0, 0, ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.seen) != 1 || rec.seen[0] != id {
+		t.Fatalf("joined id: %#v", rec.seen)
+	}
+	out, err := db.CommitTx(id, nil)
+	if err != nil || out["committed"] != true || rec.commits != 1 {
+		t.Fatalf("commit: %#v %v commits=%d", out, err, rec.commits)
+	}
+	if err := db.RollbackTx(id); err != nil {
+		t.Fatal(err)
+	}
+}

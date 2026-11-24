@@ -13,11 +13,11 @@ var ErrCacheMiss = errors.New("cache miss")
 // into HTTP ETags; the patch component of Version is not.
 const (
 	VersionMajor = 0
-	VersionMinor = 22
+	VersionMinor = 23
 )
 
 // Version is the plugin version.
-var Version = "v0.22.0"
+var Version = "v0.23.0"
 
 // DBPlugin – interface for DB access plugins.
 // Methods that take ctx may return an updated context map. A nil returned ctx
@@ -31,6 +31,16 @@ type DBPlugin interface {
 	TableDelete(userID string, table string, where map[string]any, ctx map[string]any) (int, map[string]any, error)
 	CallFunction(userID string, funcName string, data map[string]any, ctx map[string]any) (any, map[string]any, error)
 	GetSchema(ctx map[string]any) (any, map[string]any, error)
+}
+
+// DBTransactor holds one database transaction across plugin calls.
+// The id is an opaque string. The driver handle stays inside the plugin process.
+// BeginTx may return an updated context map. CommitTx returns harvested context.
+// RollbackTx of an unknown id returns nil.
+type DBTransactor interface {
+	BeginTx(ctx map[string]any) (string, map[string]any, error)
+	CommitTx(id string, ctx map[string]any) (map[string]any, error)
+	RollbackTx(id string) error
 }
 
 // RPC request/response structures.
@@ -122,6 +132,40 @@ type GetSchemaResponse struct {
 	Schema any
 	Ctx    map[string]any
 	Error  string
+}
+
+// BeginTxRequest starts a shared transaction in a database plugin.
+type BeginTxRequest struct {
+	Ctx map[string]any
+}
+
+// BeginTxResponse returns the opaque transaction id.
+type BeginTxResponse struct {
+	ID    string
+	Ctx   map[string]any
+	Error string
+}
+
+// CommitTxRequest commits a shared transaction.
+type CommitTxRequest struct {
+	ID  string
+	Ctx map[string]any
+}
+
+// CommitTxResponse returns harvested plugin context.
+type CommitTxResponse struct {
+	Ctx   map[string]any
+	Error string
+}
+
+// RollbackTxRequest rolls back a shared transaction.
+type RollbackTxRequest struct {
+	ID string
+}
+
+// RollbackTxResponse reports a rollback failure. An unknown id is success.
+type RollbackTxResponse struct {
+	Error string
 }
 
 // --- DBQueryPlugin ---

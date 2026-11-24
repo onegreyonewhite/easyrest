@@ -22,8 +22,8 @@ func TestBasicAuthPlugin_Init(t *testing.T) {
 		schema := info.Schema
 		require.NoError(t, err)
 		require.NotNil(t, schema)
-		assert.Equal(t, "basic", schema["type"])
-		assert.NotContains(t, schema, "scheme")
+		assert.Equal(t, "http", schema["type"])
+		assert.Equal(t, "basic", schema["scheme"])
 		assert.Equal(t, settings["userlist"], plugin.userlist)
 	})
 
@@ -40,8 +40,8 @@ func TestBasicAuthPlugin_Init(t *testing.T) {
 		schema := info.Schema
 		require.NoError(t, err)
 		require.NotNil(t, schema)
-		assert.Equal(t, "basic", schema["type"])
-		assert.NotContains(t, schema, "scheme")
+		assert.Equal(t, "http", schema["type"])
+		assert.Equal(t, "basic", schema["scheme"])
 		assert.Equal(t, expectedUserlist, plugin.userlist)
 	})
 

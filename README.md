@@ -24,13 +24,13 @@ Turn a SQL database into a REST API. Authentication, request hooks, content type
 
 ## What it is
 
-EasyREST is a small HTTP server that maps URL paths to database connections. Each named connection in the config becomes `/api/<name>/`. Table CRUD, RPC functions, a read-only `QUERY` method, and a generated Swagger 2.0 schema all go through the same pipeline: authenticate, check scopes, build a plugin context, run middleware, then call a data plugin.
+EasyREST is a small HTTP server that maps URL paths to database connections. Each named connection in the config becomes `/api/<name>/`. Table CRUD, RPC functions, a read-only `QUERY` method, and a generated OpenAPI 3.0.3 document all go through the same pipeline: authenticate, check scopes, build a plugin context, run middleware, then call a data plugin.
 
 The HTTP core never talks to a database driver itself. It sanitizes identifiers, parses query parameters into typed SQL fragments, and forwards those fragments to a plugin that owns the connection (in-process, or over go-plugin RPC).
 
 SQLite, PostgreSQL, and MySQL can sit next to each other as `/api/app/`, `/api/analytics/`, and `/api/legacy/`. Auth, middleware, data, content, and storage are separate plugin families. A request can pass through auth, middleware, and data. Content and storage join when the handler parses a body, renders a response, or stores a file. Claims, headers, and `Prefer` values can be injected into the SQL session so triggers can set response metadata. Cache and rate limiting are ordinary middleware plugins.
 
-The HTTP contract is in [internal/server/README.md](internal/server/README.md). How to write a plugin is in [plugin/README.md](plugin/README.md).
+The HTTP contract is in [internal/server/README.md](internal/server/README.md). How to write a plugin is in [plugin/README.md](plugin/README.md). Embedding the server, including a shared database transaction from a view, is in [embed/README.md](embed/README.md).
 
 A full application can live in the `application` section: your own page on `GET /`, API versions, routes that call Postgres functions, file fields, and a cookie session. The SQL keeps the business rules and the row filters. [APPLICATION.md](APPLICATION.md) walks through one such app in [examples/application/](examples/application/).
 
@@ -57,7 +57,7 @@ curl -s "http://localhost:8080/api/crud/users/?select=id,name,email&ordering=id&
 curl -s "http://localhost:8080/api/crud/users/?where.gt.age=40&where.eq.city=Berlin&limit=3" \
   -H "Authorization: Bearer $TOKEN"
 
-# Swagger 2.0 schema for this connection (no auth)
+# OpenAPI 3.0.3 document for this connection (no auth)
 curl -s "http://localhost:8080/api/crud/"
 ```
 

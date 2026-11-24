@@ -1,8 +1,11 @@
 package plugin
 
 import (
+	"bytes"
 	"encoding/gob"
 	"errors"
+	"fmt"
+	"io"
 	"math"
 	"net/rpc"
 	"slices"
@@ -13,6 +16,8 @@ import (
 
 // DBPluginRPC is the client wrapper.
 type DBPluginRPC struct{ client *rpc.Client }
+
+var _ DBTransactor = (*DBPluginRPC)(nil)
 
 func (g *DBPluginRPC) InitConnection(uri string) error {
 	req := InitConnectionRequest{URI: uri}
@@ -156,6 +161,43 @@ func (g *DBPluginRPC) GetSchema(ctx map[string]any) (any, map[string]any, error)
 	return resp.Schema, outCtx, nil
 }
 
+func (g *DBPluginRPC) BeginTx(ctx map[string]any) (string, map[string]any, error) {
+	var resp BeginTxResponse
+	if err := g.client.Call("Plugin.BeginTx", BeginTxRequest{Ctx: ctx}, &resp); err != nil {
+		return "", nil, err
+	}
+	outCtx := resp.Ctx
+	resp.Ctx = nil
+	if resp.Error != "" {
+		return "", outCtx, errors.New(resp.Error)
+	}
+	return resp.ID, outCtx, nil
+}
+
+func (g *DBPluginRPC) CommitTx(id string, ctx map[string]any) (map[string]any, error) {
+	var resp CommitTxResponse
+	if err := g.client.Call("Plugin.CommitTx", CommitTxRequest{ID: id, Ctx: ctx}, &resp); err != nil {
+		return nil, err
+	}
+	outCtx := resp.Ctx
+	resp.Ctx = nil
+	if resp.Error != "" {
+		return outCtx, errors.New(resp.Error)
+	}
+	return outCtx, nil
+}
+
+func (g *DBPluginRPC) RollbackTx(id string) error {
+	var resp RollbackTxResponse
+	if err := g.client.Call("Plugin.RollbackTx", RollbackTxRequest{ID: id}, &resp); err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		return errors.New(resp.Error)
+	}
+	return nil
+}
+
 // DBPluginRPCServer is the server-side RPC implementation.
 type DBPluginRPCServer struct {
 	Impl DBPlugin
@@ -233,6 +275,47 @@ func (s *DBPluginRPCServer) GetSchema(req GetSchemaRequest, resp *GetSchemaRespo
 		return nil
 	}
 	resp.Schema = schema
+	return nil
+}
+
+func (s *DBPluginRPCServer) BeginTx(req BeginTxRequest, resp *BeginTxResponse) error {
+	txr, ok := s.Impl.(DBTransactor)
+	if !ok {
+		resp.Error = ErrSharedTxUnsupported.Error()
+		return nil
+	}
+	id, outCtx, err := txr.BeginTx(req.Ctx)
+	resp.ID = id
+	resp.Ctx = outCtx
+	if err != nil {
+		resp.Error = err.Error()
+	}
+	return nil
+}
+
+func (s *DBPluginRPCServer) CommitTx(req CommitTxRequest, resp *CommitTxResponse) error {
+	txr, ok := s.Impl.(DBTransactor)
+	if !ok {
+		resp.Error = ErrSharedTxUnsupported.Error()
+		return nil
+	}
+	outCtx, err := txr.CommitTx(req.ID, req.Ctx)
+	resp.Ctx = outCtx
+	if err != nil {
+		resp.Error = err.Error()
+	}
+	return nil
+}
+
+func (s *DBPluginRPCServer) RollbackTx(req RollbackTxRequest, resp *RollbackTxResponse) error {
+	txr, ok := s.Impl.(DBTransactor)
+	if !ok {
+		resp.Error = ErrSharedTxUnsupported.Error()
+		return nil
+	}
+	if err := txr.RollbackTx(req.ID); err != nil {
+		resp.Error = err.Error()
+	}
 	return nil
 }
 
@@ -803,6 +886,14 @@ func (c *StoragePluginRPC) Put(path string, body []byte, ctx map[string]any) (st
 	return resp.Path, resp.Ctx, nil
 }
 
+func (c *StoragePluginRPC) PutStream(path string, r io.Reader, ctx map[string]any) (string, map[string]any, error) {
+	body, err := io.ReadAll(r)
+	if err != nil {
+		return "", ctx, err
+	}
+	return c.Put(path, body, ctx)
+}
+
 func (c *StoragePluginRPC) GetUrl(paths []string, ctx map[string]any) ([]StorageURL, error) {
 	var resp StorageGetURLResponse
 	if err := c.client.Call("Plugin.GetUrl", StorageGetURLRequest{Paths: paths, Ctx: ctx}, &resp); err != nil {
@@ -834,6 +925,20 @@ func (c *StoragePluginRPC) GetBin(path string, ctx map[string]any) ([]byte, stri
 		return resp.Body, resp.Mime, resp.Ctx, errors.New(resp.Error)
 	}
 	return resp.Body, resp.Mime, resp.Ctx, nil
+}
+
+func (c *StoragePluginRPC) GetStream(path string, offset int64, ctx map[string]any) (io.ReadCloser, string, map[string]any, error) {
+	if offset < 0 {
+		return nil, "", ctx, fmt.Errorf("storage: negative offset")
+	}
+	body, mimeType, ctxOut, err := c.GetBin(path, ctx)
+	if err != nil {
+		return nil, "", ctxOut, err
+	}
+	if offset > int64(len(body)) {
+		offset = int64(len(body))
+	}
+	return io.NopCloser(bytes.NewReader(body[offset:])), mimeType, ctxOut, nil
 }
 
 func (c *StoragePluginRPC) List(path string, ctx map[string]any) ([]StorageEntry, error) {

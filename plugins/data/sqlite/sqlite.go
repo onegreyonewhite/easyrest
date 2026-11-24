@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
@@ -30,7 +31,16 @@ type sqlitePlugin struct {
 	db            *sql.DB
 	preparedStmts *lru.Cache[string, *sql.Stmt]
 	stmtGroup     singleflight.Group
+	sessionMu     sync.Mutex
+	sessions      *easyrest.SharedTx[*sqliteTx]
 }
+
+type sqliteTx struct {
+	tx     *sql.Tx
+	cancel context.CancelFunc
+}
+
+var _ easyrest.DBTransactor = (*sqlitePlugin)(nil)
 
 var sqliteCacheDialect = sqlcache.Dialect{
 	CreateTable:   "CREATE TABLE IF NOT EXISTS easyrest_cache (key TEXT PRIMARY KEY, value TEXT, expires_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
@@ -179,6 +189,13 @@ func (s *sqlitePlugin) closePreparedStmts() {
 
 func (s *sqlitePlugin) closeResources() {
 	s.closePreparedStmts()
+	s.sessionMu.Lock()
+	sessions := s.sessions
+	s.sessions = nil
+	s.sessionMu.Unlock()
+	if sessions != nil {
+		sessions.Close()
+	}
 	if s.db != nil {
 		s.db.Close()
 		s.db = nil
@@ -336,6 +353,15 @@ func convertILIKEtoLike(where map[string]any) map[string]any {
 
 // Function implementation to handle transactions, adapted for SQLite.
 func (s *sqlitePlugin) handleTransaction(userID string, ctxMap map[string]any, operation func(tx *sql.Tx) (any, error)) (any, error) {
+	if id, ok := easyrest.SharedTxID(ctxMap); ok {
+		var result any
+		err := s.txSessions().Use(id, func(h *sqliteTx) error {
+			var opErr error
+			result, opErr = operation(h.tx)
+			return opErr
+		})
+		return result, err
+	}
 	ctxQuery := context.WithValue(backgroundCtx, userIDKey, userID)
 	tx, err := s.db.BeginTx(ctxQuery, nil)
 	if err != nil {
@@ -399,6 +425,9 @@ func sortedMapKeys(m map[string]any) []string {
 }
 
 func sqliteNeedsTx(ctx map[string]any, multiStatement bool) (bool, error) {
+	if _, ok := easyrest.SharedTxID(ctx); ok {
+		return true, nil
+	}
 	pref, err := easyrest.GetTxPreference(ctx)
 	if err != nil {
 		return true, err
@@ -439,6 +468,9 @@ func (s *sqlitePlugin) TableGet(userID, table string, selectFields []string, whe
 	}
 	if easyrest.CountPreference(ctx) != "" {
 		return s.tableGetWithTotal(userID, table, selectFields, where, groupBy, limit, ctx, query, args, opts)
+	}
+	if _, ok := easyrest.SharedTxID(ctx); ok {
+		return s.tableGetShared(userID, selectFields, limit, ctx, query, args)
 	}
 
 	ctxQuery := context.WithValue(backgroundCtx, userIDKey, userID)
@@ -522,42 +554,159 @@ func (s *sqlitePlugin) tableGetWithTotal(userID, table string, selectFields []st
 		countSQL = easyrest.CountSQL(inner)
 		countArgs = cargs
 	}
+	exec := func(tx *sql.Tx) ([]map[string]any, map[string]any, error) {
+		total, hasTotal, err := easyrest.CountFromEstimate(mode, planned, hasPlanned, easyrest.CountMaxRows(ctx), func() (int64, error) {
+			var n int64
+			if err := tx.QueryRowContext(ctxQuery, countSQL, countArgs...).Scan(&n); err != nil {
+				return 0, fmt.Errorf("failed to count rows: %w", err)
+			}
+			return n, nil
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		rows, err := tx.QueryContext(ctxQuery, pageQuery, pageArgs...)
+		if err != nil {
+			return nil, nil, err
+		}
+		defer rows.Close()
+		result, err := scanResultRows(rows, limit)
+		if err != nil {
+			return nil, nil, err
+		}
+		easyrest.NormalizeJSONArrowRows(result, selectFields)
+		if err := rows.Close(); err != nil {
+			return nil, nil, err
+		}
+		if !hasTotal {
+			return result, nil, nil
+		}
+		return result, easyrest.WithTotal(ctx, total), nil
+	}
+	if id, ok := easyrest.SharedTxID(ctx); ok {
+		var result []map[string]any
+		var out map[string]any
+		err := s.txSessions().Use(id, func(h *sqliteTx) error {
+			var opErr error
+			result, out, opErr = exec(h.tx)
+			return opErr
+		})
+		return result, out, err
+	}
 	tx, err := s.db.BeginTx(ctxQuery, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to begin tx: %w", err)
 	}
 	defer tx.Rollback()
-
-	total, hasTotal, err := easyrest.CountFromEstimate(mode, planned, hasPlanned, easyrest.CountMaxRows(ctx), func() (int64, error) {
-		var n int64
-		if err := tx.QueryRowContext(ctxQuery, countSQL, countArgs...).Scan(&n); err != nil {
-			return 0, fmt.Errorf("failed to count rows: %w", err)
-		}
-		return n, nil
-	})
+	result, out, err := exec(tx)
 	if err != nil {
-		return nil, nil, err
-	}
-	rows, err := tx.QueryContext(ctxQuery, pageQuery, pageArgs...)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer rows.Close()
-	result, err := scanResultRows(rows, limit)
-	if err != nil {
-		return nil, nil, err
-	}
-	easyrest.NormalizeJSONArrowRows(result, selectFields)
-	if err := rows.Close(); err != nil {
 		return nil, nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
-	if !hasTotal {
-		return result, nil, nil
+	return result, out, nil
+}
+
+func (s *sqlitePlugin) tableGetShared(userID string, selectFields []string, limit int, ctx map[string]any, query string, args []any) ([]map[string]any, map[string]any, error) {
+	id, _ := easyrest.SharedTxID(ctx)
+	ctxQuery := context.WithValue(backgroundCtx, userIDKey, userID)
+	var result []map[string]any
+	err := s.txSessions().Use(id, func(h *sqliteTx) error {
+		rows, err := h.tx.QueryContext(ctxQuery, query, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		result, err = scanResultRows(rows, limit)
+		if err != nil {
+			return err
+		}
+		easyrest.NormalizeJSONArrowRows(result, selectFields)
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, nil, err
 	}
-	return result, easyrest.WithTotal(ctx, total), nil
+	return result, nil, nil
+}
+
+func (s *sqlitePlugin) txSessions() *easyrest.SharedTx[*sqliteTx] {
+	s.sessionMu.Lock()
+	defer s.sessionMu.Unlock()
+	if s.sessions == nil {
+		s.sessions = easyrest.NewSharedTx[*sqliteTx](16, time.Second)
+	}
+	return s.sessions
+}
+
+func (h *sqliteTx) finish(commit bool) error {
+	var err error
+	if commit {
+		err = h.tx.Commit()
+	} else {
+		err = h.tx.Rollback()
+		if errors.Is(err, sql.ErrTxDone) {
+			err = nil
+		}
+	}
+	if h.cancel != nil {
+		h.cancel()
+	}
+	return err
+}
+
+// BeginTx starts a transaction that later Table calls join via ctx _tx.
+func (s *sqlitePlugin) BeginTx(ctx map[string]any) (string, map[string]any, error) {
+	if s.db == nil {
+		return "", nil, errors.New("sqlite connection is not open")
+	}
+	deadline := easyrest.SharedTxDeadline(ctx, time.Now())
+	txCtx, cancel := context.WithDeadline(context.Background(), deadline)
+	tx, err := s.db.BeginTx(txCtx, nil)
+	if err != nil {
+		cancel()
+		return "", nil, fmt.Errorf("failed to begin tx: %w", err)
+	}
+	handle := &sqliteTx{tx: tx, cancel: cancel}
+	id, err := s.txSessions().Put(handle, deadline, func(h *sqliteTx) {
+		_ = h.finish(false)
+	})
+	if err != nil {
+		_ = handle.finish(false)
+		return "", nil, err
+	}
+	return id, nil, nil
+}
+
+// CommitTx commits the shared transaction.
+func (s *sqlitePlugin) CommitTx(id string, ctx map[string]any) (map[string]any, error) {
+	sessions := s.openSessions()
+	if sessions == nil {
+		return nil, easyrest.ErrSharedTxNotFound
+	}
+	err := sessions.Commit(id, func(h *sqliteTx) error {
+		return h.finish(true)
+	})
+	return nil, err
+}
+
+// RollbackTx rolls back the shared transaction.
+// An unknown id returns nil.
+func (s *sqlitePlugin) RollbackTx(id string) error {
+	sessions := s.openSessions()
+	if sessions == nil {
+		return nil
+	}
+	return sessions.Rollback(id, func(h *sqliteTx) error {
+		return h.finish(false)
+	})
+}
+
+func (s *sqlitePlugin) openSessions() *easyrest.SharedTx[*sqliteTx] {
+	s.sessionMu.Lock()
+	defer s.sessionMu.Unlock()
+	return s.sessions
 }
 
 // TableCreate builds and executes an INSERT query.

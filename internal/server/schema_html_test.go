@@ -47,8 +47,8 @@ func TestSchemaHTMLDoesNotReplaceJSON(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &spec); err != nil {
 		t.Fatal(err)
 	}
-	if spec["swagger"] != "2.0" {
-		t.Fatalf("spec %#v", spec)
+	if spec["openapi"] != "3.0.3" {
+		t.Fatalf("spec %#v", spec["openapi"])
 	}
 }
 
@@ -64,12 +64,14 @@ func TestSchemaFormatHTMLBeatsAcceptJSON(t *testing.T) {
 }
 
 func TestAPISchemaUsesHTTPSWhenTLSEnabled(t *testing.T) {
-	// Swagger UI uses this schemes list for requests against the document.
 	router, _ := setupTableRouter(t, &fakeAuthPlugin{}, "", nil)
 	cfg := GetConfig()
 	cfg.TLSEnabled = true
 	SetConfig(cfg)
 	req := httptest.NewRequest(http.MethodGet, "/api/test/", nil)
+	req.Header.Set("X-Forwarded-Proto", "http")
+	req.Header.Set("X-Forwarded-Host", "edge.example")
+	req.Header.Set("X-Forwarded-Prefix", "/gateway")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -79,9 +81,8 @@ func TestAPISchemaUsesHTTPSWhenTLSEnabled(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &spec); err != nil {
 		t.Fatal(err)
 	}
-	schemes, _ := spec["schemes"].([]any)
-	if len(schemes) != 1 || schemes[0] != "https" {
-		t.Fatalf("schemes %#v", spec["schemes"])
+	if serverURL(t, spec) != "https://edge.example/gateway/api/test" {
+		t.Fatalf("servers %#v", spec["servers"])
 	}
 }
 
@@ -97,10 +98,20 @@ func TestAPISchemaUsesHTTPWhenTLSDisabled(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &spec); err != nil {
 		t.Fatal(err)
 	}
-	schemes, _ := spec["schemes"].([]any)
-	if len(schemes) != 1 || schemes[0] != "http" {
-		t.Fatalf("schemes %#v", spec["schemes"])
+	if serverURL(t, spec) != "http://example.com/api/test" {
+		t.Fatalf("servers %#v", spec["servers"])
 	}
+}
+
+func serverURL(t *testing.T, spec map[string]any) string {
+	t.Helper()
+	servers, _ := spec["servers"].([]any)
+	if len(servers) != 1 {
+		t.Fatalf("servers %#v", spec["servers"])
+	}
+	first, _ := servers[0].(map[string]any)
+	url, _ := first["url"].(string)
+	return url
 }
 
 func TestRootCatalogSkipsInternal(t *testing.T) {
@@ -276,15 +287,15 @@ func TestRootVersionUsesRestAPISchema(t *testing.T) {
 		Application: config.ApplicationConfig{Version: "shop", Auth: "jwt"},
 	})
 	root := decodeSpec(t, catalogBody(t, router, "/?format=json", ""))
-	if root["basePath"] != "/restapi/shop" {
-		t.Fatalf("root spec %#v", root["basePath"])
+	if serverURL(t, root) != "/restapi/shop" {
+		t.Fatalf("root spec %#v", root["servers"])
 	}
 	if !onlySecurity(root, "jwt", "basic") {
-		t.Fatalf("root security %#v", root["securityDefinitions"])
+		t.Fatalf("root security %#v", root["components"])
 	}
 	full := decodeSpec(t, catalogBody(t, router, "/restapi/shop/?format=json", ""))
 	if !onlySecurity(full, "jwt", "basic") {
-		t.Fatalf("restapi security %#v", full["securityDefinitions"])
+		t.Fatalf("restapi security %#v", full["components"])
 	}
 }
 
@@ -312,8 +323,8 @@ application:
 		Application: config.ApplicationConfig{Version: "public", Auth: "jwt"},
 	})
 	root := decodeSpec(t, catalogBody(t, router, "/?format=json", ""))
-	if root["basePath"] != nil {
-		t.Fatalf("plugin version embedded a spec %#v", root["basePath"])
+	if _, ok := root["openapi"]; ok {
+		t.Fatalf("plugin version embedded a spec %#v", root["openapi"])
 	}
 	apis, _ := root["apis"].([]any)
 	if len(apis) != 1 {
@@ -381,7 +392,8 @@ func decodeSpec(t *testing.T, body string) map[string]any {
 }
 
 func onlySecurity(spec map[string]any, keys ...string) bool {
-	defs, _ := spec["securityDefinitions"].(map[string]any)
+	components, _ := spec["components"].(map[string]any)
+	defs, _ := components["securitySchemes"].(map[string]any)
 	if len(defs) != len(keys) {
 		return false
 	}

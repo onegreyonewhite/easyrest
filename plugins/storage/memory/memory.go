@@ -1,7 +1,9 @@
 package memory
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"mime"
 	"net/http"
 	"path"
@@ -62,6 +64,15 @@ func (p *Plugin) initSettings(settings map[string]any) (string, bool, error) {
 
 // Put stores body at the storage-relative path. Created stays at the first write.
 func (p *Plugin) Put(relPath string, body []byte, ctx map[string]any) (string, map[string]any, error) {
+	return p.PutStream(relPath, bytes.NewReader(body), ctx)
+}
+
+// PutStream reads r to the end and stores those bytes.
+func (p *Plugin) PutStream(relPath string, r io.Reader, ctx map[string]any) (string, map[string]any, error) {
+	body, err := io.ReadAll(r)
+	if err != nil {
+		return "", ctx, fmt.Errorf("storage memory: %w", err)
+	}
 	rel, err := easyrest.CleanStorageRel(relPath)
 	if err != nil {
 		return "", ctx, err
@@ -132,6 +143,23 @@ func (p *Plugin) GetMetadata(relPath string, ctx map[string]any) (easyrest.Stora
 
 // GetBin returns a copy of the stored bytes.
 func (p *Plugin) GetBin(relPath string, ctx map[string]any) ([]byte, string, map[string]any, error) {
+	rc, mimeType, ctxOut, err := p.GetStream(relPath, 0, ctx)
+	if err != nil {
+		return nil, "", ctxOut, err
+	}
+	defer rc.Close()
+	body, err := io.ReadAll(rc)
+	if err != nil {
+		return nil, "", ctxOut, fmt.Errorf("storage memory: %w", err)
+	}
+	return body, mimeType, ctxOut, nil
+}
+
+// GetStream returns a reader over a copy of the stored bytes from offset.
+func (p *Plugin) GetStream(relPath string, offset int64, ctx map[string]any) (io.ReadCloser, string, map[string]any, error) {
+	if offset < 0 {
+		return nil, "", ctx, fmt.Errorf("storage memory: negative offset")
+	}
 	rel, err := easyrest.CleanStorageRel(relPath)
 	if err != nil {
 		return nil, "", ctx, err
@@ -145,7 +173,11 @@ func (p *Plugin) GetBin(relPath string, ctx map[string]any) ([]byte, string, map
 		}
 		return nil, "", ctx, fmt.Errorf("storage memory: %s not found", rel)
 	}
-	return append([]byte(nil), obj.body...), obj.mime, ctx, nil
+	body := append([]byte(nil), obj.body...)
+	if offset > int64(len(body)) {
+		offset = int64(len(body))
+	}
+	return io.NopCloser(bytes.NewReader(body[offset:])), obj.mime, ctx, nil
 }
 
 // List returns the immediate children of a directory.

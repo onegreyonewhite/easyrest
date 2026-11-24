@@ -220,13 +220,15 @@ func serveStorageFile(w http.ResponseWriter, r *http.Request, plug easyrest.Stor
 		w.Header().Set("Content-Type", meta.Mime)
 	}
 	w.Header().Set("ETag", storageETag(meta))
-	http.ServeContent(w, r, rel, meta.ModTime, &lazyStorageBody{
+	body := &lazyStorageBody{
 		plug: plug,
 		rel:  rel,
 		ctx:  ctx,
 		size: meta.Size,
 		req:  r,
-	})
+	}
+	defer body.Close()
+	http.ServeContent(w, r, rel, meta.ModTime, body)
 }
 
 func storageETag(meta easyrest.StorageMeta) string {

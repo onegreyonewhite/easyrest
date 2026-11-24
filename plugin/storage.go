@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"fmt"
+	"io"
 	"path"
 	"strings"
 	"time"
@@ -48,13 +49,22 @@ type StorageURL struct {
 // That value is a data URL. CtxStorageMIME, when set, supplies its media type.
 // The host does not call GetUrl and does not mount /media for that plugin.
 // Put and GetBin exchange file bytes so an external plugin can carry them over RPC.
-// A nil ctx map from Put or GetBin means the caller keeps its existing context.
+// PutStream and GetStream carry the same object as a stream.
+// A preserved plugin reads and writes that stream in process.
+// StoragePluginRPC reads the stream into a byte slice and calls Put.
+// GetStream on that client returns a reader over the bytes from GetBin.
+// The caller closes the reader it passes to PutStream. Implementations leave it open.
+// The caller closes the reader returned by GetStream.
+// A negative offset is an error. An offset past the end yields a reader that returns EOF.
+// A nil ctx map from Put, PutStream, GetBin, or GetStream means the caller keeps its existing context.
 type StoragePlugin interface {
 	Init(settings map[string]any, host HostRPC) (StorageInfo, error)
 	Put(path string, body []byte, ctx map[string]any) (rel string, ctxOut map[string]any, err error)
+	PutStream(path string, r io.Reader, ctx map[string]any) (rel string, ctxOut map[string]any, err error)
 	GetUrl(paths []string, ctx map[string]any) ([]StorageURL, error)
 	GetMetadata(path string, ctx map[string]any) (StorageMeta, error)
 	GetBin(path string, ctx map[string]any) (body []byte, mime string, ctxOut map[string]any, err error)
+	GetStream(path string, offset int64, ctx map[string]any) (r io.ReadCloser, mime string, ctxOut map[string]any, err error)
 	List(path string, ctx map[string]any) ([]StorageEntry, error)
 	Delete(path string, ctx map[string]any) error
 }

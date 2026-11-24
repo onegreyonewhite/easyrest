@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -44,7 +45,16 @@ type pgPlugin struct {
 	bulkThreshold  int                                // Threshold for bulk operations
 	timezoneCache  *lru.Cache[string, *time.Location] // Cache for loaded timezones
 	searchPath     string                             // Schema search path
+	sessionMu      sync.Mutex
+	sessions       *easyrest.SharedTx[*pgShared]
 }
+
+type pgShared struct {
+	tx       pgx.Tx
+	prepared bool
+}
+
+var _ easyrest.DBTransactor = (*pgPlugin)(nil)
 
 // newContextWithTimeout creates a new context with timeout
 func (p *pgPlugin) newContextWithTimeout() (context.Context, context.CancelFunc) {
@@ -198,6 +208,13 @@ func (p *pgPlugin) InitConnection(uri string) error {
 
 // Close shuts down the database pool and clears cached timezones.
 func (p *pgPlugin) Close() {
+	p.sessionMu.Lock()
+	sessions := p.sessions
+	p.sessions = nil
+	p.sessionMu.Unlock()
+	if sessions != nil {
+		sessions.Close()
+	}
 	if p.db != nil {
 		if pool, ok := p.db.(*pgxpool.Pool); ok {
 			pool.Close()
@@ -399,6 +416,21 @@ func (p *pgPlugin) resolveLocation(ctx map[string]any) *time.Location {
 }
 
 func (p *pgPlugin) withTx(ctx context.Context, pluginCtx map[string]any, preference string, fn func(tx pgx.Tx, loc *time.Location) error) (map[string]any, error) {
+	if id, ok := easyrest.SharedTxID(pluginCtx); ok {
+		err := p.txSessions().Use(id, func(h *pgShared) error {
+			if err := ApplyPluginContext(ctx, h.tx, pluginCtx); err != nil {
+				return err
+			}
+			if !h.prepared {
+				if err := runContextRoutine(ctx, h.tx, pluginCtx, easyrest.CtxDBPreRequest); err != nil {
+					return err
+				}
+				h.prepared = true
+			}
+			return fn(h.tx, p.resolveLocation(pluginCtx))
+		})
+		return nil, err
+	}
 	tx, err := p.db.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -433,6 +465,85 @@ func (p *pgPlugin) withTx(ctx context.Context, pluginCtx map[string]any, prefere
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	return outCtx, nil
+}
+
+func (p *pgPlugin) txSessions() *easyrest.SharedTx[*pgShared] {
+	p.sessionMu.Lock()
+	defer p.sessionMu.Unlock()
+	if p.sessions == nil {
+		p.sessions = easyrest.NewSharedTx[*pgShared](16, time.Second)
+	}
+	return p.sessions
+}
+
+func (p *pgPlugin) openSessions() *easyrest.SharedTx[*pgShared] {
+	p.sessionMu.Lock()
+	defer p.sessionMu.Unlock()
+	return p.sessions
+}
+
+func rollbackPG(tx pgx.Tx) error {
+	err := tx.Rollback(bgCtx)
+	if err == nil || errors.Is(err, pgx.ErrTxClosed) {
+		return nil
+	}
+	return err
+}
+
+// BeginTx starts a transaction that later calls join via ctx _tx.
+func (p *pgPlugin) BeginTx(ctx map[string]any) (string, map[string]any, error) {
+	if p.db == nil {
+		return "", nil, errors.New("postgres connection is not open")
+	}
+	deadline := easyrest.SharedTxDeadline(ctx, time.Now())
+	tx, err := p.db.Begin(bgCtx)
+	if err != nil {
+		return "", nil, err
+	}
+	handle := &pgShared{tx: tx}
+	id, err := p.txSessions().Put(handle, deadline, func(h *pgShared) {
+		_ = rollbackPG(h.tx)
+	})
+	if err != nil {
+		_ = rollbackPG(tx)
+		return "", nil, err
+	}
+	return id, nil, nil
+}
+
+// CommitTx runs the post-request hook, harvests session settings, and commits.
+func (p *pgPlugin) CommitTx(id string, ctx map[string]any) (map[string]any, error) {
+	sessions := p.openSessions()
+	if sessions == nil {
+		return nil, easyrest.ErrSharedTxNotFound
+	}
+	var out map[string]any
+	err := sessions.Commit(id, func(h *pgShared) error {
+		if err := runContextRoutine(bgCtx, h.tx, ctx, easyrest.CtxDBPostRequest); err != nil {
+			return err
+		}
+		harvested, err := mergeHarvestedContext(bgCtx, h.tx, ctx)
+		if err != nil {
+			return err
+		}
+		out = harvested
+		if err := h.tx.Commit(bgCtx); err != nil {
+			return fmt.Errorf("failed to commit transaction: %w", err)
+		}
+		return nil
+	})
+	return out, err
+}
+
+// RollbackTx rolls back the shared transaction. An unknown id returns nil.
+func (p *pgPlugin) RollbackTx(id string) error {
+	sessions := p.openSessions()
+	if sessions == nil {
+		return nil
+	}
+	return sessions.Rollback(id, func(h *pgShared) error {
+		return rollbackPG(h.tx)
+	})
 }
 
 // TableGet executes a SELECT query with optional WHERE, GROUP BY, ORDER BY, LIMIT and OFFSET.
@@ -578,6 +689,9 @@ func (p *pgPlugin) TableCreate(userID, table string, data []map[string]any, ctx 
 	if len(data) >= p.bulkThreshold {
 		// Note: bulkCreate currently does not support the rollback preference.
 		// It creates a temp table, copies, inserts, and commits within its own transaction.
+		if _, joined := easyrest.SharedTxID(ctx); joined {
+			return nil, nil, fmt.Errorf("bulk create is not supported inside a shared transaction")
+		}
 		if txPreference == "rollback" {
 			return nil, nil, fmt.Errorf("rollback preference is not currently supported for bulk create operations (rows >= %d)", p.bulkThreshold)
 		}

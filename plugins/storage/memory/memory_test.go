@@ -1,6 +1,8 @@
 package memory
 
 import (
+	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,6 +54,37 @@ func TestInlineSetting(t *testing.T) {
 	if err != nil || got != "a.txt" {
 		t.Fatalf("stored %q err %v", got, err)
 	}
+}
+
+func TestPutStreamGetStream(t *testing.T) {
+	plug := newTestPlugin(t)
+	rel, _, err := plug.PutStream("docs/note.txt", strings.NewReader("hello"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rel != "docs/note.txt" {
+		t.Fatalf("rel %q", rel)
+	}
+	if got := readMemStream(t, plug, 0); got != "hello" {
+		t.Fatalf("body %q", got)
+	}
+	if got := readMemStream(t, plug, 4); got != "o" {
+		t.Fatalf("suffix %q", got)
+	}
+}
+
+func readMemStream(t *testing.T, plug *Plugin, offset int64) string {
+	t.Helper()
+	rc, _, _, err := plug.GetStream("docs/note.txt", offset, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	body, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
 }
 
 func TestPutGetBin(t *testing.T) {

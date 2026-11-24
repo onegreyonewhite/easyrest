@@ -134,6 +134,7 @@ func serveRest(t *testing.T, cfg config.Config, plugins map[string]easyrest.DBPl
 	origCfg := GetConfig()
 	origDB := DbPlugins.Load()
 	t.Cleanup(func() {
+		SetRestSpecHooks(nil)
 		SetConfig(origCfg)
 		DbPlugins.Store(origDB)
 	})
@@ -145,7 +146,9 @@ func serveRest(t *testing.T, cfg config.Config, plugins map[string]easyrest.DBPl
 	chi.RegisterMethod("QUERY")
 	r := chi.NewRouter()
 	mountRestAPI(r)
-	publishRestAPI()
+	if err := publishRestAPI(); err != nil {
+		t.Fatal(err)
+	}
 	return r
 }
 
@@ -166,8 +169,15 @@ func TestRestAPI_SecurityDefinitions(t *testing.T) {
 	prev := AuthSecurityDefinitions.Load()
 	t.Cleanup(func() { AuthSecurityDefinitions.Store(prev) })
 	defs := map[string]map[string]any{
-		"jwt":   {"type": "apiKey"},
+		"jwt":   {"type": "apiKey", "name": "Authorization", "in": "header"},
 		"basic": {"type": "basic"},
+		"oauth": {
+			"type":             "oauth2",
+			"flow":             "accessCode",
+			"authorizationUrl": "https://example.com/auth",
+			"tokenUrl":         "https://example.com/token",
+			"scopes":           map[string]string{"read": "Read"},
+		},
 	}
 	AuthSecurityDefinitions.Store(&defs)
 
@@ -192,14 +202,20 @@ func TestRestAPI_SecurityDefinitions(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &spec); err != nil {
 		t.Fatal(err)
 	}
-	secDefs, _ := spec["securityDefinitions"].(map[string]any)
-	if secDefs["jwt"] == nil || secDefs["basic"] == nil {
-		t.Fatalf("securityDefinitions %#v", spec["securityDefinitions"])
+	secDefs := restSecuritySchemes(t, spec)
+	jwt, _ := secDefs["jwt"].(map[string]any)
+	basic, _ := secDefs["basic"].(map[string]any)
+	oauth, _ := secDefs["oauth"].(map[string]any)
+	flows, _ := oauth["flows"].(map[string]any)
+	code, _ := flows["authorizationCode"].(map[string]any)
+	scopes, _ := code["scopes"].(map[string]any)
+	if jwt["type"] != "apiKey" || jwt["name"] != "Authorization" || jwt["in"] != "header" || basic["type"] != "http" || basic["scheme"] != "basic" || code["authorizationUrl"] != "https://example.com/auth" || code["tokenUrl"] != "https://example.com/token" || scopes["read"] != "Read" {
+		t.Fatalf("securitySchemes %#v", secDefs)
 	}
 	paths, _ := spec["paths"].(map[string]any)
 	users, _ := paths["/users/"].(map[string]any)
 	list, _ := users["get"].(map[string]any)
-	if !restSecurityHas(list["security"], "jwt", "basic") {
+	if !restSecurityHas(list["security"], "jwt", "basic", "oauth") {
 		t.Fatalf("users security %#v", list["security"])
 	}
 	status, _ := paths["/status/"].(map[string]any)
@@ -217,10 +233,11 @@ func TestRestAPI_OperationAuthSecurity(t *testing.T) {
 		"jwt":   {"type": "apiKey"},
 		"oauth": {"type": "oauth2"},
 		"basic": {"type": "basic"},
+		"oidc":  {"type": "openIdConnect", "openIdConnectUrl": "https://idp.example/.well-known/openid-configuration"},
 	}
 	AuthSecurityDefinitions.Store(&defs)
 
-	listed := []string{"oauth", "jwt"}
+	listed := []string{"oauth", "jwt", "oidc"}
 	jwtOnly := []string{"jwt"}
 	none := []string{}
 	cfg := config.Config{
@@ -246,9 +263,10 @@ func TestRestAPI_OperationAuthSecurity(t *testing.T) {
 	}
 	router := serveRest(t, cfg, map[string]easyrest.DBPlugin{"db": &restRecPlugin{}})
 	spec := restSpec(t, router, "/restapi/v1/")
-	secDefs, _ := spec["securityDefinitions"].(map[string]any)
-	if _, ok := secDefs["basic"]; ok || secDefs["oauth"] == nil || secDefs["jwt"] == nil {
-		t.Fatalf("securityDefinitions %#v", secDefs)
+	secDefs := restSecuritySchemes(t, spec)
+	oidc, _ := secDefs["oidc"].(map[string]any)
+	if _, ok := secDefs["basic"]; ok || secDefs["oauth"] == nil || secDefs["jwt"] == nil || oidc["type"] != "openIdConnect" || oidc["openIdConnectUrl"] != "https://idp.example/.well-known/openid-configuration" {
+		t.Fatalf("securitySchemes %#v", secDefs)
 	}
 	paths, _ := spec["paths"].(map[string]any)
 	users, _ := paths["/users/"].(map[string]any)
@@ -259,6 +277,10 @@ func TestRestAPI_OperationAuthSecurity(t *testing.T) {
 	jwtScopes, ok := restSecurityScopes(users["get"].(map[string]any)["security"], "jwt")
 	if !ok || len(jwtScopes) != 0 {
 		t.Fatalf("list jwt scopes %#v", users["get"])
+	}
+	oidcScopes, ok := restSecurityScopes(users["get"].(map[string]any)["security"], "oidc")
+	if !ok || !slices.Equal(oidcScopes, []string{"orders-read", "admin"}) {
+		t.Fatalf("list oidc scopes %#v", users["get"])
 	}
 	createScopes, ok := restSecurityScopes(users["post"].(map[string]any)["security"], "oauth")
 	if !ok || !slices.Equal(createScopes, []string{"orders-write"}) {
@@ -1223,20 +1245,32 @@ func TestRestAPI_ListSwaggerParams(t *testing.T) {
 	limit := restSpecParam(t, params, "limit", "query")
 	offset := restSpecParam(t, params, "offset", "query")
 	ordering := restSpecParam(t, params, "ordering", "query")
-	if limit["type"] != "integer" || offset["type"] != "integer" {
+	limitSchema, _ := limit["schema"].(map[string]any)
+	offsetSchema, _ := offset["schema"].(map[string]any)
+	if limitSchema["type"] != "integer" || offsetSchema["type"] != "integer" {
 		t.Fatalf("paging %#v %#v", limit, offset)
 	}
-	items, _ := ordering["items"].(map[string]any)
+	orderingSchema, _ := ordering["schema"].(map[string]any)
+	items, _ := orderingSchema["items"].(map[string]any)
 	enum, _ := items["enum"].([]any)
-	if len(enum) != 2 || enum[0] != "name" || enum[1] != "-name" {
+	if ordering["style"] != "form" || ordering["explode"] != false || len(enum) != 2 || enum[0] != "name" || enum[1] != "-name" {
 		t.Fatalf("ordering %#v", ordering)
 	}
 	if restSpecParam(t, params, "Range", "header") == nil || restSpecParam(t, params, "Range-Unit", "header") == nil {
 		t.Fatal("missing range headers")
 	}
+	prefer := restSpecParam(t, params, "Prefer", "header")
+	desc, _ := prefer["description"].(string)
+	if !strings.Contains(desc, "count=exact") {
+		t.Fatalf("Prefer %#v", prefer)
+	}
 	responses, _ := list["responses"].(map[string]any)
 	ok, _ := responses["200"].(map[string]any)
-	schema, _ := ok["schema"].(map[string]any)
+	headers, _ := ok["headers"].(map[string]any)
+	if _, has := headers["Preference-Applied"]; has {
+		t.Fatalf("list echoed Preference-Applied %#v", headers)
+	}
+	schema := restJSONSchema(t, ok)
 	props, _ := schema["properties"].(map[string]any)
 	results, _ := props["results"].(map[string]any)
 	itemSchema, _ := results["items"].(map[string]any)
@@ -1824,6 +1858,27 @@ func TestRestAPI_ListPluginContext(t *testing.T) {
 	if claims["sub"] != "ada" {
 		t.Fatalf("claims %#v", plugin.getCtx["claims"])
 	}
+}
+
+func restSecuritySchemes(t *testing.T, spec map[string]any) map[string]any {
+	t.Helper()
+	components, _ := spec["components"].(map[string]any)
+	schemes, _ := components["securitySchemes"].(map[string]any)
+	if schemes == nil {
+		t.Fatalf("securitySchemes %#v", spec["components"])
+	}
+	return schemes
+}
+
+func restJSONSchema(t *testing.T, node map[string]any) map[string]any {
+	t.Helper()
+	content, _ := node["content"].(map[string]any)
+	media, _ := content[easyrest.MediaTypeJSON].(map[string]any)
+	schema, _ := media["schema"].(map[string]any)
+	if schema == nil {
+		t.Fatalf("json schema %#v", node)
+	}
+	return schema
 }
 
 func restSpecParam(t *testing.T, params []any, name, in string) map[string]any {
@@ -2491,8 +2546,31 @@ func TestRestAPI_SwaggerRoot(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &spec); err != nil {
 		t.Fatalf("decode %v body %q", err, w.Body.String())
 	}
-	if spec["swagger"] != "2.0" || spec["basePath"] != "/restapi/v1" {
+	info, _ := spec["info"].(map[string]any)
+	servers, _ := spec["servers"].([]any)
+	serverURL := ""
+	if len(servers) == 1 {
+		first, _ := servers[0].(map[string]any)
+		serverURL, _ = first["url"].(string)
+	}
+	components, _ := spec["components"].(map[string]any)
+	if _, ok := components["schemas"].(map[string]any); !ok {
+		t.Fatalf("schemas %#v", components)
+	}
+	if _, ok := components["securitySchemes"].(map[string]any); !ok {
+		t.Fatalf("securitySchemes %#v", components)
+	}
+	if spec["openapi"] != "3.0.3" || info["title"] != "v1" || info["version"] != "v1" || serverURL != "/restapi/v1" {
 		t.Fatalf("spec %#v", spec)
+	}
+	paths, _ := spec["paths"].(map[string]any)
+	detail, _ := paths["/users/{id}/"].(map[string]any)
+	retrieve, _ := detail["get"].(map[string]any)
+	retrieveParams, _ := retrieve["parameters"].([]any)
+	idParam := restSpecParam(t, retrieveParams, "id", "path")
+	idSchema, _ := idParam["schema"].(map[string]any)
+	if idParam["required"] != true || idSchema["type"] != "string" {
+		t.Fatalf("id param %#v", idParam)
 	}
 	if plugin.schemaCalls != before {
 		t.Fatalf("GetSchema calls %d before %d", plugin.schemaCalls, before)
@@ -2552,7 +2630,8 @@ func TestRestAPI_SwaggerTypes(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &spec); err != nil {
 		t.Fatal(err)
 	}
-	defs, _ := spec["definitions"].(map[string]any)
+	components, _ := spec["components"].(map[string]any)
+	defs, _ := components["schemas"].(map[string]any)
 	userCreate, _ := defs["users_create"].(map[string]any)
 	userProps, _ := userCreate["properties"].(map[string]any)
 	nameProp, _ := userProps["name"].(map[string]any)
@@ -2622,6 +2701,17 @@ func TestRestAPI_SwaggerText(t *testing.T) {
 	orderList, _ := orders["get"].(map[string]any)
 	if orderList["description"] != "Orders" {
 		t.Fatalf("orders %#v", orderList)
+	}
+	listParams, _ := list["parameters"].([]any)
+	orgParam := restSpecParam(t, listParams, "org_id", "path")
+	orgSchema, _ := orgParam["schema"].(map[string]any)
+	if orgParam["required"] != true || orgSchema["type"] != "string" {
+		t.Fatalf("org param %#v", orgParam)
+	}
+	createParams, _ := create["parameters"].([]any)
+	createOrg := restSpecParam(t, createParams, "org_id", "path")
+	if createOrg["required"] != true || create["requestBody"] != nil {
+		t.Fatalf("create %#v", create)
 	}
 }
 
@@ -2980,19 +3070,15 @@ func restAssertCallSchema(t *testing.T, paths map[string]any, path string) {
 	t.Helper()
 	item, _ := paths[path].(map[string]any)
 	op, _ := item["post"].(map[string]any)
-	params, _ := op["parameters"].([]any)
-	if len(params) == 0 {
-		t.Fatalf("%s parameters %#v", path, op)
-	}
-	bodyParam, _ := params[0].(map[string]any)
-	schema, _ := bodyParam["schema"].(map[string]any)
+	body, _ := op["requestBody"].(map[string]any)
+	schema := restJSONSchema(t, body)
 	reqProps, _ := schema["properties"].(map[string]any)
 	if reqProps["reason"] == nil || reqProps["token"] == nil || reqProps["done"] != nil {
 		t.Fatalf("%s request %#v", path, reqProps)
 	}
 	responses, _ := op["responses"].(map[string]any)
 	ok, _ := responses["200"].(map[string]any)
-	respSchema, _ := ok["schema"].(map[string]any)
+	respSchema := restJSONSchema(t, ok)
 	respProps, _ := respSchema["properties"].(map[string]any)
 	if respProps["reason"] == nil || respProps["done"] == nil || respProps["token"] != nil {
 		t.Fatalf("%s response %#v", path, respProps)
@@ -3253,21 +3339,22 @@ func TestRestAPI_StateSwagger(t *testing.T) {
 	getOp, _ := item["get"].(map[string]any)
 	responses, _ := getOp["responses"].(map[string]any)
 	ok, _ := responses["200"].(map[string]any)
-	schema, _ := ok["schema"].(map[string]any)
+	schema := restJSONSchema(t, ok)
 	props, _ := schema["properties"].(map[string]any)
 	if props["reason"] == nil || props["done"] == nil || props["token"] != nil {
 		t.Fatalf("get %#v", props)
 	}
 	putOp, _ := item["put"].(map[string]any)
-	params, _ := putOp["parameters"].([]any)
-	if len(params) == 0 {
-		t.Fatalf("put %#v", putOp)
-	}
-	bodyParam, _ := params[0].(map[string]any)
-	putSchema, _ := bodyParam["schema"].(map[string]any)
+	body, _ := putOp["requestBody"].(map[string]any)
+	putSchema := restJSONSchema(t, body)
 	putProps, _ := putSchema["properties"].(map[string]any)
 	if putProps["reason"] == nil || putProps["token"] == nil || putProps["done"] != nil {
 		t.Fatalf("put %#v", putProps)
+	}
+	params, _ := putOp["parameters"].([]any)
+	idParam := restSpecParam(t, params, "id", "path")
+	if idParam["required"] != true {
+		t.Fatalf("path param %#v", idParam)
 	}
 }
 
@@ -3295,18 +3382,14 @@ func TestRestAPI_StateFuncSwagger(t *testing.T) {
 	getOp, _ := item["get"].(map[string]any)
 	responses, _ := getOp["responses"].(map[string]any)
 	ok, _ := responses["200"].(map[string]any)
-	schema, _ := ok["schema"].(map[string]any)
+	schema := restJSONSchema(t, ok)
 	props, _ := schema["properties"].(map[string]any)
 	if props["reason"] == nil || props["done"] == nil || props["token"] != nil {
 		t.Fatalf("get %#v", props)
 	}
 	putOp, _ := item["put"].(map[string]any)
-	params, _ := putOp["parameters"].([]any)
-	if len(params) == 0 {
-		t.Fatalf("put %#v", putOp)
-	}
-	bodyParam, _ := params[0].(map[string]any)
-	putSchema, _ := bodyParam["schema"].(map[string]any)
+	body, _ := putOp["requestBody"].(map[string]any)
+	putSchema := restJSONSchema(t, body)
 	putProps, _ := putSchema["properties"].(map[string]any)
 	if putProps["reason"] == nil || putProps["token"] == nil || putProps["done"] != nil {
 		t.Fatalf("put %#v", putProps)
@@ -3771,11 +3854,13 @@ func TestRestAPI_ReloadSwap(t *testing.T) {
 	t.Cleanup(func() {
 		SetConfig(origCfg)
 		DbPlugins.Store(origDB)
-		publishRestAPI()
+		_ = publishRestAPI()
 	})
 	SetConfig(users)
 	DbPlugins.Store(&map[string]easyrest.DBPlugin{"db": plugin})
-	publishRestAPI()
+	if err := publishRestAPI(); err != nil {
+		t.Fatal(err)
+	}
 
 	first := httptest.NewRecorder()
 	parent.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/restapi/v1/users/", nil))
@@ -3789,7 +3874,9 @@ func TestRestAPI_ReloadSwap(t *testing.T) {
 			"v1": {Source: "db", Endpoints: map[string]config.RestEndpoint{"orders": {Description: "Orders"}}},
 		},
 	})
-	publishRestAPI()
+	if err := publishRestAPI(); err != nil {
+		t.Fatal(err)
+	}
 
 	old := httptest.NewRecorder()
 	parent.ServeHTTP(old, httptest.NewRequest(http.MethodGet, "/restapi/v1/users/", nil))
@@ -4315,7 +4402,9 @@ func TestRestAPI_CatalogReload(t *testing.T) {
 	cfg := restUsersConfig()
 	cfg.RestAPI["v2"] = config.RestAPIApp{Source: "db"}
 	SetConfig(cfg)
-	publishRestAPI()
+	if err := publishRestAPI(); err != nil {
+		t.Fatal(err)
+	}
 	req := httptest.NewRequest(http.MethodGet, "/restapi/?format=json", nil)
 	req.Host = "example.com"
 	w := httptest.NewRecorder()
@@ -4345,5 +4434,57 @@ func TestRestWriteKeysOmittedFieldsStayOpen(t *testing.T) {
 	}
 	if _, ok := keys["avatar"]; !ok {
 		t.Fatal("extra field missing")
+	}
+}
+
+func TestRestSpecHook(t *testing.T) {
+	var seen []string
+	SetRestSpecHooks([]RestSpecHook{
+		func(name string, doc map[string]any) error {
+			seen = append(seen, "a:"+name)
+			doc["x-a"] = true
+			return nil
+		},
+		func(name string, doc map[string]any) error {
+			if doc["x-a"] != true {
+				return errors.New("first hook missing")
+			}
+			seen = append(seen, "b:"+name)
+			doc["x-b"] = name
+			return nil
+		},
+	})
+	cfg := restUsersConfig()
+	cfg.RestAPI["v2"] = config.RestAPIApp{Source: "db", Endpoints: map[string]config.RestEndpoint{"users": {}}}
+	router := serveRest(t, cfg, map[string]easyrest.DBPlugin{"db": &restRecPlugin{}})
+	if !slices.Equal(seen, []string{"a:v1", "b:v1", "a:v2", "b:v2"}) {
+		t.Fatalf("order %#v", seen)
+	}
+	spec := restSpec(t, router, "/restapi/v1/")
+	if spec["x-a"] != true || spec["x-b"] != "v1" {
+		t.Fatalf("hooked %#v %#v", spec["x-a"], spec["x-b"])
+	}
+
+	SetRestSpecHooks([]RestSpecHook{
+		func(name string, doc map[string]any) error {
+			doc["x-bad"] = true
+			return errors.New("nope")
+		},
+	})
+	if err := publishRestAPI(); err == nil || !strings.Contains(err.Error(), "v1 spec hook") {
+		t.Fatalf("err %v", err)
+	}
+	spec = restSpec(t, router, "/restapi/v1/")
+	if spec["x-bad"] != nil || spec["x-a"] != nil || spec["openapi"] != "3.0.3" {
+		t.Fatalf("mutated openapi %#v x-bad %#v x-a %#v", spec["openapi"], spec["x-bad"], spec["x-a"])
+	}
+
+	SetRestSpecHooks(nil)
+	if err := publishRestAPI(); err != nil {
+		t.Fatal(err)
+	}
+	spec = restSpec(t, router, "/restapi/v1/")
+	if spec["x-a"] != nil || spec["x-b"] != nil {
+		t.Fatalf("cleared %#v %#v", spec["x-a"], spec["x-b"])
 	}
 }

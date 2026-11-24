@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	stdlog "log"
@@ -41,9 +42,65 @@ func mountRestAPI(r chi.Router) {
 	r.Mount("/restapi", restSwapHandler{})
 }
 
-func publishRestAPI() {
-	h := compileRestRouter(currentConfig())
+// RestSpecHook edits one OpenAPI document before it is stored.
+// name is the application.api key. doc is that API's document.
+// Finish every edit before returning. A nested map kept after return
+// can still change the stored document, because a successful hook stores this copy.
+type RestSpecHook func(name string, doc map[string]any) error
+
+var restSpecHooks atomic.Pointer[[]RestSpecHook]
+
+// SetRestSpecHooks replaces the hooks run before each rest document is stored.
+// nil or an empty slice clears them. embed.Handler calls this on every build.
+func SetRestSpecHooks(hooks []RestSpecHook) {
+	if len(hooks) == 0 {
+		restSpecHooks.Store(nil)
+		return
+	}
+	copied := append([]RestSpecHook(nil), hooks...)
+	restSpecHooks.Store(&copied)
+}
+
+func publishRestAPI() error {
+	h, err := compileRestRouter(currentConfig())
 	restSwap.Store(&h)
+	return err
+}
+
+func applyRestSpecHooks(snap *restSpecSnapshot) error {
+	loaded := restSpecHooks.Load()
+	if loaded == nil || len(*loaded) == 0 || len(snap.Docs) == 0 {
+		return nil
+	}
+	raw, err := json.Marshal(snap.Docs)
+	if err != nil {
+		return fmt.Errorf("restapi spec hook: %w", err)
+	}
+	var copied map[string]map[string]any
+	if err := json.Unmarshal(raw, &copied); err != nil {
+		return fmt.Errorf("restapi spec hook: %w", err)
+	}
+	names := make([]string, 0, len(copied))
+	for name := range copied {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		doc := copied[name]
+		if doc == nil {
+			continue
+		}
+		for _, hook := range *loaded {
+			if hook == nil {
+				continue
+			}
+			if err := hook(name, doc); err != nil {
+				return fmt.Errorf("restapi %s spec hook: %w", name, err)
+			}
+		}
+	}
+	snap.Docs = copied
+	return nil
 }
 
 type restQueryFilter struct {
@@ -1397,19 +1454,22 @@ func restListOperation(ep config.RestEndpoint, resource string, tables map[strin
 	for _, field := range fields {
 		enum = append(enum, field, "-"+field)
 	}
-	op["parameters"] = []Parameter{
-		{Name: "limit", In: "query", Description: "Maximum number of records to return", Type: "integer"},
-		{Name: "offset", In: "query", Description: "Number of records to skip", Type: "integer"},
-		{
-			Name:             "ordering",
-			In:               "query",
-			Description:      "Comma-separated ordering fields",
-			Type:             "array",
-			CollectionFormat: "csv",
-			Items:            map[string]any{"type": "string", "enum": enum},
+	op["parameters"] = []any{
+		restQueryParam("limit", "Maximum number of records to return", map[string]any{"type": "integer"}),
+		restQueryParam("offset", "Number of records to skip", map[string]any{"type": "integer"}),
+		map[string]any{
+			"name":        "ordering",
+			"in":          "query",
+			"description": "Comma-separated ordering fields",
+			"style":       "form",
+			"explode":     false,
+			"schema": map[string]any{
+				"type":  "array",
+				"items": map[string]any{"type": "string", "enum": enum},
+			},
 		},
-		{Name: "Range", In: "header", Description: "Item range start-end", Type: "string"},
-		{Name: "Range-Unit", In: "header", Description: "Range unit", Type: "string"},
+		restHeaderParam("Range", "Item range start-end"),
+		restHeaderParam("Range-Unit", "Range unit"),
 	}
 	tableSchema, _ := tables[table].(map[string]any)
 	columns, _ := tableSchema["properties"].(map[string]any)
@@ -1424,23 +1484,45 @@ func restListOperation(ep config.RestEndpoint, resource string, tables map[strin
 	maps.Copy(props, extra)
 	props = restReadProperties(props, inline)
 	op["responses"] = map[string]any{
-		"200": map[string]any{
-			"description": "Successful response",
-			"schema": map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"count":    map[string]any{"type": "integer"},
-					"next":     map[string]any{"type": "string"},
-					"previous": map[string]any{"type": "string"},
-					"results": map[string]any{
-						"type":  "array",
-						"items": map[string]any{"type": "object", "properties": props},
-					},
+		"200": restJSONResponse(map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"count":    map[string]any{"type": "integer"},
+				"next":     map[string]any{"type": "string"},
+				"previous": map[string]any{"type": "string"},
+				"results": map[string]any{
+					"type":  "array",
+					"items": map[string]any{"type": "object", "properties": props},
 				},
 			},
-		},
+		}),
 	}
 	return op
+}
+
+func restQueryParam(name, description string, schema map[string]any) map[string]any {
+	return map[string]any{
+		"name":        name,
+		"in":          "query",
+		"description": description,
+		"schema":      schema,
+	}
+}
+
+func restHeaderParam(name, description string) map[string]any {
+	return map[string]any{
+		"name":        name,
+		"in":          "header",
+		"description": description,
+		"schema":      map[string]any{"type": "string"},
+	}
+}
+
+func restJSONResponse(schema map[string]any) map[string]any {
+	return map[string]any{
+		"description": "Successful response",
+		"content":     openAPIContent(schema, easyrest.MediaTypeJSON),
+	}
 }
 
 func restCallSchemas(fields map[string]any) (map[string]any, map[string]any) {
@@ -1463,17 +1545,12 @@ func restCallSchemas(fields map[string]any) (map[string]any, map[string]any) {
 func restCallOperation(fields map[string]any) map[string]any {
 	request, response := restCallSchemas(fields)
 	return map[string]any{
-		"parameters": []Parameter{{
-			Name:     "body",
-			In:       "body",
-			Required: true,
-			Schema:   request,
-		}},
+		"requestBody": map[string]any{
+			"required": true,
+			"content":  openAPIContent(request, easyrest.MediaTypeJSON),
+		},
 		"responses": map[string]any{
-			"200": map[string]any{
-				"description": "Successful response",
-				"schema":      response,
-			},
+			"200": restJSONResponse(response),
 		},
 	}
 }
@@ -1487,13 +1564,7 @@ func restAuthDefs() map[string]map[string]any {
 }
 
 func restSecurityDefinitions(defs map[string]map[string]any, listed *[]string) map[string]any {
-	out := map[string]any{}
-	for _, name := range restAuthNames(listed, defs) {
-		if schema, ok := defs[name]; ok {
-			out[name] = schema
-		}
-	}
-	return out
+	return openAPISecuritySchemes(defs, restAuthNames(listed, defs))
 }
 
 func restAuthNames(listed *[]string, defs map[string]map[string]any) []string {
@@ -1540,7 +1611,7 @@ func restOperationSecurity(in restOpSecurity) []map[string]any {
 			continue
 		}
 		req := []string{}
-		if def["type"] == "oauth2" {
+		if def["type"] == "oauth2" || def["type"] == "openIdConnect" {
 			req = scopes
 		}
 		out = append(out, map[string]any{name: req})
@@ -1613,12 +1684,55 @@ func restActionNoSlash(ep config.RestEndpoint, action string) bool {
 }
 
 func restPutOperation(paths map[string]any, path, method string, op map[string]any) {
+	restEnsurePathParams(op, path)
+	restEnsurePrefer(op)
 	item, _ := paths[path].(map[string]any)
 	if item == nil {
 		item = map[string]any{}
 		paths[path] = item
 	}
 	item[method] = op
+}
+
+func restEnsurePathParams(op map[string]any, path string) {
+	names := restPathParamNames(path)
+	if len(names) == 0 {
+		return
+	}
+	current, _ := op["parameters"].([]any)
+	merged := make([]any, 0, len(names)+len(current))
+	seen := map[string]struct{}{}
+	for _, name := range names {
+		seen[name] = struct{}{}
+		merged = append(merged, map[string]any{
+			"name":     name,
+			"in":       "path",
+			"required": true,
+			"schema":   map[string]any{"type": "string"},
+		})
+	}
+	for _, raw := range current {
+		param, _ := raw.(map[string]any)
+		name, _ := param["name"].(string)
+		if param["in"] == "path" {
+			if _, ok := seen[name]; ok {
+				continue
+			}
+		}
+		merged = append(merged, raw)
+	}
+	op["parameters"] = merged
+}
+
+func restEnsurePrefer(op map[string]any) {
+	current, _ := op["parameters"].([]any)
+	for _, raw := range current {
+		param, _ := raw.(map[string]any)
+		if param["name"] == "Prefer" && param["in"] == "header" {
+			return
+		}
+	}
+	op["parameters"] = append(current, preferHeaderParam())
 }
 
 func restEndpointInvalid(name, urlPath, source string) string {
@@ -1780,13 +1894,13 @@ func restContentRefs(levels []contentLevel, pluginNames, defaults []string) ([]c
 	return contentDirectionRefs(contentRefsNamed(parserNames), false), contentDirectionRefs(contentRefsNamed(rendererNames), true)
 }
 
-func compileRestRouter(cfg *config.Config) http.Handler {
+func compileRestRouter(cfg *config.Config) (http.Handler, error) {
 	chi.RegisterMethod("QUERY")
 	r := chi.NewRouter()
 	snap := &restSpecSnapshot{Docs: map[string]map[string]any{}}
 	if cfg == nil {
 		restSpecs.Store(snap)
-		return r
+		return r, nil
 	}
 	defaults := cfg.DefaultContentHandlers
 	r.Get("/", func(w http.ResponseWriter, req *http.Request) {
@@ -1803,11 +1917,17 @@ func compileRestRouter(cfg *config.Config) http.Handler {
 	for _, apiName := range apiNames {
 		app := cfg.RestAPI[apiName]
 		spec := map[string]any{
-			"swagger":             "2.0",
-			"basePath":            "/restapi/" + apiName,
-			"paths":               map[string]any{},
-			"definitions":         map[string]any{},
-			"securityDefinitions": restSecurityDefinitions(authDefs, app.Auth),
+			"openapi": "3.0.3",
+			"info": map[string]any{
+				"title":   apiName,
+				"version": apiName,
+			},
+			"servers": []any{map[string]any{"url": "/restapi/" + apiName}},
+			"paths":   map[string]any{},
+			"components": map[string]any{
+				"schemas":         map[string]any{},
+				"securitySchemes": restSecurityDefinitions(authDefs, app.Auth),
+			},
 		}
 		api := apiName
 		appHandlers := app.ContentHandlers
@@ -1868,7 +1988,7 @@ func compileRestRouter(cfg *config.Config) http.Handler {
 				endpointScopes:  ep.RequiredScopes,
 			}
 			action = bindRestContent(action, cfg, app, ep, nil, nil)
-			defs := spec["definitions"].(map[string]any)
+			defs := spec["components"].(map[string]any)["schemas"].(map[string]any)
 			tables := pluginTableSchemas(source, tableCache)
 			if restActionEnabled(ep, "create") {
 				act := ep.Actions["create"]
@@ -1994,10 +2114,7 @@ func compileRestRouter(cfg *config.Config) http.Handler {
 				}
 				retrieveOp := restOperation(ep, "retrieve", name)
 				retrieveOp["responses"] = map[string]any{
-					"200": map[string]any{
-						"description": "Successful response",
-						"schema":      restRewriteSchema(map[string]any{"type": "object", "properties": retrieveAction.fieldProps}, storageInline(retrieveAction.storageName)),
-					},
+					"200": restJSONResponse(restRewriteSchema(map[string]any{"type": "object", "properties": retrieveAction.fieldProps}, storageInline(retrieveAction.storageName))),
 				}
 				put(specRoute("{id}", noSlash), "get", retrieveOp, restOpAuth{
 					auth:   retrieveAct.Auth,
@@ -2171,10 +2288,7 @@ func compileRestRouter(cfg *config.Config) http.Handler {
 				responseSchema = restRewriteSchema(responseSchema, storageInline(stateAction.storageName))
 				put(specRoute(suffix, noSlash), "get", map[string]any{
 					"responses": map[string]any{
-						"200": map[string]any{
-							"description": "Successful response",
-							"schema":      responseSchema,
-						},
+						"200": restJSONResponse(responseSchema),
 					},
 				}, restOpAuth{auth: state.Auth, scopes: state.RequiredScopes, read: true})
 				put(specRoute(suffix, noSlash), writeMethod, restCallOperation(state.Fields), restOpAuth{
@@ -2221,6 +2335,10 @@ func compileRestRouter(cfg *config.Config) http.Handler {
 			}
 		}
 	}
+	if err := applyRestSpecHooks(snap); err != nil {
+		restSpecs.Store(snap)
+		return r, err
+	}
 	restSpecs.Store(snap)
-	return r
+	return r, nil
 }

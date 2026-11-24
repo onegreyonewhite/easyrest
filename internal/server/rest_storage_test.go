@@ -294,8 +294,13 @@ func TestRestStorageSchemaURI(t *testing.T) {
 	paths, _ := spec["paths"].(map[string]any)
 	users, _ := paths["/users/"].(map[string]any)
 	post, _ := users["post"].(map[string]any)
-	if post["parameters"] != nil {
-		t.Fatalf("create request schema should stay undescribed, got %#v", post["parameters"])
+	params, _ := post["parameters"].([]any)
+	if post["requestBody"] != nil || len(params) != 1 {
+		t.Fatalf("create request schema should stay undescribed, got %#v", post)
+	}
+	prefer, _ := params[0].(map[string]any)
+	if prefer["name"] != "Prefer" || prefer["in"] != "header" {
+		t.Fatalf("create parameters %#v", params)
 	}
 }
 

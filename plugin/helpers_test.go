@@ -97,6 +97,8 @@ func TestSkipDBSessionKey(t *testing.T) {
 		"_",
 		"_mw.trace",
 		"_internal",
+		SharedTxKey,
+		SharedTxDeadlineKey,
 	}
 	for _, k := range skip {
 		if !SkipDBSessionKey(k) {

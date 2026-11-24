@@ -1,21 +1,27 @@
 package embed_test
 
 import (
+	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/onegreyonewhite/easyrest/internal/server"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/goccy/go-json"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 	lrustore "github.com/onegreyonewhite/easyrest/plugins/data/lru"
 	sqliteplugin "github.com/onegreyonewhite/easyrest/plugins/data/sqlite"
-	cachemw 	"github.com/onegreyonewhite/easyrest/plugins/middleware/cache"
+	cachemw "github.com/onegreyonewhite/easyrest/plugins/middleware/cache"
 	memstorage "github.com/onegreyonewhite/easyrest/plugins/storage/memory"
 
 	"github.com/onegreyonewhite/easyrest/embed"
@@ -56,6 +62,99 @@ func TestHandler_HealthAndRoutes(t *testing.T) {
 		if ping.Code != http.StatusOK || ping.Body.String() != "ping" {
 			t.Fatalf("rebuild %d ping: %d %s", i, ping.Code, ping.Body.String())
 		}
+	}
+}
+
+func TestServe_ServiceStopsWhenContextCanceled(t *testing.T) {
+	t.Cleanup(func() {
+		server.StopPlugins()
+		_, _ = embed.Handler("port: \"1\"\n", nil)
+	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	started := make(chan struct{})
+	done := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		done <- embed.Serve(ctx, fmt.Sprintf("port: \"%d\"\ncheck_scope: false\n", port), nil,
+			embed.WithService(func(ctx context.Context) error {
+				close(started)
+				<-ctx.Done()
+				return nil
+			}),
+		)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("service did not start")
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Serve: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Serve did not return after cancel")
+	}
+}
+
+func TestServe_ServiceErrorStopsServer(t *testing.T) {
+	t.Cleanup(func() {
+		server.StopPlugins()
+		_, _ = embed.Handler("port: \"1\"\n", nil)
+	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	want := errors.New("ping failed")
+	stopped := make(chan struct{})
+	done := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		done <- embed.Serve(ctx, fmt.Sprintf("port: \"%d\"\ncheck_scope: false\n", port), nil,
+			embed.WithService(func(context.Context) error {
+				return want
+			}),
+			embed.WithService(func(ctx context.Context) error {
+				<-ctx.Done()
+				close(stopped)
+				return nil
+			}),
+		)
+	}()
+
+	select {
+	case <-stopped:
+	case <-time.After(10 * time.Second):
+		t.Fatal("sibling service did not stop")
+	}
+
+	select {
+	case err := <-done:
+		if err == nil || err.Error() != want.Error() {
+			t.Fatalf("Serve error: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Serve did not return after service error")
 	}
 }
 
@@ -507,5 +606,74 @@ application:
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/restapi/v1/users/", nil))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "done") {
 		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandler_RestSpec(t *testing.T) {
+	t.Cleanup(func() {
+		server.SetRestSpecHooks(nil)
+		_, _ = embed.Handler("port: \"1\"\n", nil)
+	})
+	overlay := `
+port: "1"
+application:
+  api:
+    b:
+      source: db
+    a:
+      source: db
+`
+	var seen []string
+	handler, err := embed.Handler(overlay, nil,
+		embed.WithRestSpec(func(name string, doc map[string]any) error {
+			seen = append(seen, "1:"+name)
+			doc["x-first"] = name
+			return nil
+		}),
+		embed.WithRestSpec(func(name string, doc map[string]any) error {
+			if doc["x-first"] != name {
+				return fmt.Errorf("first hook missing for %s", name)
+			}
+			seen = append(seen, "2:"+name)
+			return nil
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(seen, ",") != "1:a,2:a,1:b,2:b" {
+		t.Fatalf("order %v", seen)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/restapi/a/?format=json", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"x-first":"a"`) {
+		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+	}
+
+	handler, err = embed.Handler(overlay, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/restapi/a/?format=json", nil))
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "x-first") {
+		t.Fatalf("cleared status %d body %s", rec.Code, rec.Body.String())
+	}
+
+	_, err = embed.Handler(overlay, nil, embed.WithRestSpec(func(name string, doc map[string]any) error {
+		doc["x-bad"] = true
+		return errors.New("boom")
+	}))
+	if err == nil || !strings.Contains(err.Error(), "spec hook") {
+		t.Fatalf("err %v", err)
+	}
+	handler, err = embed.Handler(overlay, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/restapi/a/?format=json", nil))
+	if strings.Contains(rec.Body.String(), "x-bad") {
+		t.Fatalf("mutated %s", rec.Body.String())
 	}
 }

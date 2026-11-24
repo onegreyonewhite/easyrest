@@ -3,18 +3,24 @@ package server
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	stdlog "log"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/rpc"
 	"os"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/onegreyonewhite/easyrest/internal/config"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
+
+// sharedTxHeader carries a shared transaction id on internal requests only.
+const sharedTxHeader = "X-Easyrest-Tx"
 
 type internalCallKey struct{}
 
@@ -89,6 +95,69 @@ func (Internal) CallFunction(req InternalCall, resp *InternalResult) error {
 	return dispatchNamed(http.MethodPost, path, req, resp)
 }
 
+func (Internal) BeginTx(req easyrest.HostTxRequest, resp *easyrest.HostTxResponse) error {
+	txr, err := dbTransactor(req.DB)
+	if err != nil {
+		resp.Error = err.Error()
+		return nil
+	}
+	pluginCtx := map[string]any{}
+	if !req.Deadline.IsZero() {
+		pluginCtx[easyrest.SharedTxDeadlineKey] = req.Deadline
+	}
+	id, _, err := txr.BeginTx(pluginCtx)
+	if err != nil {
+		resp.Error = err.Error()
+		return nil
+	}
+	resp.ID = id
+	return nil
+}
+
+func (Internal) CommitTx(req easyrest.HostTxRequest, resp *easyrest.HostTxResponse) error {
+	txr, err := dbTransactor(req.DB)
+	if err != nil {
+		resp.Error = err.Error()
+		return nil
+	}
+	if _, err := txr.CommitTx(req.ID, nil); err != nil {
+		resp.Error = err.Error()
+	}
+	return nil
+}
+
+func (Internal) RollbackTx(req easyrest.HostTxRequest, resp *easyrest.HostTxResponse) error {
+	txr, err := dbTransactor(req.DB)
+	if err != nil {
+		resp.Error = err.Error()
+		return nil
+	}
+	if err := txr.RollbackTx(req.ID); err != nil {
+		resp.Error = err.Error()
+	}
+	return nil
+}
+
+func dbTransactor(dbKey string) (easyrest.DBTransactor, error) {
+	dbKey = strings.ToLower(strings.TrimSpace(dbKey))
+	if dbKey == "" {
+		return nil, errors.New("database name is empty")
+	}
+	plugins := DbPlugins.Load()
+	if plugins == nil {
+		return nil, fmt.Errorf("database %q is not loaded", dbKey)
+	}
+	plug, ok := (*plugins)[dbKey]
+	if !ok || plug == nil {
+		return nil, fmt.Errorf("database %q is not loaded", dbKey)
+	}
+	txr, ok := plug.(easyrest.DBTransactor)
+	if !ok {
+		return nil, easyrest.ErrSharedTxUnsupported
+	}
+	return txr, nil
+}
+
 func internalTablePath(req InternalCall) string {
 	return "/api/" + req.DB + "/" + req.Name + "/"
 }
@@ -97,9 +166,12 @@ func dispatchNamed(method, path string, req InternalCall, resp *InternalResult) 
 	if req.Query != "" {
 		path += "?" + req.Query
 	}
-	header := make(http.Header, len(req.Header))
+	header := make(http.Header, len(req.Header)+1)
 	for key, value := range req.Header {
 		header.Set(key, value)
+	}
+	if req.TxID != "" {
+		header.Set(sharedTxHeader, req.TxID)
 	}
 	status, hdr, body := DispatchInternal(method, path, header, req.Body)
 	resp.Status = status

@@ -42,6 +42,12 @@ MySQL has `->` and `->>`, but the right side is one JSON path. `json_data->'phon
 
 `planned` reads `rows_examined_per_scan` from `EXPLAIN FORMAT=JSON`. In a join, that is the last table. `estimated` starts from that value. See [Prefer](../../../internal/server/README.md#prefer).
 
+## Shared transaction
+
+`BeginTx` takes one connection from the pool and starts `*sql.Tx` on it. Later calls with `_tx` set use that pair. `prefer.tx` is ignored for those calls. Session variables are applied on every joined statement. `db.pre-request` runs on the first one. `db.post-request`, the harvest, and `clear` of the known response variables run in `CommitTx`.
+
+At most 16 sessions stay open. Each one keeps its connection until commit, rollback, expiry, or `Close`. The default lifetime is 30 seconds when the caller sets no deadline. A statement error aborts the session. The caller contract is in [Plugin SDK](../../../plugin/README.md#shared-transaction) and [Embed](../../../embed/README.md#shared-transaction).
+
 ## See also
 
 - [Server README](../../../README.md)

@@ -45,6 +45,12 @@ SQLite 3.38 and later accept the same `->` and `->>` chain as PostgreSQL, includ
 
 What the host does with `exact`, `planned`, and `estimated` is in [Prefer](../../../internal/server/README.md#prefer).
 
+## Shared transaction
+
+`BeginTx` starts one `*sql.Tx`. Later calls with `_tx` set use it, including a `TableGet` that would otherwise use a prepared statement on the pool. `prefer.tx` is ignored. The plugin still does not inject session variables or run `db.pre-request` and `db.post-request`.
+
+The transaction holds the SQLite writer lock until commit, rollback, expiry, or `Close`. At most 16 sessions stay open. The default lifetime is 30 seconds when the caller sets no deadline. Rows stay invisible to other connections until `CommitTx`. The caller contract is in [Plugin SDK](../../../plugin/README.md#shared-transaction) and [Embed](../../../embed/README.md#shared-transaction).
+
 ## See also
 
 - [Server README](../../../README.md)

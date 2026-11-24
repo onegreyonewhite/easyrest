@@ -1,0 +1,19 @@
+check_scope: false
+port: "8091"
+plugins:
+  app:
+    uri: "sqlite://:memory:"
+application:
+  source: app
+  public: true
+  api:
+    v1:
+      auth: []
+      endpoints:
+        game:
+          table: game
+          views:
+            pong:
+              path: pong
+              methods: [GET]
+              handler: pong

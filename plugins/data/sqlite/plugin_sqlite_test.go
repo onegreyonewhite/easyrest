@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"regexp"
 
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 	_ "modernc.org/sqlite"
 )
 
@@ -1361,5 +1363,93 @@ func TestHandleTransactionCommitFailure(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
+func TestSharedTx_CommitVisibleRollbackHidden(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.db")
+	plugin := &sqlitePlugin{}
+	if err := plugin.InitConnection("sqlite://" + path); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(plugin.Close)
+	if err := initTestDB(plugin.db); err != nil {
+		t.Fatal(err)
+	}
+	other, err := sql.Open("sqlite", "file:"+path+"?_busy_timeout=5000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { other.Close() })
+
+	count := func() int {
+		t.Helper()
+		var n int
+		if err := other.QueryRow("SELECT COUNT(*) FROM users").Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+
+	id, _, err := plugin.BeginTx(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := map[string]any{easyrest.SharedTxKey: id}
+	rows := []map[string]any{{"name": "ada"}, {"name": "grace"}}
+	for _, row := range rows {
+		if _, _, err := plugin.TableCreate("u", "users", []map[string]any{row}, ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := count(); n != 0 {
+		t.Fatalf("uncommitted rows visible: %d", n)
+	}
+	seen, _, err := plugin.TableGet("u", "users", []string{"name"}, nil, []string{"name"}, nil, 0, 0, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 2 || seen[0]["name"] != "ada" || seen[1]["name"] != "grace" {
+		t.Fatalf("session read: %#v", seen)
+	}
+	if _, err := plugin.CommitTx(id, nil); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(); n != 2 {
+		t.Fatalf("committed rows: %d", n)
+	}
+	if err := plugin.RollbackTx(id); err != nil {
+		t.Fatalf("rollback after commit: %v", err)
+	}
+
+	id, _, err = plugin.BeginTx(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx = map[string]any{easyrest.SharedTxKey: id}
+	if _, _, err := plugin.TableCreate("u", "users", []map[string]any{{"name": "temp"}}, ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := plugin.RollbackTx(id); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(); n != 2 {
+		t.Fatalf("rows after rollback: %d", n)
+	}
+
+	id, _, err = plugin.BeginTx(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx = map[string]any{easyrest.SharedTxKey: id}
+	if _, _, err := plugin.TableCreate("u", "no_such", []map[string]any{{"name": "x"}}, ctx); err == nil {
+		t.Fatal("expected statement error")
+	}
+	if _, err := plugin.CommitTx(id, nil); !errors.Is(err, easyrest.ErrSharedTxAborted) {
+		t.Fatalf("commit after statement error: %v", err)
+	}
+	if err := plugin.RollbackTx(id); err != nil {
+		t.Fatal(err)
 	}
 }

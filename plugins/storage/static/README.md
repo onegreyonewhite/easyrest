@@ -7,7 +7,7 @@ Read-only storage plugin, preserved by the server package. `Put` and `Delete` al
 | `path` | `{workdir}/static` | Directory to read first |
 | `name` | set by the host | Instance name |
 
-A missing directory is not an error. Reads then use the Swagger UI files embedded in the plugin. A file with the same name in `path` replaces that embedded copy. The HTTP server serves those files at `/media/static/`. See [Swagger UI](../../content/swaggerui/README.md).
+A missing directory is not an error. Reads then use the Swagger UI files embedded in the plugin. Those files are the official Swagger UI v5.35.1 `dist` bundle, preset, and CSS. A file with the same name in `path` replaces that embedded copy. The HTTP server serves those files at `/media/static/`. See [Swagger UI](../../content/swaggerui/README.md).
 
 ```yaml
 storage_plugins:

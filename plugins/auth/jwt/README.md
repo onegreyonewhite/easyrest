@@ -12,9 +12,9 @@ Trial order and the claims cache are in [Auth and scopes](../../../internal/serv
 | --- | --- | --- |
 | `jwt_secret` | empty | HMAC secret. Empty decodes the payload and does not check the signature |
 | `token_type` | `Bearer` | Expected prefix when the header contains a space |
-| `token_endpoint` | `ER_TOKEN_AUTHURL` when the key is absent | OAuth2 token URL. A non-empty value switches the Swagger definition to `oauth2` |
-| `authorization_endpoint` | empty | OAuth2 authorization URL |
-| `flow` | `accessCode` when both endpoints are set, otherwise `password` | OAuth2 flow written into the security definition |
+| `token_endpoint` | `ER_TOKEN_AUTHURL` when the key is absent | OAuth2 token URL. With `authorization_endpoint`, this selects an `oauth2` scheme |
+| `authorization_endpoint` | empty | OAuth2 authorization URL. Set alone, the scheme is the `implicit` flow |
+| `flow` | `authorizationCode` when both endpoints are set, `password` for a token URL only, `implicit` for an authorization URL only | OpenAPI 3 flow name. `accessCode` is written as `authorizationCode`. `application` and `client_credentials` are written as `clientCredentials` |
 
 ```yaml
 auth_plugins:
@@ -33,10 +33,10 @@ auth_plugins:
       jwt_secret: "change-me"
       token_endpoint: https://idp.example/token
       authorization_endpoint: https://idp.example/authorize
-      flow: accessCode
+      flow: authorizationCode
 ```
 
-Without `token_endpoint`, Swagger is `apiKey` on the `Authorization` header. With it, Swagger is `oauth2` and includes `tokenUrl` and, when set, `authorizationUrl`.
+Without either URL, the scheme is `type: http`. The default `token_type` is `scheme: bearer` with `bearerFormat: JWT`. A custom `token_type` becomes that scheme name in lowercase and omits `bearerFormat`. With either URL, the scheme is `type: oauth2` and the selected flow sits under `flows`, with `tokenUrl` and `authorizationUrl` only on the flows that use them. `scopes` is an empty object.
 
 If `auth_plugins` is omitted entirely, the server synthesizes this plugin with an empty `jwt_secret` and `flow: password`. There is no top-level `token_secret` key. See [Configuration](../../../internal/config/README.md).
 
@@ -49,9 +49,8 @@ If `auth_plugins` is omitted entirely, the server synthesizes this plugin with a
 | `open_id_connect_url` | required | Discovery document URL |
 | `token_type` | `Bearer` | Scheme sent to userinfo |
 | `request_timeout` | `10` seconds when omitted or not positive | HTTP client timeout, in seconds. YAML numbers arrive as float64 |
-| `flow` | `accessCode` when discovery has a token endpoint, otherwise `implicit` | OAuth2 flow in the Swagger definition |
 
-If the chosen flow needs a token URL and discovery did not provide one, `ER_TOKEN_AUTHURL` is used when that environment variable is set.
+The scheme does not copy the discovered endpoints or a `flow` value. Swagger UI reads scopes from the discovery document.
 
 ```yaml
 auth_plugins:
@@ -62,7 +61,7 @@ auth_plugins:
       request_timeout: 10
 ```
 
-Swagger is `oauth2` with `authorizationUrl` and, when known, `tokenUrl`.
+The scheme is `type: openIdConnect` with `openIdConnectUrl` set to `open_id_connect_url`.
 
 ## See also
 

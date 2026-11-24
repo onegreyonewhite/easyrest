@@ -16,9 +16,8 @@ type lazyStorageBody struct {
 	ctx    map[string]any
 	size   int64
 	req    *http.Request
-	body   []byte
+	stream io.ReadCloser
 	off    int64
-	loaded bool
 }
 
 func (b *lazyStorageBody) Seek(offset int64, whence int) (int64, error) {
@@ -36,6 +35,21 @@ func (b *lazyStorageBody) Seek(offset int64, whence int) (int64, error) {
 	if next < 0 {
 		return 0, fmt.Errorf("negative seek")
 	}
+	if b.stream != nil {
+		if seeker, ok := b.stream.(io.Seeker); ok {
+			pos, err := seeker.Seek(offset, whence)
+			if err != nil {
+				return 0, err
+			}
+			b.off = pos
+			return pos, nil
+		}
+		err := b.stream.Close()
+		b.stream = nil
+		if err != nil {
+			return 0, err
+		}
+	}
 	b.off = next
 	return next, nil
 }
@@ -44,18 +58,30 @@ func (b *lazyStorageBody) Read(p []byte) (int, error) {
 	if err := b.req.Context().Err(); err != nil {
 		return 0, err
 	}
-	if !b.loaded {
-		body, _, _, err := b.plug.GetBin(b.rel, b.ctx)
+	if b.stream == nil {
+		rc, _, _, err := b.plug.GetStream(b.rel, b.off, b.ctx)
 		if err != nil {
 			return 0, err
 		}
-		b.body = body
-		b.loaded = true
+		b.stream = rc
 	}
-	if b.off >= int64(len(b.body)) {
-		return 0, io.EOF
-	}
-	n := copy(p, b.body[b.off:])
+	n, err := b.stream.Read(p)
 	b.off += int64(n)
-	return n, nil
+	if err == io.EOF {
+		closeErr := b.stream.Close()
+		b.stream = nil
+		if closeErr != nil {
+			return n, closeErr
+		}
+	}
+	return n, err
+}
+
+func (b *lazyStorageBody) Close() error {
+	if b.stream == nil {
+		return nil
+	}
+	err := b.stream.Close()
+	b.stream = nil
+	return err
 }

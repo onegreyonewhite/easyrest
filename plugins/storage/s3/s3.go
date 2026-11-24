@@ -133,24 +133,58 @@ func (p *Plugin) ensureBucket() error {
 // Put writes body at prefix plus the storage-relative path.
 // Inline mode still writes the object and returns a data URL.
 func (p *Plugin) Put(relPath string, body []byte, ctx map[string]any) (string, map[string]any, error) {
+	return p.PutStream(relPath, bytes.NewReader(body), ctx)
+}
+
+// PutStream uploads r. Inline mode still writes the object and returns a data URL.
+func (p *Plugin) PutStream(relPath string, r io.Reader, ctx map[string]any) (string, map[string]any, error) {
 	key, rel, err := p.objectKey(relPath)
 	if err != nil {
 		return "", ctx, err
 	}
-	ctype := contentType(rel, body)
-	_, err = p.client.PutObject(context.Background(), &s3.PutObjectInput{
-		Bucket:      aws.String(p.bucket),
-		Key:         aws.String(key),
-		Body:        bytes.NewReader(body),
-		ContentType: aws.String(ctype),
-	})
+	if r == nil {
+		r = bytes.NewReader(nil)
+	}
+	if p.inline {
+		body, err := io.ReadAll(r)
+		if err != nil {
+			return "", ctx, fmt.Errorf("storage s3: %w", err)
+		}
+		ctype := contentType(rel, body)
+		if err := p.putReader(key, ctype, bytes.NewReader(body), int64(len(body)), true); err != nil {
+			return "", ctx, err
+		}
+		return easyrest.FormatDataURL(inlineMediaType(ctype, ctx), body), ctx, nil
+	}
+	size, sized, err := readerSize(r)
 	if err != nil {
 		return "", ctx, fmt.Errorf("storage s3: %w", err)
 	}
-	if p.inline {
-		return easyrest.FormatDataURL(inlineMediaType(ctype, ctx), body), ctx, nil
+	ctype, body, err := sniffReader(rel, r)
+	if err != nil {
+		return "", ctx, fmt.Errorf("storage s3: %w", err)
+	}
+	if err := p.putReader(key, ctype, body, size, sized); err != nil {
+		return "", ctx, err
 	}
 	return rel, ctx, nil
+}
+
+func (p *Plugin) putReader(key, ctype string, body io.Reader, length int64, known bool) error {
+	input := &s3.PutObjectInput{
+		Bucket:      aws.String(p.bucket),
+		Key:         aws.String(key),
+		Body:        body,
+		ContentType: aws.String(ctype),
+	}
+	if known && length >= 0 {
+		input.ContentLength = aws.Int64(length)
+	}
+	_, err := p.client.PutObject(context.Background(), input)
+	if err != nil {
+		return fmt.Errorf("storage s3: %w", err)
+	}
+	return nil
 }
 
 // GetUrl returns a CDN URL when public_base is set, otherwise a path-style object URL.
@@ -200,27 +234,56 @@ func (p *Plugin) GetMetadata(relPath string, ctx map[string]any) (easyrest.Stora
 
 // GetBin downloads the object.
 func (p *Plugin) GetBin(relPath string, ctx map[string]any) ([]byte, string, map[string]any, error) {
+	rc, mimeType, ctxOut, err := p.GetStream(relPath, 0, ctx)
+	if err != nil {
+		return nil, "", ctxOut, err
+	}
+	defer rc.Close()
+	body, err := io.ReadAll(rc)
+	if err != nil {
+		return nil, "", ctxOut, fmt.Errorf("storage s3: %w", err)
+	}
+	return body, mimeType, ctxOut, nil
+}
+
+// GetStream downloads the object starting at offset.
+func (p *Plugin) GetStream(relPath string, offset int64, ctx map[string]any) (io.ReadCloser, string, map[string]any, error) {
+	if offset < 0 {
+		return nil, "", ctx, fmt.Errorf("storage s3: negative offset")
+	}
 	key, rel, err := p.objectKey(relPath)
 	if err != nil {
 		return nil, "", ctx, err
 	}
-	out, err := p.client.GetObject(context.Background(), &s3.GetObjectInput{
+	input := &s3.GetObjectInput{
 		Bucket: aws.String(p.bucket),
 		Key:    aws.String(key),
-	})
-	if err != nil {
-		return nil, "", ctx, fmt.Errorf("storage s3: %w", err)
 	}
-	defer out.Body.Close()
-	body, err := io.ReadAll(out.Body)
+	if offset > 0 {
+		input.Range = aws.String(fmt.Sprintf("bytes=%d-", offset))
+	}
+	out, err := p.client.GetObject(context.Background(), input)
 	if err != nil {
+		if offset > 0 && isRangeUnsatisfiable(err) {
+			return io.NopCloser(bytes.NewReader(nil)), contentType(rel, nil), ctx, nil
+		}
 		return nil, "", ctx, fmt.Errorf("storage s3: %w", err)
 	}
 	mimeType := aws.ToString(out.ContentType)
-	if mimeType == "" {
-		mimeType = contentType(rel, body)
+	if mimeType != "" {
+		return out.Body, mimeType, ctx, nil
 	}
-	return body, mimeType, ctx, nil
+	head := make([]byte, 512)
+	n, readErr := io.ReadFull(out.Body, head)
+	if readErr != nil && readErr != io.EOF && readErr != io.ErrUnexpectedEOF {
+		out.Body.Close()
+		return nil, "", ctx, fmt.Errorf("storage s3: %w", readErr)
+	}
+	head = head[:n]
+	return &prefixCloser{
+		Reader: io.MultiReader(bytes.NewReader(head), out.Body),
+		closer: out.Body,
+	}, contentType(rel, head), ctx, nil
 }
 
 // List returns the immediate children of a directory. A file path returns an error.
@@ -366,6 +429,52 @@ func inlineMediaType(detected string, ctx map[string]any) string {
 	return detected
 }
 
+type prefixCloser struct {
+	io.Reader
+	closer io.Closer
+}
+
+func (p *prefixCloser) Close() error { return p.closer.Close() }
+
+type streamSizer interface {
+	StreamSize() int64
+}
+
+func readerSize(r io.Reader) (int64, bool, error) {
+	if s, ok := r.(streamSizer); ok {
+		return s.StreamSize(), true, nil
+	}
+	seeker, ok := r.(io.Seeker)
+	if !ok {
+		return 0, false, nil
+	}
+	cur, err := seeker.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, false, err
+	}
+	end, err := seeker.Seek(0, io.SeekEnd)
+	if err != nil {
+		return 0, false, err
+	}
+	if _, err := seeker.Seek(cur, io.SeekStart); err != nil {
+		return 0, false, err
+	}
+	return end - cur, true, nil
+}
+
+func sniffReader(rel string, r io.Reader) (string, io.Reader, error) {
+	if mt := mime.TypeByExtension(path.Ext(rel)); mt != "" {
+		return mt, r, nil
+	}
+	head := make([]byte, 512)
+	n, err := io.ReadFull(r, head)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return "", nil, err
+	}
+	head = head[:n]
+	return contentType(rel, head), io.MultiReader(bytes.NewReader(head), r), nil
+}
+
 func contentType(rel string, body []byte) string {
 	if mt := mime.TypeByExtension(path.Ext(rel)); mt != "" {
 		return mt
@@ -374,6 +483,11 @@ func contentType(rel string, body []byte) string {
 		return "application/octet-stream"
 	}
 	return http.DetectContentType(body)
+}
+
+func isRangeUnsatisfiable(err error) bool {
+	var re *smithyhttp.ResponseError
+	return errors.As(err, &re) && re.HTTPStatusCode() == http.StatusRequestedRangeNotSatisfiable
 }
 
 func isNotFound(err error) bool {

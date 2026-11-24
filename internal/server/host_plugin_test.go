@@ -1,6 +1,8 @@
 package server
 
 import (
+	"bytes"
+	"io"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -166,6 +168,10 @@ func (d *dummyStoragePlugin) Put(string, []byte, map[string]any) (string, map[st
 	return "", nil, nil
 }
 
+func (d *dummyStoragePlugin) PutStream(string, io.Reader, map[string]any) (string, map[string]any, error) {
+	return "", nil, nil
+}
+
 func (d *dummyStoragePlugin) GetUrl([]string, map[string]any) ([]easyrest.StorageURL, error) {
 	return []easyrest.StorageURL{}, nil
 }
@@ -176,6 +182,10 @@ func (d *dummyStoragePlugin) GetMetadata(string, map[string]any) (easyrest.Stora
 
 func (d *dummyStoragePlugin) GetBin(string, map[string]any) ([]byte, string, map[string]any, error) {
 	return []byte{}, "", nil, nil
+}
+
+func (d *dummyStoragePlugin) GetStream(string, int64, map[string]any) (io.ReadCloser, string, map[string]any, error) {
+	return io.NopCloser(bytes.NewReader(nil)), "", nil, nil
 }
 
 func (d *dummyStoragePlugin) List(string, map[string]any) ([]easyrest.StorageEntry, error) {

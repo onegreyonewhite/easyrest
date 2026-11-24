@@ -29,8 +29,8 @@ type JWTAuthPlugin struct {
 }
 
 // Init initializes the JWTAuthPlugin.
-// If token_endpoint is provided, it generates an oauth2 security definition.
-// Otherwise, it generates an apiKey security definition.
+// If a token or authorization URL is set, it generates an OpenAPI 3 oauth2 scheme.
+// Otherwise, it generates an HTTP scheme for the configured token type.
 func (p *JWTAuthPlugin) Init(settings map[string]any, host easyrest.HostRPC) (easyrest.AuthInfo, error) {
 	p.host = host
 	schema, err := p.initSettings(settings)
@@ -53,54 +53,76 @@ func (p *JWTAuthPlugin) initSettings(settings map[string]any) (map[string]any, e
 	if _, ok := settings["token_endpoint"].(string); !ok {
 		settings["token_endpoint"] = os.Getenv("ER_TOKEN_AUTHURL")
 	}
-
-	// Check for OAuth2 configuration (non-OIDC)
-	if te, ok := settings["token_endpoint"].(string); ok && te != "" {
+	if te, ok := settings["token_endpoint"].(string); ok {
 		p.token_endpoint = te
-		if ae, okAE := settings["authorization_endpoint"].(string); okAE {
-			p.authorization_endpoint = ae
+	}
+	if ae, ok := settings["authorization_endpoint"].(string); ok {
+		p.authorization_endpoint = ae
+	}
+	if p.token_endpoint == "" && p.authorization_endpoint == "" {
+		return p.httpScheme(), nil
+	}
+	if f, ok := settings["flow"].(string); ok {
+		p.flow = openAPIOAuthFlow(f)
+	}
+	if p.flow == "" {
+		switch {
+		case p.authorization_endpoint != "" && p.token_endpoint != "":
+			p.flow = "authorizationCode"
+		case p.token_endpoint != "":
+			p.flow = "password"
+		default:
+			p.flow = "implicit"
 		}
-		if f, okF := settings["flow"].(string); okF {
-			p.flow = f
-		} else {
-			// Default flow based on provided endpoints
-			if p.authorization_endpoint != "" && p.token_endpoint != "" {
-				p.flow = "accessCode" // Typically authorization code flow
-			} else if p.token_endpoint != "" {
-				p.flow = "password" // Or client_credentials, default to password
-			} else {
-				// This case should ideally not be hit if token_endpoint is set, but as a fallback:
-				return p.getAPIKeySchema(), nil
-			}
-		}
+	}
+	return p.oauthScheme(), nil
+}
 
-		schema := map[string]any{
-			"type":   "oauth2",
-			"flow":   p.flow,
-			"scopes": map[string]string{
-				// Define scopes relevant to this JWT/OAuth2 setup if any
-				// "api:read": "Read access to the API",
-			},
-		}
-		if p.token_endpoint != "" {
-			schema["tokenUrl"] = p.token_endpoint
-		}
+func (p *JWTAuthPlugin) httpScheme() map[string]any {
+	scheme := strings.ToLower(p.token_type)
+	if scheme == "" {
+		scheme = "bearer"
+	}
+	out := map[string]any{
+		"type":   "http",
+		"scheme": scheme,
+	}
+	if scheme == "bearer" {
+		out["bearerFormat"] = "JWT"
+	}
+	return out
+}
+
+func (p *JWTAuthPlugin) oauthScheme() map[string]any {
+	flow := map[string]any{"scopes": map[string]string{}}
+	switch p.flow {
+	case "authorizationCode", "implicit":
 		if p.authorization_endpoint != "" {
-			schema["authorizationUrl"] = p.authorization_endpoint
+			flow["authorizationUrl"] = p.authorization_endpoint
 		}
-		return schema, nil
-
-	} else {
-		// Fallback to apiKey if no specific OAuth2 endpoints are provided
-		return p.getAPIKeySchema(), nil
+	}
+	switch p.flow {
+	case "authorizationCode", "password", "clientCredentials":
+		if p.token_endpoint != "" {
+			flow["tokenUrl"] = p.token_endpoint
+		}
+	}
+	return map[string]any{
+		"type":  "oauth2",
+		"flows": map[string]any{p.flow: flow},
 	}
 }
 
-func (p *JWTAuthPlugin) getAPIKeySchema() map[string]any {
-	return map[string]any{
-		"type": "apiKey",
-		"name": "Authorization",
-		"in":   "header",
+func openAPIOAuthFlow(flow string) string {
+	switch flow {
+	case "accessCode", "authorizationCode":
+		return "authorizationCode"
+	case "application", "client_credentials", "clientCredentials":
+		return "clientCredentials"
+	case "implicit", "password":
+		return flow
+	default:
+		return ""
 	}
 }
 
@@ -224,7 +246,7 @@ type OpenIDConfiguration struct {
 	// Add other fields as needed, e.g., jwks_uri, scopes_supported
 }
 
-// Init initializes the OIDCAuthPlugin, performs OIDC discovery, and returns an OAuth2 Swagger security definition.
+// Init initializes the OIDCAuthPlugin, performs OIDC discovery, and returns an OpenAPI 3 openIdConnect scheme.
 func (p *OIDCAuthPlugin) Init(settings map[string]any, host easyrest.HostRPC) (easyrest.AuthInfo, error) {
 	p.host = host
 	schema, err := p.initSettings(settings)
@@ -285,38 +307,13 @@ func (p *OIDCAuthPlugin) initSettings(settings map[string]any) (map[string]any, 
 		return nil, fmt.Errorf("userinfo_endpoint not found in OpenID configuration from %s (required for OIDCAuthPlugin)", p.open_id_connect_url)
 	}
 	if p.authorization_endpoint == "" {
-		// While userinfo_endpoint is key for Authenticate, authorization_endpoint is key for a common OIDC flow schema.
-		return nil, fmt.Errorf("authorization_endpoint not found in OpenID configuration from %s (required for OAuth2 schema)", p.open_id_connect_url)
+		return nil, fmt.Errorf("authorization_endpoint not found in OpenID configuration from %s", p.open_id_connect_url)
 	}
 
-	// Generate OAuth2 Swagger Security Definition
-	schema := map[string]any{
-		"type":             "oauth2",
-		"authorizationUrl": p.authorization_endpoint,
-		"scopes":           map[string]string{},
-	}
-
-	// Determine flow based on available endpoints and settings
-	flow := "implicit" // Default if only authorizationUrl
-	if p.token_endpoint != "" {
-		schema["tokenUrl"] = p.token_endpoint
-		flow = "accessCode" // Common default if both auth and token URLs are present
-	}
-	// Allow override from settings
-	if f, ok := settings["flow"].(string); ok && f != "" {
-		flow = f
-	}
-	schema["flow"] = flow
-
-	// Add ER_TOKEN_AUTHURL as a fallback for token_endpoint if not discovered and flow needs it
-	if p.token_endpoint == "" && (flow == "accessCode" || flow == "password" || flow == "clientCredentials") {
-		if erTokenURL := os.Getenv("ER_TOKEN_AUTHURL"); erTokenURL != "" {
-			p.token_endpoint = erTokenURL
-			schema["tokenUrl"] = p.token_endpoint
-		}
-	}
-
-	return schema, nil
+	return map[string]any{
+		"type":             "openIdConnect",
+		"openIdConnectUrl": p.open_id_connect_url,
+	}, nil
 }
 
 // Authenticate uses the userinfo_endpoint (discovered via OIDC) to validate the token.

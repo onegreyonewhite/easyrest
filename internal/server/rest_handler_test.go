@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -471,6 +472,46 @@ func TestRestHandler_StoragePutGetDelete(t *testing.T) {
 		if got.Code == http.StatusOK || !strings.Contains(got.Body.String(), tc.want) {
 			t.Fatalf("%s: status %d body %s", tc.query, got.Code, got.Body.String())
 		}
+	}
+}
+
+func TestRestHandler_StoragePutStream(t *testing.T) {
+	ref := memoryStorageRef(t)
+	ref.Name = "files"
+	useStoragePlugins(t, map[string]storagePluginRef{"files": ref})
+	t.Cleanup(func() { SetRestHandlers(nil) })
+	SetRestHandlers(map[string]Handler{
+		"useStream": func(call Call) (any, error) {
+			const path = "obj/data.bin"
+			rel, _, err := call.Plugins.StoragePutStream("files", path, strings.NewReader("hello"), nil)
+			if err != nil || rel != path {
+				return nil, err
+			}
+			rc, _, _, err := call.Plugins.StorageGetStream("files", path, 0, nil)
+			if err != nil {
+				return nil, err
+			}
+			body, err := io.ReadAll(rc)
+			rc.Close()
+			if err != nil || string(body) != "hello" {
+				return nil, err
+			}
+			return "ok", nil
+		},
+	})
+	cfg := restUsersConfig()
+	app := cfg.RestAPI["v1"]
+	ep := app.Endpoints["users"]
+	ep.Public = true
+	ep.Actions = map[string]config.RestAction{"list": {Handler: "useStream"}}
+	app.Endpoints["users"] = ep
+	cfg.RestAPI["v1"] = app
+
+	router := serveRest(t, cfg, map[string]easyrest.DBPlugin{"db": &restRecPlugin{}})
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/restapi/v1/users/", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "ok") {
+		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
 	}
 }
 

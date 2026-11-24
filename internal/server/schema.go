@@ -13,18 +13,14 @@ import (
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
 
-// SwaggerSpec represents the Swagger 2.0 specification structure.
-type SwaggerSpec struct {
-	Swagger             string         `json:"swagger"`
-	Info                SwaggerInfo    `json:"info"`
-	Host                string         `json:"host"`
-	BasePath            string         `json:"basePath"`
-	Schemes             []string       `json:"schemes"`
-	Consumes            []string       `json:"consumes"`
-	Produces            []string       `json:"produces"`
-	Definitions         map[string]any `json:"definitions"`
-	SecurityDefinitions map[string]any `json:"securityDefinitions"`
-	Paths               map[string]any `json:"paths"`
+// openAPISpec is the OpenAPI 3.0.3 document served at GET /api/{db}/.
+// Servers is filled per request from the cached document.
+type openAPISpec struct {
+	OpenAPI    string            `json:"openapi"`
+	Info       SwaggerInfo       `json:"info"`
+	Servers    []openAPIServer   `json:"servers,omitempty"`
+	Paths      map[string]any    `json:"paths"`
+	Components openAPIComponents `json:"components"`
 }
 
 type SwaggerInfo struct {
@@ -32,7 +28,16 @@ type SwaggerInfo struct {
 	Version string `json:"version"`
 }
 
-// PathItem represents a Swagger path item object.
+type openAPIServer struct {
+	URL string `json:"url"`
+}
+
+type openAPIComponents struct {
+	Schemas         map[string]any `json:"schemas"`
+	SecuritySchemes map[string]any `json:"securitySchemes"`
+}
+
+// PathItem represents one OpenAPI path item.
 type PathItem struct {
 	Get    *Operation `json:"get,omitempty"`
 	Post   *Operation `json:"post,omitempty"`
@@ -40,63 +45,64 @@ type PathItem struct {
 	Delete *Operation `json:"delete,omitempty"`
 }
 
-// Operation represents a Swagger operation object.
+// Operation represents one OpenAPI operation.
 type Operation struct {
-	Summary     string           `json:"summary"`
-	Description string           `json:"description"`
-	Parameters  []Parameter      `json:"parameters"`
-	Security    []map[string]any `json:"security"`
-	Responses   map[string]any   `json:"responses"`
+	Summary     string              `json:"summary"`
+	Description string              `json:"description"`
+	Parameters  []Parameter         `json:"parameters,omitempty"`
+	RequestBody *openAPIRequestBody `json:"requestBody,omitempty"`
+	Security    []map[string]any    `json:"security"`
+	Responses   map[string]any      `json:"responses"`
 }
 
-// Parameter represents a Swagger parameter object.
+type openAPIRequestBody struct {
+	Description string         `json:"description,omitempty"`
+	Required    bool           `json:"required,omitempty"`
+	Content     map[string]any `json:"content"`
+}
+
+// Parameter is an OpenAPI 3 query, header, or path parameter.
+// Explode is a pointer so false is written for comma-separated arrays.
 type Parameter struct {
-	Name             string `json:"name"`
-	In               string `json:"in"`
-	Description      string `json:"description"`
-	Required         bool   `json:"required"`
-	Type             string `json:"type,omitempty"`
-	Items            any    `json:"items,omitempty"`
-	Schema           any    `json:"schema,omitempty"`
-	CollectionFormat string `json:"collectionFormat,omitempty"`
+	Name        string `json:"name"`
+	In          string `json:"in"`
+	Description string `json:"description,omitempty"`
+	Required    bool   `json:"required,omitempty"`
+	Schema      any    `json:"schema,omitempty"`
+	Example     string `json:"example,omitempty"`
+	Style       string `json:"style,omitempty"`
+	Explode     *bool  `json:"explode,omitempty"`
 }
 
-// buildSwaggerSpec constructs a Swagger 2.0 specification based on table definitions and RPC definitions.
-// dbKey is the current database key.
-func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs, viewDefs, rpcDefs map[string]any) *SwaggerSpec {
+// buildSwaggerSpec constructs an OpenAPI 3.0.3 document for one database key.
+// The cached document has no servers. The caller stamps the request URL.
+func buildSwaggerSpec(dbKey string, tableDefs, viewDefs, rpcDefs map[string]any) *openAPISpec {
 	cfg := GetConfig()
 	pluginCfg, hasPluginCfg := cfg.PluginMap[dbKey]
 
-	// Merge tables and views into one definitions map.
 	mergedDefs := make(map[string]any)
 	maps.Copy(mergedDefs, tableDefs)
 	maps.Copy(mergedDefs, viewDefs)
 
-	// Remove restricted tables
 	if hasPluginCfg {
 		for k := range mergedDefs {
 			if slices.Contains(pluginCfg.Exclude.Table, k) {
 				delete(mergedDefs, k)
-				continue // Skip AllowList check if already excluded
+				continue
 			}
-			// Apply AllowList filter if defined and not empty
-			if len(pluginCfg.AllowList.Table) > 0 {
-				if !slices.Contains(pluginCfg.AllowList.Table, k) {
-					delete(mergedDefs, k)
-				}
+			if len(pluginCfg.AllowList.Table) > 0 && !slices.Contains(pluginCfg.AllowList.Table, k) {
+				delete(mergedDefs, k)
 			}
 		}
 	}
 
-	// Load AuthSecurityDefinitions
 	currentAuthSecDefs := *AuthSecurityDefinitions.Load()
-	swaggerSecurityDefinitions := make(map[string]any)
-
-	for k, v := range currentAuthSecDefs {
-		swaggerSecurityDefinitions[k] = v
+	schemeNames := make([]string, 0, len(currentAuthSecDefs))
+	for name := range currentAuthSecDefs {
+		schemeNames = append(schemeNames, name)
 	}
+	slices.Sort(schemeNames)
 
-	// Get public tables and funcs for this dbKey
 	var publicTables, publicFuncs []string
 	title := "EasyRest API"
 	if pluginCfg, ok := cfg.PluginMap[dbKey]; ok {
@@ -116,8 +122,6 @@ func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs, viewDefs, rpcDef
 		}
 		properties, _ := modelSchema["properties"].(map[string]any)
 		pathItem := &PathItem{}
-
-		// Determine if this table is public
 		isPublicTable := slices.Contains(publicTables, tableName)
 
 		getOp := buildGETEndpoint(tableName, properties)
@@ -125,15 +129,12 @@ func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs, viewDefs, rpcDef
 		pathItem.Get = getOp
 
 		if _, ok := tableDefs[tableName]; ok {
-			// Build additional endpoints (POST, PATCH, DELETE) only for tables.
 			postOp := buildPOSTEndpoint(tableName)
 			patchOp := buildPATCHEndpoint(tableName, properties)
 			deleteOp := buildDELETEEndpoint(tableName, properties)
-
 			postOp.Security = buildOperationSecurity(isPublicTable, currentAuthSecDefs)
 			patchOp.Security = buildOperationSecurity(isPublicTable, currentAuthSecDefs)
 			deleteOp.Security = buildOperationSecurity(isPublicTable, currentAuthSecDefs)
-
 			pathItem.Post = postOp
 			pathItem.Patch = patchOp
 			pathItem.Delete = deleteOp
@@ -141,24 +142,17 @@ func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs, viewDefs, rpcDef
 		paths["/"+tableName+"/"] = pathItem
 	}
 
-	// If RPC definitions exist, add them to the swaggerSpec.
-	// Patch updateSwaggerSpecWithRPC to support public funcs
 	for funcName, def := range rpcDefs {
 		arr, ok := def.([]any)
 		if !ok || len(arr) != 2 {
 			continue
 		}
-
-		// Check if function is restricted for this dbKey
 		if hasPluginCfg {
 			if slices.Contains(pluginCfg.Exclude.Func, funcName) {
 				continue
 			}
-			// Apply AllowList filter if defined and not empty
-			if len(pluginCfg.AllowList.Func) > 0 {
-				if !slices.Contains(pluginCfg.AllowList.Func, funcName) {
-					continue
-				}
+			if len(pluginCfg.AllowList.Func) > 0 && !slices.Contains(pluginCfg.AllowList.Func, funcName) {
+				continue
 			}
 		}
 		reqSchema := arr[0]
@@ -166,140 +160,127 @@ func buildSwaggerSpec(r *http.Request, dbKey string, tableDefs, viewDefs, rpcDef
 		path := "/rpc/" + funcName + "/"
 		isPublicFunc := slices.Contains(publicFuncs, funcName)
 		security := buildOperationSecurity(isPublicFunc, currentAuthSecDefs)
-		op := &Operation{
+		paths[path] = &PathItem{Post: &Operation{
 			Summary:     fmt.Sprintf("Call RPC function %s", funcName),
 			Description: fmt.Sprintf("Invoke the RPC function %s", funcName),
-			Parameters: []Parameter{
-				{
-					Name:        "body",
-					In:          "body",
-					Description: "RPC request payload",
-					Required:    true,
-					Schema:      reqSchema,
-				},
+			Parameters:  []Parameter{preferParameter()},
+			RequestBody: &openAPIRequestBody{
+				Description: "RPC request payload",
+				Required:    true,
+				Content:     openAPIContent(reqSchema, easyrest.MediaTypeJSON),
 			},
 			Responses: map[string]any{
-				"200": map[string]any{
-					"description": "RPC response",
-					"schema":      respSchema,
-				},
+				"200": withPreferenceApplied(openAPIResponse("RPC response", respSchema, easyrest.MediaTypeJSON, easyrest.MediaTypeNDJSON)),
 			},
 			Security: security,
-		}
-		paths[path] = &PathItem{Post: op}
+		}}
 	}
 
-	scheme, _ := requestPublic(r)["scheme"].(string)
-	swaggerDef := &SwaggerSpec{
-		Swagger: "2.0",
+	spec := &openAPISpec{
+		OpenAPI: "3.0.3",
 		Info: SwaggerInfo{
 			Title:   title,
 			Version: easyrest.Version,
 		},
-		Host:                r.Host,
-		BasePath:            "/api/" + dbKey,
-		Schemes:             []string{scheme},
-		Consumes:            []string{"application/json"},
-		Produces:            []string{"application/json", "application/x-ndjson"},
-		Definitions:         mergedDefs,
-		SecurityDefinitions: swaggerSecurityDefinitions,
-		Paths:               make(map[string]any),
+		Paths: make(map[string]any),
+		Components: openAPIComponents{
+			Schemas:         mergedDefs,
+			SecuritySchemes: openAPISecuritySchemes(currentAuthSecDefs, schemeNames),
+		},
 	}
 	for k, v := range paths {
-		swaggerDef.Paths[k] = v
+		spec.Paths[k] = v
 	}
-
-	return swaggerDef
+	return spec
 }
 
-// buildOperationSecurity constructs the Security array for Swagger operations.
+// buildOperationSecurity lists every loaded scheme, sorted by name.
+// A public table or function gets an empty security array.
 func buildOperationSecurity(isPublic bool, authSecurityDefinitions map[string]map[string]any) []map[string]any {
 	if isPublic {
-		return []map[string]any{} // No security for public resources
+		return []map[string]any{}
 	}
-
-	var securityRequirements []map[string]any
+	names := make([]string, 0, len(authSecurityDefinitions))
 	for key := range authSecurityDefinitions {
+		names = append(names, key)
+	}
+	slices.Sort(names)
+	securityRequirements := make([]map[string]any, 0, len(names))
+	for _, key := range names {
 		securityRequirements = append(securityRequirements, map[string]any{key: []string{}})
 	}
 	return securityRequirements
 }
 
-// buildGETEndpoint constructs a GET operation map with query parameters for the given name and property set.
-func buildGETEndpoint(name string, properties map[string]any) *Operation {
-	var fieldNames []string
-
-	for fieldName := range properties {
-		fieldNames = append(fieldNames, fieldName)
+func schemaFieldNames(properties map[string]any) []string {
+	names := make([]string, 0, len(properties))
+	for name := range properties {
+		names = append(names, name)
 	}
+	slices.Sort(names)
+	return names
+}
 
-	getParams := buildSchemaParams(fieldNames, properties, true)
-	return &Operation{
-		Summary:     fmt.Sprintf("Get %s", name),
-		Description: fmt.Sprintf("Retrieve rows from the %s", name),
-		Parameters:  getParams,
-		Responses: map[string]any{
-			"200": map[string]any{
-				"description": "Successful response",
-				"schema": map[string]any{
-					"type":  "array",
-					"items": map[string]any{"$ref": "#/definitions/" + name},
-				},
-			},
+func formArrayParam(name, description string, items map[string]any) Parameter {
+	explode := false
+	return Parameter{
+		Name:        name,
+		In:          "query",
+		Description: description,
+		Style:       "form",
+		Explode:     &explode,
+		Schema: map[string]any{
+			"type":  "array",
+			"items": items,
 		},
-		// Security will be set by the caller (buildSwaggerSpec)
 	}
 }
 
-// buildGETParams creates the common query parameters (select, ordering, limit, offset)
-// plus where-filters based on the field types.
-func buildSchemaParams(fieldNames []string, properties map[string]any, isGet bool) []Parameter {
+// buildGETEndpoint constructs a GET operation for one table or view.
+func buildGETEndpoint(name string, properties map[string]any) *Operation {
+	schema := map[string]any{
+		"type":  "array",
+		"items": map[string]any{"$ref": "#/components/schemas/" + name},
+	}
+	return &Operation{
+		Summary:     fmt.Sprintf("Get %s", name),
+		Description: fmt.Sprintf("Retrieve rows from the %s", name),
+		Parameters:  append(buildSchemaParams(properties, true), preferParameter()),
+		Responses: map[string]any{
+			"200": withPreferenceApplied(openAPIResponse("Successful response", schema, easyrest.MediaTypeJSON, easyrest.MediaTypeNDJSON)),
+		},
+	}
+}
+
+// buildSchemaParams creates select, ordering, limit, and offset for GET,
+// plus where-filters for every field. Field names are sorted once.
+func buildSchemaParams(properties map[string]any, isGet bool) []Parameter {
+	fieldNames := schemaFieldNames(properties)
 	var params []Parameter
 
 	if isGet {
-		orderingFieldNames := make([]string, 0)
+		orderingFieldNames := make([]string, 0, len(fieldNames)*2)
 		for _, fieldName := range fieldNames {
-			orderingFieldNames = append(orderingFieldNames, fieldName)
-			orderingFieldNames = append(orderingFieldNames, "-"+fieldName)
+			orderingFieldNames = append(orderingFieldNames, fieldName, "-"+fieldName)
 		}
-		// Basic query parameters: select, ordering, limit, offset.
-		params = append(params, []Parameter{
-			{
-				Name:             "select",
-				In:               "query",
-				Description:      "Comma-separated list of fields",
-				Type:             "array",
-				Items:            map[string]any{"type": "string", "enum": fieldNames},
-				Required:         false,
-				CollectionFormat: "csv",
-			},
-			{
-				Name:             "ordering",
-				In:               "query",
-				Description:      "Comma-separated ordering fields",
-				Type:             "array",
-				Items:            map[string]any{"type": "string", "enum": orderingFieldNames},
-				Required:         false,
-				CollectionFormat: "csv",
-			},
-			{
+		params = append(params,
+			formArrayParam("select", "Comma-separated list of fields", map[string]any{"type": "string", "enum": fieldNames}),
+			formArrayParam("ordering", "Comma-separated ordering fields", map[string]any{"type": "string", "enum": orderingFieldNames}),
+			Parameter{
 				Name:        "limit",
 				In:          "query",
 				Description: "Maximum number of records to return",
-				Type:        "integer",
-				Required:    false,
+				Schema:      map[string]any{"type": "integer"},
 			},
-			{
+			Parameter{
 				Name:        "offset",
 				In:          "query",
 				Description: "Number of records to skip",
-				Type:        "integer",
-				Required:    false,
+				Schema:      map[string]any{"type": "integer"},
 			},
-		}...)
+		)
 	}
 
-	// Build where filters for each field and operator.
 	for _, fieldName := range fieldNames {
 		prop, _ := properties[fieldName].(map[string]any)
 		paramType := "string"
@@ -307,117 +288,86 @@ func buildSchemaParams(fieldNames []string, properties map[string]any, isGet boo
 			paramType = propType
 		}
 		for op := range AllowedOps {
-			// For string fields, skip lt, lte, gt, gte.
-			if paramType == "string" {
-				if op == "lt" || op == "lte" || op == "gt" || op == "gte" {
-					continue
-				}
+			if paramType == "string" && (op == "lt" || op == "lte" || op == "gt" || op == "gte") {
+				continue
 			}
-			// For numeric fields, skip like and ilike.
-			if paramType == "integer" || paramType == "number" {
-				if op == "like" || op == "ilike" {
-					continue
-				}
+			if (paramType == "integer" || paramType == "number") && (op == "like" || op == "ilike") {
+				continue
 			}
 			param := Parameter{
 				Name:        fmt.Sprintf("where.%s.%s", op, fieldName),
 				Description: fmt.Sprintf("Filter for field '%s' with operator %s", fieldName, op),
 				In:          "query",
-				Type:        paramType,
-				Required:    false,
+				Schema:      map[string]any{"type": paramType},
 			}
 			if op == "in" {
-				param.CollectionFormat = "csv"
+				explode := false
+				param.Style = "form"
+				param.Explode = &explode
+				param.Schema = map[string]any{
+					"type":  "array",
+					"items": map[string]any{"type": paramType},
+				}
 			}
 			params = append(params, param)
 		}
 	}
-
 	return params
 }
 
-// buildPOSTEndpoint returns a POST operation map for the given table name.
 func buildPOSTEndpoint(name string) *Operation {
 	return &Operation{
 		Summary:     fmt.Sprintf("Create rows in %s", name),
 		Description: fmt.Sprintf("Insert new rows into %s", name),
-		Parameters: []Parameter{
-			{
-				Name:        "body",
-				In:          "body",
-				Description: fmt.Sprintf("Array of %s objects", name),
-				Required:    true,
-				Schema: map[string]any{
-					"type":  "array",
-					"items": map[string]any{"$ref": "#/definitions/" + name},
-				},
-			},
+		Parameters:  []Parameter{preferParameter()},
+		RequestBody: &openAPIRequestBody{
+			Description: fmt.Sprintf("Array of %s objects", name),
+			Required:    true,
+			Content: openAPIContent(map[string]any{
+				"type":  "array",
+				"items": map[string]any{"$ref": "#/components/schemas/" + name},
+			}, easyrest.MediaTypeJSON),
 		},
 		Responses: map[string]any{
-			"201": map[string]any{
-				"description": "Rows created",
-			},
+			"201": withPreferenceApplied(map[string]any{"description": "Rows created"}),
 		},
-		// Security will be set by the caller (buildSwaggerSpec)
 	}
 }
 
-// buildPATCHEndpoint returns a PATCH operation map for the given table name.
 func buildPATCHEndpoint(name string, properties map[string]any) *Operation {
-	var fieldNames []string
-
-	for fieldName := range properties {
-		fieldNames = append(fieldNames, fieldName)
+	updated := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"updated": map[string]any{"type": "integer"},
+		},
 	}
-	getParams := buildSchemaParams(fieldNames, properties, false)
 	return &Operation{
 		Summary:     fmt.Sprintf("Update rows in %s", name),
 		Description: fmt.Sprintf("Update existing rows in %s", name),
-		Parameters: append(getParams, Parameter{
-			Name:        "body",
-			In:          "body",
+		Parameters:  append(buildSchemaParams(properties, false), preferParameter()),
+		RequestBody: &openAPIRequestBody{
 			Description: fmt.Sprintf("Partial update of a %s object", name),
 			Required:    true,
-			Schema:      map[string]any{"$ref": "#/definitions/" + name},
-		}),
-		Responses: map[string]any{
-			"200": map[string]any{
-				"description": "Rows updated",
-				"schema": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"updated": map[string]any{"type": "integer"},
-					},
-				},
-			},
+			Content:     openAPIContent(map[string]any{"$ref": "#/components/schemas/" + name}, easyrest.MediaTypeJSON),
 		},
-		// Security will be set by the caller (buildSwaggerSpec)
+		Responses: map[string]any{
+			"200": withPreferenceApplied(openAPIResponse("Rows updated", updated, easyrest.MediaTypeJSON, easyrest.MediaTypeNDJSON)),
+		},
 	}
 }
 
-// buildDELETEEndpoint returns a DELETE operation map for the given table name.
 func buildDELETEEndpoint(name string, properties map[string]any) *Operation {
-	var fieldNames []string
-
-	for fieldName := range properties {
-		fieldNames = append(fieldNames, fieldName)
-	}
-	getParams := buildSchemaParams(fieldNames, properties, false)
-
 	return &Operation{
 		Summary:     fmt.Sprintf("Delete rows from %s", name),
 		Description: fmt.Sprintf("Delete rows from %s", name),
-		Parameters:  getParams,
+		Parameters:  append(buildSchemaParams(properties, false), preferParameter()),
 		Responses: map[string]any{
-			"204": map[string]any{
-				"description": "Rows deleted",
-			},
+			"204": withPreferenceApplied(map[string]any{"description": "Rows deleted"}),
 		},
-		// Security will be set by the caller (buildSwaggerSpec)
 	}
 }
 
-// schemaHandler now builds and returns a full swagger 2.0 spec.
+// schemaHandler returns the OpenAPI 3.0.3 document for one database.
 func schemaHandler(w http.ResponseWriter, r *http.Request) {
 	dbKey := strings.ToLower(chi.URLParam(r, "db"))
 	if denyInternalDB(w, r, dbKey) {
@@ -446,7 +396,7 @@ func ensureSwaggerSpec(w http.ResponseWriter, r *http.Request, dbKey string) (an
 	swaggerSpec, ok := schemaCache[dbKey]
 	schemaCacheMutex.RUnlock()
 	if ok {
-		return swaggerSpec, nil, false, true
+		return stampedOpenAPI(swaggerSpec, r, dbKey), nil, false, true
 	}
 
 	dbPlug, ok := loadDBPlugin(w, dbKey)
@@ -493,9 +443,21 @@ func ensureSwaggerSpec(w http.ResponseWriter, r *http.Request, dbKey string) (an
 	if cached, found := schemaCache[dbKey]; found {
 		swaggerSpec = cached
 	} else {
-		swaggerSpec = buildSwaggerSpec(r, dbKey, tableDefs, viewDefs, rpcDefs)
+		swaggerSpec = buildSwaggerSpec(dbKey, tableDefs, viewDefs, rpcDefs)
 		schemaCache[dbKey] = swaggerSpec
 	}
 	schemaCacheMutex.Unlock()
-	return swaggerSpec, pluginCtx, true, true
+	return stampedOpenAPI(swaggerSpec, r, dbKey), pluginCtx, true, true
+}
+
+func stampedOpenAPI(spec any, r *http.Request, dbKey string) any {
+	doc, ok := spec.(*openAPISpec)
+	if !ok || doc == nil {
+		return spec
+	}
+	out := *doc
+	out.Servers = []openAPIServer{{
+		URL: easyrest.BuildAbsoluteUri(BuildPluginContext(r), "/api/"+dbKey),
+	}}
+	return &out
 }

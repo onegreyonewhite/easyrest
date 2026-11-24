@@ -44,7 +44,20 @@ func createUnsignedToken(header, payload string) string {
 }
 
 func TestJWTAuthPlugin_Init(t *testing.T) {
-	t.Run("APIKey Flow (default)", func(t *testing.T) {
+	t.Run("HTTP bearer by default", func(t *testing.T) {
+		plugin := &JWTAuthPlugin{}
+		info, err := plugin.Init(map[string]any{"jwt_secret": "mysecret"}, easyrest.HostRPC{})
+		schema := info.Schema
+		require.NoError(t, err)
+		require.NotNil(t, schema)
+		assert.Equal(t, "mysecret", plugin.jwt_secret)
+		assert.Equal(t, "Bearer", plugin.token_type)
+		assert.Equal(t, "http", schema["type"])
+		assert.Equal(t, "bearer", schema["scheme"])
+		assert.Equal(t, "JWT", schema["bearerFormat"])
+	})
+
+	t.Run("HTTP scheme from token_type", func(t *testing.T) {
 		plugin := &JWTAuthPlugin{}
 		settings := map[string]any{
 			"jwt_secret": "mysecret",
@@ -56,10 +69,9 @@ func TestJWTAuthPlugin_Init(t *testing.T) {
 		require.NotNil(t, schema)
 		assert.Equal(t, "mysecret", plugin.jwt_secret)
 		assert.Equal(t, "CustomAuth", plugin.token_type)
-
-		assert.Equal(t, "apiKey", schema["type"])
-		assert.Equal(t, "Authorization", schema["name"])
-		assert.Equal(t, "header", schema["in"])
+		assert.Equal(t, "http", schema["type"])
+		assert.Equal(t, "customauth", schema["scheme"])
+		assert.Nil(t, schema["bearerFormat"])
 	})
 
 	t.Run("OAuth2 Flow with token_endpoint", func(t *testing.T) {
@@ -77,12 +89,14 @@ func TestJWTAuthPlugin_Init(t *testing.T) {
 		assert.Equal(t, "password", plugin.flow)
 
 		assert.Equal(t, "oauth2", schema["type"])
-		assert.Equal(t, "password", schema["flow"])
-		assert.Equal(t, "http://localhost/token", schema["tokenUrl"])
-		assert.Nil(t, schema["authorizationUrl"]) // Should not be set if not provided
+		assert.Nil(t, schema["flow"])
+		flows, _ := schema["flows"].(map[string]any)
+		password, _ := flows["password"].(map[string]any)
+		assert.Equal(t, "http://localhost/token", password["tokenUrl"])
+		assert.Nil(t, password["authorizationUrl"])
 	})
 
-	t.Run("OAuth2 Flow with token_endpoint and authorization_endpoint (default to accessCode)", func(t *testing.T) {
+	t.Run("OAuth2 Flow with token_endpoint and authorization_endpoint (default to authorizationCode)", func(t *testing.T) {
 		plugin := &JWTAuthPlugin{}
 		settings := map[string]any{
 			"token_endpoint":         "http://localhost/token",
@@ -95,26 +109,30 @@ func TestJWTAuthPlugin_Init(t *testing.T) {
 		require.NotNil(t, schema)
 		assert.Equal(t, "http://localhost/token", plugin.token_endpoint)
 		assert.Equal(t, "http://localhost/auth", plugin.authorization_endpoint)
-		assert.Equal(t, "accessCode", plugin.flow)
+		assert.Equal(t, "authorizationCode", plugin.flow)
 
 		assert.Equal(t, "oauth2", schema["type"])
-		assert.Equal(t, "accessCode", schema["flow"])
-		assert.Equal(t, "http://localhost/token", schema["tokenUrl"])
-		assert.Equal(t, "http://localhost/auth", schema["authorizationUrl"])
+		assert.Nil(t, schema["flow"])
+		flows, _ := schema["flows"].(map[string]any)
+		code, _ := flows["authorizationCode"].(map[string]any)
+		assert.Equal(t, "http://localhost/token", code["tokenUrl"])
+		assert.Equal(t, "http://localhost/auth", code["authorizationUrl"])
 	})
 
-	t.Run("OAuth2 Flow with only authorization_endpoint (should fallback to apiKey)", func(t *testing.T) {
-		// This scenario is a bit odd for OAuth2, usually tokenUrl is key for server-side flows.
-		// Current JWTAuthPlugin.Init logic falls back to apiKey if token_endpoint is missing for an oauth2 setup.
+	t.Run("OAuth2 Flow with only authorization_endpoint", func(t *testing.T) {
 		plugin := &JWTAuthPlugin{}
 		settings := map[string]any{
-			"authorization_endpoint": "http://localhost/auth", // No token_endpoint
-			"flow":                   "implicit",              // User might try to force implicit
+			"authorization_endpoint": "http://localhost/auth",
+			"flow":                   "implicit",
 		}
 		info, err := plugin.Init(settings, easyrest.HostRPC{})
 		schema := info.Schema
 		require.NoError(t, err)
-		assert.Equal(t, "apiKey", schema["type"]) // Fallback because token_endpoint is primary trigger for oauth2 in JWTAuthPlugin
+		assert.Equal(t, "implicit", plugin.flow)
+		flows, _ := schema["flows"].(map[string]any)
+		implicit, _ := flows["implicit"].(map[string]any)
+		assert.Equal(t, "http://localhost/auth", implicit["authorizationUrl"])
+		assert.Nil(t, implicit["tokenUrl"])
 	})
 }
 
@@ -161,14 +179,14 @@ func TestOIDCAuthPlugin_Init(t *testing.T) {
 		assert.Equal(t, discoveryDoc.TokenEndpoint, plugin.token_endpoint)
 		assert.Equal(t, discoveryDoc.AuthorizationEndpoint, plugin.authorization_endpoint)
 
-		assert.Equal(t, "oauth2", schema["type"])
-		assert.Equal(t, "accessCode", schema["flow"])
-		assert.Equal(t, discoveryDoc.AuthorizationEndpoint, schema["authorizationUrl"])
-		assert.Equal(t, discoveryDoc.TokenEndpoint, schema["tokenUrl"])
-		assert.NotNil(t, schema["scopes"])
+		assert.Equal(t, "openIdConnect", schema["type"])
+		assert.Equal(t, oidcURL, schema["openIdConnectUrl"])
+		assert.Nil(t, schema["flow"])
+		assert.Nil(t, schema["authorizationUrl"])
+		assert.Nil(t, schema["tokenUrl"])
 	})
 
-	t.Run("Successful discovery - default flow (implicit if only auth_url)", func(t *testing.T) {
+	t.Run("Successful discovery without a token endpoint", func(t *testing.T) {
 		discoveryDoc := OpenIDConfiguration{
 			UserinfoEndpoint:      "http://localhost/userinfo_implicit",
 			AuthorizationEndpoint: "http://localhost/auth_implicit", // No TokenEndpoint
@@ -182,9 +200,10 @@ func TestOIDCAuthPlugin_Init(t *testing.T) {
 		info, err := plugin.Init(settings, easyrest.HostRPC{})
 		schema := info.Schema
 		require.NoError(t, err)
-		assert.Equal(t, "implicit", schema["flow"])
-		assert.Equal(t, discoveryDoc.AuthorizationEndpoint, schema["authorizationUrl"])
-		assert.Nil(t, schema["tokenUrl"])
+		assert.Equal(t, "openIdConnect", schema["type"])
+		assert.Equal(t, oidcURL, schema["openIdConnectUrl"])
+		assert.Equal(t, discoveryDoc.AuthorizationEndpoint, plugin.authorization_endpoint)
+		assert.Empty(t, plugin.token_endpoint)
 	})
 
 	t.Run("Successful discovery - with ER_TOKEN_AUTHURL fallback", func(t *testing.T) {
@@ -203,14 +222,14 @@ func TestOIDCAuthPlugin_Init(t *testing.T) {
 		t.Cleanup(func() { os.Unsetenv("ER_TOKEN_AUTHURL") })
 
 		plugin := &OIDCAuthPlugin{}
-		// Explicitly ask for a flow that needs tokenUrl to trigger fallback logic
 		settings := map[string]any{"open_id_connect_url": oidcURL, "flow": "accessCode"}
 		info, err := plugin.Init(settings, easyrest.HostRPC{})
 		schema := info.Schema
 		require.NoError(t, err)
-		assert.Equal(t, "accessCode", schema["flow"])
-		assert.Equal(t, testTokenURL, schema["tokenUrl"])
-		assert.Equal(t, testTokenURL, plugin.token_endpoint) // Check if plugin field also updated
+		assert.Equal(t, "openIdConnect", schema["type"])
+		assert.Equal(t, oidcURL, schema["openIdConnectUrl"])
+		assert.Empty(t, plugin.token_endpoint)
+		assert.Nil(t, schema["tokenUrl"])
 	})
 
 	t.Run("Discovery HTTP error", func(t *testing.T) {

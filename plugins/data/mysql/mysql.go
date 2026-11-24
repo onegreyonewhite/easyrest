@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -48,7 +49,18 @@ type mysqlPlugin struct {
 	db             *sql.DB
 	routines       map[string]RoutineInfo
 	defaultTimeout time.Duration
+	sessionMu      sync.Mutex
+	sessions       *easyrest.SharedTx[*mysqlShared]
 }
+
+type mysqlShared struct {
+	conn     *sql.Conn
+	tx       *sql.Tx
+	cancel   context.CancelFunc
+	prepared bool
+}
+
+var _ easyrest.DBTransactor = (*mysqlPlugin)(nil)
 
 // injectContext sets request/erctx session variables from ctx.
 // SkipDBSessionKey omits response.*, cache.*, hook names, and keys that start with "_".
@@ -468,6 +480,13 @@ func (m *mysqlPlugin) InitConnection(uri string) error {
 
 // Close shuts down the MySQL connection pool.
 func (m *mysqlPlugin) Close() {
+	m.sessionMu.Lock()
+	sessions := m.sessions
+	m.sessions = nil
+	m.sessionMu.Unlock()
+	if sessions != nil {
+		sessions.Close()
+	}
 	if m.db != nil {
 		m.db.Close()
 		m.db = nil
@@ -754,6 +773,24 @@ func (m *mysqlPlugin) CallFunction(userID, funcName string, data map[string]any,
 
 // handleTransaction manages the transaction lifecycle including context injection and conditional commit/rollback.
 func (m *mysqlPlugin) handleTransaction(ctxMap map[string]any, operation func(tx *sql.Tx) (any, error)) (any, map[string]any, error) {
+	if id, ok := easyrest.SharedTxID(ctxMap); ok {
+		var result any
+		err := m.txSessions().Use(id, func(h *mysqlShared) error {
+			if err := m.injectContext(h.conn, ctxMap); err != nil {
+				return fmt.Errorf("failed to inject context: %w", err)
+			}
+			if !h.prepared {
+				if err := runContextRoutine(h.tx, ctxMap, easyrest.CtxDBPreRequest); err != nil {
+					return err
+				}
+				h.prepared = true
+			}
+			var opErr error
+			result, opErr = operation(h.tx)
+			return opErr
+		})
+		return result, nil, err
+	}
 	conn, err := m.db.Conn(context.Background())
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get connection: %w", err)
@@ -1344,6 +1381,109 @@ func (p *mysqlCachePlugin) Delete(key string) error {
 		return fmt.Errorf("failed to delete cache entry: %w", err)
 	}
 	return nil
+}
+
+func (m *mysqlPlugin) txSessions() *easyrest.SharedTx[*mysqlShared] {
+	m.sessionMu.Lock()
+	defer m.sessionMu.Unlock()
+	if m.sessions == nil {
+		m.sessions = easyrest.NewSharedTx[*mysqlShared](16, time.Second)
+	}
+	return m.sessions
+}
+
+func (m *mysqlPlugin) openSessions() *easyrest.SharedTx[*mysqlShared] {
+	m.sessionMu.Lock()
+	defer m.sessionMu.Unlock()
+	return m.sessions
+}
+
+func (h *mysqlShared) finish(commit bool) error {
+	var err error
+	if commit {
+		err = h.tx.Commit()
+	} else {
+		err = h.tx.Rollback()
+		if errors.Is(err, sql.ErrTxDone) {
+			err = nil
+		}
+	}
+	if h.cancel != nil {
+		h.cancel()
+	}
+	if h.conn != nil {
+		if cerr := h.conn.Close(); err == nil {
+			err = cerr
+		}
+	}
+	return err
+}
+
+// BeginTx starts a transaction that later calls join via ctx _tx.
+func (m *mysqlPlugin) BeginTx(ctx map[string]any) (string, map[string]any, error) {
+	if m.db == nil {
+		return "", nil, errors.New("mysql connection is not open")
+	}
+	deadline := easyrest.SharedTxDeadline(ctx, time.Now())
+	conn, err := m.db.Conn(context.Background())
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to get connection: %w", err)
+	}
+	txCtx, cancel := context.WithDeadline(context.Background(), deadline)
+	tx, err := conn.BeginTx(txCtx, nil)
+	if err != nil {
+		cancel()
+		conn.Close()
+		return "", nil, fmt.Errorf("failed to begin tx: %w", err)
+	}
+	handle := &mysqlShared{conn: conn, tx: tx, cancel: cancel}
+	id, err := m.txSessions().Put(handle, deadline, func(h *mysqlShared) {
+		_ = h.finish(false)
+	})
+	if err != nil {
+		_ = handle.finish(false)
+		return "", nil, err
+	}
+	return id, nil, nil
+}
+
+// CommitTx runs the post-request hook, harvests session settings, and commits.
+func (m *mysqlPlugin) CommitTx(id string, ctx map[string]any) (map[string]any, error) {
+	sessions := m.openSessions()
+	if sessions == nil {
+		return nil, easyrest.ErrSharedTxNotFound
+	}
+	var out map[string]any
+	err := sessions.Commit(id, func(h *mysqlShared) error {
+		if err := runContextRoutine(h.tx, ctx, easyrest.CtxDBPostRequest); err != nil {
+			return err
+		}
+		harvested, settings, err := mergeHarvestedContext(h.tx, ctx)
+		if err != nil {
+			return err
+		}
+		out = harvested
+		if err := h.tx.Commit(); err != nil {
+			return fmt.Errorf("failed to commit transaction: %w", err)
+		}
+		if err := clearResponseSettings(h.conn, settings); err != nil {
+			return err
+		}
+		h.cancel()
+		return h.conn.Close()
+	})
+	return out, err
+}
+
+// RollbackTx rolls back the shared transaction. An unknown id returns nil.
+func (m *mysqlPlugin) RollbackTx(id string) error {
+	sessions := m.openSessions()
+	if sessions == nil {
+		return nil
+	}
+	return sessions.Rollback(id, func(h *mysqlShared) error {
+		return h.finish(false)
+	})
 }
 
 func NewMysqlPlugin() *mysqlPlugin {

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 
@@ -144,20 +145,24 @@ func TestSwaggerSchema(t *testing.T) {
 		t.Fatalf("Failed to unmarshal swagger spec: %v", err)
 	}
 	// Check for the presence of the main keys.
-	requiredKeys := []string{"swagger", "info", "host", "basePath", "consumes", "produces", "definitions", "paths", "securityDefinitions"}
+	requiredKeys := []string{"openapi", "info", "servers", "paths", "components"}
 	for _, key := range requiredKeys {
 		if _, ok := swaggerSpec[key]; !ok {
-			t.Errorf("Swagger spec missing key: %s", key)
+			t.Errorf("OpenAPI spec missing key: %s", key)
 		}
 	}
-	// Check that definitions contains the "test" model.
-	definitions, ok := swaggerSpec["definitions"].(map[string]any)
-	if !ok {
-		t.Fatalf("definitions is not a map")
+	if swaggerSpec["openapi"] != "3.0.3" {
+		t.Fatalf("openapi %#v", swaggerSpec["openapi"])
 	}
+	info, _ := swaggerSpec["info"].(map[string]any)
+	if info["version"] != easyrest.Version {
+		t.Fatalf("info %#v", info)
+	}
+	definitions := componentSchemas(t, swaggerSpec)
 	if _, ok := definitions["test"]; !ok {
-		t.Errorf("Expected definitions to contain 'test'")
+		t.Errorf("Expected components.schemas to contain 'test'")
 	}
+	assertOpenAPITestPaths(t, swaggerSpec)
 	// Check that paths contains the "/test/" path.
 	paths, ok := swaggerSpec["paths"].(map[string]any)
 	if !ok {
@@ -166,17 +171,19 @@ func TestSwaggerSchema(t *testing.T) {
 	if _, ok := paths["/test/"]; !ok {
 		t.Errorf("Expected paths to contain '/test/'")
 	}
-	// Check that securityDefinitions contains oauth2 with the expected tokenUrl.
-	secDefs, ok := swaggerSpec["securityDefinitions"].(map[string]any)
+	components, _ := swaggerSpec["components"].(map[string]any)
+	secDefs, ok := components["securitySchemes"].(map[string]any)
 	if !ok {
-		t.Fatalf("securityDefinitions is not a map")
+		t.Fatalf("securitySchemes is not a map")
 	}
 	oauth2, ok := secDefs["jwt"].(map[string]any)
 	if !ok {
-		t.Fatalf("securityDefinitions missing 'oauth2'")
+		t.Fatalf("securitySchemes missing 'jwt'")
 	}
-	if tokenUrl, ok := oauth2["tokenUrl"].(string); !ok || tokenUrl != "http://auth.example.com/token" {
-		t.Errorf("Expected oauth2.tokenUrl to be 'http://auth.example.com/token', got '%v'", oauth2["tokenUrl"])
+	flows, _ := oauth2["flows"].(map[string]any)
+	password, _ := flows["password"].(map[string]any)
+	if tokenUrl, ok := password["tokenUrl"].(string); !ok || tokenUrl != "http://auth.example.com/token" {
+		t.Errorf("Expected flows.password.tokenUrl to be 'http://auth.example.com/token', got '%v'", password["tokenUrl"])
 	}
 	// Verify that the GET operation for the /test/ path includes the required query parameters: select, limit, offset.
 	getOp, ok := paths["/test/"].(map[string]any)["get"].(map[string]any)
@@ -228,6 +235,13 @@ func TestSwaggerSchema(t *testing.T) {
 				if ok {
 					if name, ok := param["name"].(string); ok && name == paramName {
 						found = true
+						if paramName == "where.in.id" {
+							schema, _ := param["schema"].(map[string]any)
+							items, _ := schema["items"].(map[string]any)
+							if schema["type"] != "array" || items["type"] != "integer" || param["style"] != "form" || param["explode"] != false {
+								t.Errorf("where.in.id %#v", param)
+							}
+						}
 						break
 					}
 				}
@@ -276,11 +290,7 @@ func TestSwaggerSchemaWithRPC(t *testing.T) {
 		t.Fatalf("Failed to unmarshal swagger spec: %v", err)
 	}
 
-	// Check that definitions contain both "myTable" and "myView".
-	definitions, ok := swaggerSpec["definitions"].(map[string]any)
-	if !ok {
-		t.Fatalf("definitions is not a map")
-	}
+	definitions := componentSchemas(t, swaggerSpec)
 	if _, ok := definitions["myTable"]; !ok {
 		t.Errorf("Expected definitions to contain 'myTable'")
 	}
@@ -385,10 +395,7 @@ func TestSwaggerSchemaWithAllowList(t *testing.T) {
 		t.Fatalf("Failed to unmarshal swagger spec: %v", err)
 	}
 
-	definitions, ok := swaggerSpec["definitions"].(map[string]any)
-	if !ok {
-		t.Fatalf("definitions is not a map")
-	}
+	definitions := componentSchemas(t, swaggerSpec)
 	paths, ok := swaggerSpec["paths"].(map[string]any)
 	if !ok {
 		t.Fatalf("paths is not a map")
@@ -469,19 +476,125 @@ func TestSchemaCacheHit(t *testing.T) {
 	router := server.SetupRouter()
 	server.DbPlugins.Store(&map[string]easyrest.DBPlugin{"mock": plugin})
 
-	for i := 0; i < 3; i++ {
+	hosts := []string{"a.example", "b.example", "a.example"}
+	var firstURL, secondURL, firstPaths, secondPaths string
+	for i, host := range hosts {
 		req, err := http.NewRequest("GET", "/api/mock/", nil)
 		if err != nil {
 			t.Fatalf("Failed to create request: %v", err)
 		}
+		req.Host = host
 		rr := httptest.NewRecorder()
 		router.ServeHTTP(rr, req)
 		if rr.Code != http.StatusOK {
 			t.Fatalf("request %d: expected status 200, got %d body=%s", i, rr.Code, rr.Body.String())
 		}
+		if i > 1 {
+			continue
+		}
+		var spec map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &spec); err != nil {
+			t.Fatal(err)
+		}
+		servers, _ := spec["servers"].([]any)
+		first, _ := servers[0].(map[string]any)
+		url, _ := first["url"].(string)
+		rawPaths, err := json.Marshal(spec["paths"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			firstURL = url
+			firstPaths = string(rawPaths)
+		} else {
+			secondURL = url
+			secondPaths = string(rawPaths)
+		}
+	}
+	if firstURL != "http://a.example/api/mock" || secondURL != "http://b.example/api/mock" {
+		t.Fatalf("servers %q %q", firstURL, secondURL)
+	}
+	if firstPaths != secondPaths {
+		t.Fatalf("paths differ")
 	}
 
 	if got := plugin.schemaCalls(); got != 1 {
 		t.Fatalf("expected GetSchema to run once, got %d", got)
+	}
+}
+
+func componentSchemas(t *testing.T, spec map[string]any) map[string]any {
+	t.Helper()
+	components, _ := spec["components"].(map[string]any)
+	schemas, _ := components["schemas"].(map[string]any)
+	if schemas == nil {
+		t.Fatalf("components.schemas %#v", spec["components"])
+	}
+	return schemas
+}
+
+func assertOpenAPITestPaths(t *testing.T, spec map[string]any) {
+	t.Helper()
+	paths, _ := spec["paths"].(map[string]any)
+	item, _ := paths["/test/"].(map[string]any)
+	getOp, _ := item["get"].(map[string]any)
+	responses, _ := getOp["responses"].(map[string]any)
+	ok, _ := responses["200"].(map[string]any)
+	content, _ := ok["content"].(map[string]any)
+	jsonBody, _ := content["application/json"].(map[string]any)
+	ndjsonBody, _ := content["application/x-ndjson"].(map[string]any)
+	jsonSchema, _ := jsonBody["schema"].(map[string]any)
+	ndjsonSchema, _ := ndjsonBody["schema"].(map[string]any)
+	items, _ := jsonSchema["items"].(map[string]any)
+	ndjsonItems, _ := ndjsonSchema["items"].(map[string]any)
+	if items["$ref"] != "#/components/schemas/test" || ndjsonItems["$ref"] != "#/components/schemas/test" {
+		t.Fatalf("get content %#v", content)
+	}
+	getParams, _ := getOp["parameters"].([]any)
+	assertPreferParameter(t, getParams, true)
+	applied, _ := ok["headers"].(map[string]any)["Preference-Applied"].(map[string]any)
+	if applied["description"] == nil {
+		t.Fatalf("GET Preference-Applied %#v", ok["headers"])
+	}
+	post, _ := item["post"].(map[string]any)
+	postParams, _ := post["parameters"].([]any)
+	assertPreferParameter(t, postParams, false)
+	body, _ := post["requestBody"].(map[string]any)
+	bodyContent, _ := body["content"].(map[string]any)
+	if _, ok := bodyContent["application/x-ndjson"]; ok {
+		t.Fatalf("post body %#v", bodyContent)
+	}
+	jsonBody, _ = bodyContent["application/json"].(map[string]any)
+	bodySchema, _ := jsonBody["schema"].(map[string]any)
+	bodyItems, _ := bodySchema["items"].(map[string]any)
+	if bodySchema["type"] != "array" || bodyItems["$ref"] != "#/components/schemas/test" {
+		t.Fatalf("post schema %#v", bodySchema)
+	}
+	created, _ := post["responses"].(map[string]any)["201"].(map[string]any)
+	createdHeaders, _ := created["headers"].(map[string]any)
+	if created["description"] == nil || created["content"] != nil || createdHeaders["Preference-Applied"] == nil {
+		t.Fatalf("post 201 %#v", created)
+	}
+}
+
+func assertPreferParameter(t *testing.T, params []any, allowQuery bool) {
+	t.Helper()
+	found := false
+	for _, raw := range params {
+		param, _ := raw.(map[string]any)
+		if param["name"] == "Prefer" && param["in"] == "header" {
+			found = true
+			desc, _ := param["description"].(string)
+			if !strings.Contains(desc, "count=exact") {
+				t.Fatalf("Prefer description %q", desc)
+			}
+			continue
+		}
+		if !allowQuery && param["in"] == "query" {
+			t.Fatalf("unexpected query parameter %#v", param)
+		}
+	}
+	if !found {
+		t.Fatalf("missing Prefer in %#v", params)
 	}
 }

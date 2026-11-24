@@ -4,11 +4,16 @@
 package embed
 
 import (
+	"context"
+	"errors"
 	"net/http"
+	"os/signal"
+	"syscall"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/onegreyonewhite/easyrest/internal/server"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
+	"golang.org/x/sync/errgroup"
 )
 
 type (
@@ -24,6 +29,10 @@ type (
 	// PluginCaller is the in-process internal RPC available to a rest handler.
 	PluginCaller = server.PluginCaller
 )
+
+// Service runs until ctx is canceled or it fails.
+// Return nil after ctx is done. Return a non-nil error to stop the process.
+type Service func(ctx context.Context) error
 
 // ErrCacheMiss is a cache store miss.
 var ErrCacheMiss = easyrest.ErrCacheMiss
@@ -41,6 +50,8 @@ type settings struct {
 	middleware map[string]func() easyrest.MiddlewarePlugin
 	content    map[string]func() easyrest.ContentPlugin
 	storage    map[string]func() easyrest.StoragePlugin
+	services   []Service
+	specHooks  []func(name string, doc map[string]any) error
 }
 
 // WithRoutes adds routes after the built-in routes on every router build,
@@ -133,32 +144,86 @@ func WithRestHandler(name string, handler RestHandler) Option {
 	}
 }
 
+// WithRestSpec edits one rest OpenAPI document before it is stored.
+// name is the application.api key. doc is that API's document.
+// Finish every edit before returning. A nested map kept after return
+// can still change the stored document, because a successful hook stores this copy.
+// Hooks run in registration order. A later Handler call without this option clears them.
+func WithRestSpec(hook func(name string, doc map[string]any) error) Option {
+	return func(s *settings) {
+		if hook != nil {
+			s.specHooks = append(s.specHooks, hook)
+		}
+	}
+}
+
+// WithService registers a background task that runs beside the HTTP server.
+// SIGHUP reload applies only to the HTTP server, not to sibling services.
+func WithService(run Service) Option {
+	return func(s *settings) {
+		if run != nil {
+			s.services = append(s.services, run)
+		}
+	}
+}
+
 // Handler loads config and returns the HTTP handler Run would serve.
 // A later call rebuilds the router and keeps routes from WithRoutes.
 func Handler(overlay string, files []string, opts ...Option) (http.Handler, error) {
-	if err := configure(overlay, files, opts...); err != nil {
+	cfg := applyOptions(opts...)
+	if err := install(cfg, overlay, files); err != nil {
 		return nil, err
 	}
-	return server.LiveHandler(), nil
+	handler, err := server.LiveHandler()
+	if err != nil {
+		return nil, err
+	}
+	return handler, nil
+}
+
+// Serve loads config and runs the HTTP server and every WithService task
+// until ctx is canceled. Context cancellation is a clean stop and returns nil.
+func Serve(ctx context.Context, overlay string, files []string, opts ...Option) error {
+	cfg := applyOptions(opts...)
+	if err := install(cfg, overlay, files); err != nil {
+		return err
+	}
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		return server.Serve(gctx)
+	})
+	for _, svc := range cfg.services {
+		svc := svc
+		g.Go(func() error {
+			return svc(gctx)
+		})
+	}
+	err := g.Wait()
+	if err == nil || errors.Is(err, context.Canceled) {
+		return nil
+	}
+	return err
 }
 
 // Run loads config and serves it until SIGINT or SIGTERM.
-// SIGHUP reloads the same files and overlay and rebuilds routes.
+// SIGHUP reloads the same files and overlay and rebuilds routes on the HTTP server.
 func Run(overlay string, files []string, opts ...Option) error {
-	if err := configure(overlay, files, opts...); err != nil {
-		return err
-	}
-	server.Run()
-	return nil
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return Serve(ctx, overlay, files, opts...)
 }
 
-func configure(overlay string, files []string, opts ...Option) error {
+func applyOptions(opts ...Option) settings {
 	var cfg settings
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&cfg)
 		}
 	}
+	return cfg
+}
+
+func install(cfg settings, overlay string, files []string) error {
 	for name, factory := range cfg.db {
 		server.PreservedDbPlugins[name] = factory
 	}
@@ -180,5 +245,10 @@ func configure(overlay string, files []string, opts ...Option) error {
 	server.SetRoutes(cfg.routes)
 	server.SetRestHandlers(cfg.handlers)
 	server.SetViews(cfg.views)
+	hooks := make([]server.RestSpecHook, len(cfg.specHooks))
+	for i, hook := range cfg.specHooks {
+		hooks[i] = hook
+	}
+	server.SetRestSpecHooks(hooks)
 	return server.SetupApplication(overlay, files)
 }

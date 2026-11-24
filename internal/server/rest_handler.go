@@ -8,6 +8,7 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -33,10 +34,12 @@ func (e *HandlerError) Error() string {
 	return e.Message
 }
 
-// PluginCaller is the in-process internal RPC available to a rest handler.
+// PluginCaller is the in-process internal RPC available to a rest handler or view.
 // Calls use the same dispatch path as Internal.TableGet and the other
-// Internal methods. They do not open a socket. Storage calls reach loaded
-// storage_plugins by name and do not run storage auth or forward the caller token.
+// Internal methods. They do not open a socket. Begin opens one database
+// transaction. Calls on the returned session join it until Commit or Rollback.
+// Storage calls reach loaded storage_plugins by name and do not run storage
+// auth or forward the caller token.
 type PluginCaller interface {
 	TableGet(easyrest.HostCall) (easyrest.HostResult, error)
 	TableCreate(easyrest.HostCall) (easyrest.HostResult, error)
@@ -47,11 +50,28 @@ type PluginCaller interface {
 	CacheSet(name, key, value string, ttl *time.Duration) error
 	CacheDelete(name, key string) error
 	StoragePut(name, path string, body []byte, ctx map[string]any) (rel string, ctxOut map[string]any, err error)
+	StoragePutStream(name, path string, r io.Reader, ctx map[string]any) (rel string, ctxOut map[string]any, err error)
 	StorageGetUrl(name string, paths []string, ctx map[string]any) ([]easyrest.StorageURL, error)
 	StorageGetMetadata(name, path string, ctx map[string]any) (easyrest.StorageMeta, error)
 	StorageGetBin(name, path string, ctx map[string]any) (body []byte, mime string, ctxOut map[string]any, err error)
+	StorageGetStream(name, path string, offset int64, ctx map[string]any) (io.ReadCloser, string, map[string]any, error)
 	StorageList(name, path string, ctx map[string]any) ([]easyrest.StorageEntry, error)
 	StorageDelete(name, path string, ctx map[string]any) error
+	Begin(ctx context.Context, db string) (DBSession, error)
+}
+
+// DBSession is one shared database transaction.
+// Its table and function calls join that transaction. Commit or Rollback ends it.
+// Rollback is a no-op after a successful Commit.
+type DBSession interface {
+	ID() string
+	TableGet(easyrest.HostCall) (easyrest.HostResult, error)
+	TableCreate(easyrest.HostCall) (easyrest.HostResult, error)
+	TableUpdate(easyrest.HostCall) (easyrest.HostResult, error)
+	TableDelete(easyrest.HostCall) (easyrest.HostResult, error)
+	CallFunction(easyrest.HostCall) (easyrest.HostResult, error)
+	Commit(ctx context.Context) (map[string]any, error)
+	Rollback(ctx context.Context) error
 }
 
 // Call is one invocation of a Go rest handler or view.
@@ -298,6 +318,122 @@ func (directPlugins) CallFunction(req easyrest.HostCall) (easyrest.HostResult, e
 	return dispatchHost(http.MethodPost, "/api/"+req.DB+"/rpc/"+req.Name+"/", req)
 }
 
+func (directPlugins) Begin(ctx context.Context, db string) (DBSession, error) {
+	txr, err := dbTransactor(db)
+	if err != nil {
+		return nil, err
+	}
+	pluginCtx := map[string]any{}
+	if ctx != nil {
+		if deadline, ok := ctx.Deadline(); ok {
+			pluginCtx[easyrest.SharedTxDeadlineKey] = deadline
+		}
+	}
+	id, _, err := txr.BeginTx(pluginCtx)
+	if err != nil {
+		return nil, err
+	}
+	return &dbSession{db: strings.ToLower(strings.TrimSpace(db)), id: id}, nil
+}
+
+type dbSession struct {
+	db   string
+	id   string
+	done bool
+}
+
+func (s *dbSession) ID() string {
+	if s == nil {
+		return ""
+	}
+	return s.id
+}
+
+func (s *dbSession) TableGet(req easyrest.HostCall) (easyrest.HostResult, error) {
+	req, err := s.bind(req)
+	if err != nil {
+		return easyrest.HostResult{}, err
+	}
+	return directPlugins{}.TableGet(req)
+}
+
+func (s *dbSession) TableCreate(req easyrest.HostCall) (easyrest.HostResult, error) {
+	req, err := s.bind(req)
+	if err != nil {
+		return easyrest.HostResult{}, err
+	}
+	return directPlugins{}.TableCreate(req)
+}
+
+func (s *dbSession) TableUpdate(req easyrest.HostCall) (easyrest.HostResult, error) {
+	req, err := s.bind(req)
+	if err != nil {
+		return easyrest.HostResult{}, err
+	}
+	return directPlugins{}.TableUpdate(req)
+}
+
+func (s *dbSession) TableDelete(req easyrest.HostCall) (easyrest.HostResult, error) {
+	req, err := s.bind(req)
+	if err != nil {
+		return easyrest.HostResult{}, err
+	}
+	return directPlugins{}.TableDelete(req)
+}
+
+func (s *dbSession) CallFunction(req easyrest.HostCall) (easyrest.HostResult, error) {
+	req, err := s.bind(req)
+	if err != nil {
+		return easyrest.HostResult{}, err
+	}
+	return directPlugins{}.CallFunction(req)
+}
+
+func (s *dbSession) Commit(context.Context) (map[string]any, error) {
+	if s == nil || s.done {
+		return nil, easyrest.ErrSharedTxDone
+	}
+	txr, err := dbTransactor(s.db)
+	if err != nil {
+		return nil, err
+	}
+	out, err := txr.CommitTx(s.id, nil)
+	if err != nil {
+		return out, err
+	}
+	s.done = true
+	return out, nil
+}
+
+func (s *dbSession) Rollback(context.Context) error {
+	if s == nil || s.done {
+		return nil
+	}
+	txr, err := dbTransactor(s.db)
+	if err != nil {
+		return err
+	}
+	if err := txr.RollbackTx(s.id); err != nil {
+		return err
+	}
+	s.done = true
+	return nil
+}
+
+func (s *dbSession) bind(req easyrest.HostCall) (easyrest.HostCall, error) {
+	if s == nil || s.done {
+		return req, easyrest.ErrSharedTxDone
+	}
+	if req.DB == "" {
+		req.DB = s.db
+	}
+	if strings.ToLower(req.DB) != s.db {
+		return req, fmt.Errorf("shared transaction is for database %s", s.db)
+	}
+	req.TxID = s.id
+	return req, nil
+}
+
 func (directPlugins) CacheGet(name, key string) (string, error) {
 	store, err := cacheStore(name, key)
 	if err != nil {
@@ -330,6 +466,14 @@ func (directPlugins) StoragePut(name, path string, body []byte, ctx map[string]a
 	return plug.Put(path, body, ctx)
 }
 
+func (directPlugins) StoragePutStream(name, path string, r io.Reader, ctx map[string]any) (string, map[string]any, error) {
+	plug, err := storagePluginForCaller(name)
+	if err != nil {
+		return "", ctx, err
+	}
+	return plug.PutStream(path, r, ctx)
+}
+
 func (directPlugins) StorageGetUrl(name string, paths []string, ctx map[string]any) ([]easyrest.StorageURL, error) {
 	plug, err := storagePluginForCaller(name)
 	if err != nil {
@@ -352,6 +496,14 @@ func (directPlugins) StorageGetBin(name, path string, ctx map[string]any) ([]byt
 		return nil, "", ctx, err
 	}
 	return plug.GetBin(path, ctx)
+}
+
+func (directPlugins) StorageGetStream(name, path string, offset int64, ctx map[string]any) (io.ReadCloser, string, map[string]any, error) {
+	plug, err := storagePluginForCaller(name)
+	if err != nil {
+		return nil, "", ctx, err
+	}
+	return plug.GetStream(path, offset, ctx)
 }
 
 func (directPlugins) StorageList(name, path string, ctx map[string]any) ([]easyrest.StorageEntry, error) {

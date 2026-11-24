@@ -3,9 +3,11 @@
 package dbglob
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"time"
@@ -73,6 +75,19 @@ func dbglobSetting(settings map[string]any, key, fallback string) string {
 
 // Put stores body. Inline mode returns a data URL. Table mode returns the path.
 func (p *Plugin) Put(relPath string, body []byte, ctx map[string]any) (string, map[string]any, error) {
+	return p.PutStream(relPath, bytes.NewReader(body), ctx)
+}
+
+// PutStream reads r to the end and stores those bytes.
+func (p *Plugin) PutStream(relPath string, r io.Reader, ctx map[string]any) (string, map[string]any, error) {
+	body, err := io.ReadAll(r)
+	if err != nil {
+		return "", ctx, fmt.Errorf("storage dbglob: %w", err)
+	}
+	return p.putBytes(relPath, body, ctx)
+}
+
+func (p *Plugin) putBytes(relPath string, body []byte, ctx map[string]any) (string, map[string]any, error) {
 	if p.table == "" {
 		mediaType, _ := easyrest.CtxString(ctx, easyrest.CtxStorageMIME)
 		return easyrest.FormatDataURL(mediaType, body), ctx, nil
@@ -241,6 +256,34 @@ func (p *Plugin) GetMetadata(stored string, ctx map[string]any) (easyrest.Storag
 
 // GetBin returns file bytes. Table mode reads only the data column.
 func (p *Plugin) GetBin(stored string, ctx map[string]any) ([]byte, string, map[string]any, error) {
+	rc, mimeType, ctxOut, err := p.GetStream(stored, 0, ctx)
+	if err != nil {
+		return nil, "", ctxOut, err
+	}
+	defer rc.Close()
+	body, err := io.ReadAll(rc)
+	if err != nil {
+		return nil, "", ctxOut, fmt.Errorf("storage dbglob: %w", err)
+	}
+	return body, mimeType, ctxOut, nil
+}
+
+// GetStream returns a reader over the stored bytes from offset.
+func (p *Plugin) GetStream(stored string, offset int64, ctx map[string]any) (io.ReadCloser, string, map[string]any, error) {
+	if offset < 0 {
+		return nil, "", ctx, fmt.Errorf("storage dbglob: negative offset")
+	}
+	body, mimeType, ctxOut, err := p.readBytes(stored, ctx)
+	if err != nil {
+		return nil, "", ctxOut, err
+	}
+	if offset > int64(len(body)) {
+		offset = int64(len(body))
+	}
+	return io.NopCloser(bytes.NewReader(body[offset:])), mimeType, ctxOut, nil
+}
+
+func (p *Plugin) readBytes(stored string, ctx map[string]any) ([]byte, string, map[string]any, error) {
 	if p.table == "" {
 		mediaType, body, err := easyrest.ParseDataURL(stored)
 		if err != nil {

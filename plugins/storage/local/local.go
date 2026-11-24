@@ -1,7 +1,9 @@
 package local
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"mime"
 	"net/http"
 	"os"
@@ -71,6 +73,12 @@ func (p *Plugin) initSettings(settings map[string]any) (string, bool, error) {
 
 // Put writes body at the storage-relative path and returns that path.
 func (p *Plugin) Put(relPath string, body []byte, ctx map[string]any) (string, map[string]any, error) {
+	return p.PutStream(relPath, bytes.NewReader(body), ctx)
+}
+
+// PutStream copies r to the storage-relative path.
+// Inline mode still writes the file and returns a data URL.
+func (p *Plugin) PutStream(relPath string, r io.Reader, ctx map[string]any) (string, map[string]any, error) {
 	full, rel, err := p.fullPath(relPath)
 	if err != nil {
 		return "", ctx, err
@@ -78,33 +86,99 @@ func (p *Plugin) Put(relPath string, body []byte, ctx map[string]any) (string, m
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		return "", ctx, fmt.Errorf("storage local: %w", err)
 	}
-	if err := os.WriteFile(full, body, 0o644); err != nil {
-		return "", ctx, fmt.Errorf("storage local: %w", err)
-	}
 	if p.inline {
+		body, err := io.ReadAll(r)
+		if err != nil {
+			return "", ctx, fmt.Errorf("storage local: %w", err)
+		}
+		if err := os.WriteFile(full, body, 0o644); err != nil {
+			return "", ctx, fmt.Errorf("storage local: %w", err)
+		}
 		return easyrest.FormatDataURL(inlineMediaType(contentType(rel, body), ctx), body), ctx, nil
 	}
+	tmp, err := os.CreateTemp(filepath.Dir(full), ".easyrest-*")
+	if err != nil {
+		return "", ctx, fmt.Errorf("storage local: %w", err)
+	}
+	tmpName := tmp.Name()
+	done := false
+	defer func() {
+		if !done {
+			os.Remove(tmpName)
+		}
+	}()
+	if _, err := io.Copy(tmp, r); err != nil {
+		tmp.Close()
+		return "", ctx, fmt.Errorf("storage local: %w", err)
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return "", ctx, fmt.Errorf("storage local: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return "", ctx, fmt.Errorf("storage local: %w", err)
+	}
+	if err := os.Rename(tmpName, full); err != nil {
+		return "", ctx, fmt.Errorf("storage local: %w", err)
+	}
+	done = true
 	return rel, ctx, nil
 }
 
 // GetBin reads the file at the storage-relative path.
 func (p *Plugin) GetBin(relPath string, ctx map[string]any) ([]byte, string, map[string]any, error) {
+	rc, mimeType, ctxOut, err := p.GetStream(relPath, 0, ctx)
+	if err != nil {
+		return nil, "", ctxOut, err
+	}
+	defer rc.Close()
+	body, err := io.ReadAll(rc)
+	if err != nil {
+		return nil, "", ctxOut, fmt.Errorf("storage local: %w", err)
+	}
+	return body, mimeType, ctxOut, nil
+}
+
+// GetStream opens the file at offset.
+func (p *Plugin) GetStream(relPath string, offset int64, ctx map[string]any) (io.ReadCloser, string, map[string]any, error) {
+	if offset < 0 {
+		return nil, "", ctx, fmt.Errorf("storage local: negative offset")
+	}
 	full, rel, err := p.fullPath(relPath)
 	if err != nil {
 		return nil, "", ctx, err
 	}
-	info, err := os.Stat(full)
+	f, err := os.Open(full)
 	if err != nil {
+		return nil, "", ctx, fmt.Errorf("storage local: %w", err)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
 		return nil, "", ctx, fmt.Errorf("storage local: %w", err)
 	}
 	if info.IsDir() {
+		f.Close()
 		return nil, "", ctx, fmt.Errorf("storage local: %s is a directory", rel)
 	}
-	body, err := os.ReadFile(full)
-	if err != nil {
-		return nil, "", ctx, fmt.Errorf("storage local: %w", err)
+	mimeType := contentType(rel, nil)
+	if mime.TypeByExtension(path.Ext(rel)) == "" {
+		head := make([]byte, 512)
+		n, _ := f.Read(head)
+		head = head[:n]
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			f.Close()
+			return nil, "", ctx, fmt.Errorf("storage local: %w", err)
+		}
+		mimeType = contentType(rel, head)
 	}
-	return body, contentType(rel, body), ctx, nil
+	if offset > 0 {
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			f.Close()
+			return nil, "", ctx, fmt.Errorf("storage local: %w", err)
+		}
+	}
+	return f, mimeType, ctx, nil
 }
 
 // GetUrl returns the absolute public URL and MIME type of each file, in order.

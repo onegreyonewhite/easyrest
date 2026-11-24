@@ -47,10 +47,10 @@ func (p *BasicAuthPlugin) initSettings(settings map[string]any) (map[string]any,
 	}
 	p.userlist = ul
 
-	// Return a Swagger 2.0 security definition. Swagger UI builds the
-	// username and password form only for type basic.
+	// OpenAPI 3 HTTP basic. Swagger UI builds the username and password form from this shape.
 	return map[string]any{
-		"type": "basic",
+		"type":   "http",
+		"scheme": "basic",
 	}, nil
 }
 

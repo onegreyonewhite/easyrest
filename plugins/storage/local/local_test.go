@@ -1,8 +1,10 @@
 package local
 
 import (
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
@@ -88,6 +90,44 @@ func TestInlineSetting(t *testing.T) {
 	if err != nil || got != "a.txt" {
 		t.Fatalf("stored %q err %v", got, err)
 	}
+}
+
+func TestPutStreamGetStream(t *testing.T) {
+	plug := newTestPlugin(t)
+	rel, _, err := plug.PutStream("docs/note.txt", strings.NewReader("hello"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rel != "docs/note.txt" {
+		t.Fatalf("rel %q", rel)
+	}
+	got, err := readStream(plug, "docs/note.txt", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "hello" {
+		t.Fatalf("body %q", got)
+	}
+	got, err = readStream(plug, "docs/note.txt", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "o" {
+		t.Fatalf("suffix %q", got)
+	}
+}
+
+func readStream(plug *Plugin, rel string, offset int64) (string, error) {
+	rc, _, _, err := plug.GetStream(rel, offset, nil)
+	if err != nil {
+		return "", err
+	}
+	defer rc.Close()
+	body, err := io.ReadAll(rc)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
 }
 
 func TestPutGetBin(t *testing.T) {

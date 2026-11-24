@@ -1,11 +1,13 @@
 package static
 
 import (
-	easyrest "github.com/onegreyonewhite/easyrest/plugin"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
 
 func TestStatic_DefaultDir(t *testing.T) {
@@ -23,6 +25,37 @@ func TestStatic_DefaultDir(t *testing.T) {
 	}
 }
 
+func TestGetStreamDiskOffset(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "note.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plug := New()
+	if _, err := plug.Init(map[string]any{"path": dir}, easyrest.HostRPC{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readStaticStream(t, plug, 0); got != "hello" {
+		t.Fatalf("body %q", got)
+	}
+	if got := readStaticStream(t, plug, 4); got != "o" {
+		t.Fatalf("suffix %q", got)
+	}
+}
+
+func readStaticStream(t *testing.T, plug *Plugin, offset int64) string {
+	t.Helper()
+	rc, _, _, err := plug.GetStream("note.txt", offset, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	body, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+
 func TestStatic_EmbedFallback(t *testing.T) {
 	plug := New()
 	if _, err := plug.Init(map[string]any{"path": t.TempDir()}, easyrest.HostRPC{}); err != nil {
@@ -34,6 +67,20 @@ func TestStatic_EmbedFallback(t *testing.T) {
 	}
 	if len(body) == 0 || !strings.Contains(mimeType, "text/css") {
 		t.Fatalf("mime %q len %d", mimeType, len(body))
+	}
+}
+
+func TestStatic_SwaggerUIVersion(t *testing.T) {
+	plug := New()
+	if _, err := plug.Init(map[string]any{"path": t.TempDir()}, easyrest.HostRPC{}); err != nil {
+		t.Fatal(err)
+	}
+	body, _, _, err := plug.GetBin("swagger-ui-bundle.js", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `PACKAGE_VERSION:"5.35.1"`) {
+		t.Fatal("embedded Swagger UI bundle is not v5.35.1")
 	}
 }
 

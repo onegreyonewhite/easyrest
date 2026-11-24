@@ -3,6 +3,7 @@
 package static
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"io/fs"
@@ -60,6 +61,11 @@ func (p *Plugin) initSettings(settings map[string]any) (string, bool, error) {
 
 // Put rejects every write.
 func (p *Plugin) Put(string, []byte, map[string]any) (string, map[string]any, error) {
+	return p.PutStream("", nil, nil)
+}
+
+// PutStream rejects every write.
+func (p *Plugin) PutStream(string, io.Reader, map[string]any) (string, map[string]any, error) {
 	return "", nil, fmt.Errorf("storage static: read-only")
 }
 
@@ -120,27 +126,55 @@ func (p *Plugin) GetMetadata(relPath string, ctx map[string]any) (easyrest.Stora
 
 // GetBin reads the directory file when it exists, otherwise the embedded file.
 func (p *Plugin) GetBin(relPath string, ctx map[string]any) ([]byte, string, map[string]any, error) {
+	rc, mimeType, ctxOut, err := p.GetStream(relPath, 0, ctx)
+	if err != nil {
+		return nil, "", ctxOut, err
+	}
+	defer rc.Close()
+	body, err := io.ReadAll(rc)
+	if err != nil {
+		return nil, "", ctxOut, fmt.Errorf("storage static: %w", err)
+	}
+	return body, mimeType, ctxOut, nil
+}
+
+// GetStream opens the directory file when it exists, otherwise the embedded file, at offset.
+func (p *Plugin) GetStream(relPath string, offset int64, ctx map[string]any) (io.ReadCloser, string, map[string]any, error) {
+	if offset < 0 {
+		return nil, "", ctx, fmt.Errorf("storage static: negative offset")
+	}
 	rel, err := easyrest.CleanStorageRel(relPath)
 	if err != nil {
 		return nil, "", ctx, err
 	}
-	if full, _, ok := p.diskFile(rel); ok {
-		body, err := os.ReadFile(full)
+	mimeType := contentType(rel)
+	if full, info, ok := p.diskFile(rel); ok {
+		if offset >= info.Size() {
+			return io.NopCloser(bytes.NewReader(nil)), mimeType, ctx, nil
+		}
+		f, err := os.Open(full)
 		if err != nil {
 			return nil, "", ctx, fmt.Errorf("storage static: %w", err)
 		}
-		return body, contentType(rel), ctx, nil
+		if offset > 0 {
+			if _, err := f.Seek(offset, io.SeekStart); err != nil {
+				f.Close()
+				return nil, "", ctx, fmt.Errorf("storage static: %w", err)
+			}
+		}
+		return f, mimeType, ctx, nil
 	}
 	f, err := embedded.Open(path.Join("assets", rel))
 	if err != nil {
 		return nil, "", ctx, fmt.Errorf("storage static: %s not found", rel)
 	}
-	defer f.Close()
-	body, err := io.ReadAll(f)
-	if err != nil {
-		return nil, "", ctx, fmt.Errorf("storage static: %w", err)
+	if offset > 0 {
+		if _, err := io.CopyN(io.Discard, f, offset); err != nil && err != io.EOF {
+			f.Close()
+			return nil, "", ctx, fmt.Errorf("storage static: %w", err)
+		}
 	}
-	return body, contentType(rel), ctx, nil
+	return f, mimeType, ctx, nil
 }
 
 // List returns the immediate children of a directory.

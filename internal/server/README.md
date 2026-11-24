@@ -147,12 +147,13 @@ If every plugin fails and `anon_claims` is set, the request continues with those
 
 ## Rest views
 
-A `views` entry runs a Go function after the same authentication, scope check, and request middleware as the other actions on that endpoint. The function is selected by `handler`. `path` and `methods` choose the route. The function receives the `http.ResponseWriter` and writes the status, headers, and body. Content plugins do not render that response, and response middleware does not run. The call's plugin access is the in-process caller: table get, create, update, delete, a function call, cache get, set, and delete, and storage put, get URL, metadata, get bytes, list, and delete. Those calls do not forward the caller's token. The call leaves the parsed body empty, and the raw body stays on the request. The call context is canceled when the client disconnects. `server.write_timeout` bounds the response until the function extends the deadline with `http.NewResponseController(w).SetWriteDeadline`. A method that is not registered on that path returns 405 and sets `Allow`. A `GET` view also serves `HEAD` when `methods` omits `HEAD`, and `Request.Method` on that request is `HEAD`. An explicit `HEAD` method uses its own function. See [Configuration](../config/README.md#application-and-restapi).
+A `views` entry runs a Go function after the same authentication, scope check, and request middleware as the other actions on that endpoint. The function is selected by `handler`. `path` and `methods` choose the route. The function receives the `http.ResponseWriter` and writes the status, headers, and body. Content plugins do not render that response, and response middleware does not run. The call's plugin access is the in-process caller: table get, create, update, delete, a function call, cache get, set, and delete, and storage put, get URL, metadata, get bytes, list, and delete. `Begin` opens one database transaction for several of those table and function calls. Those calls do not forward the caller's token. The call leaves the parsed body empty, and the raw body stays on the request. The call context is canceled when the client disconnects. `server.write_timeout` bounds the response until the function extends the deadline with `http.NewResponseController(w).SetWriteDeadline`. A method that is not registered on that path returns 405 and sets `Allow`. A `GET` view also serves `HEAD` when `methods` omits `HEAD`, and `Request.Method` on that request is `HEAD`. An explicit `HEAD` method uses its own function. See [Configuration](../config/README.md#application-and-restapi) and [Embed](../../embed/README.md#shared-transaction).
 
-A rest action with a registered Go `handler` receives the same in-process caller on `Call.Plugins` instead of writing the response directly.
+A rest action with a registered Go `handler` receives the same in-process caller on `Call.Plugins` instead of writing the response directly. `Begin` is the same method.
 
 ## See also
 
 - [Server README](../../README.md)
 - [Configuration](../config/README.md)
 - [Plugin SDK](../../plugin/README.md)
+- [Embed](../../embed/README.md)

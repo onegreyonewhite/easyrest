@@ -3,6 +3,7 @@ package dbglob
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/rpc"
@@ -12,6 +13,40 @@ import (
 
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 )
+
+func TestPutStreamGetStream(t *testing.T) {
+	plug := New()
+	if _, err := plug.Init(nil, easyrest.HostRPC{}); err != nil {
+		t.Fatal(err)
+	}
+	stored, _, err := plug.PutStream("ignored", strings.NewReader("hello"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored != easyrest.FormatDataURL("", []byte("hello")) {
+		t.Fatalf("stored %q", stored)
+	}
+	if got := readDBStream(t, plug, stored, 0); got != "hello" {
+		t.Fatalf("body %q", got)
+	}
+	if got := readDBStream(t, plug, stored, 4); got != "o" {
+		t.Fatalf("suffix %q", got)
+	}
+}
+
+func readDBStream(t *testing.T, plug *Plugin, stored string, offset int64) string {
+	t.Helper()
+	rc, _, _, err := plug.GetStream(stored, offset, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	body, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
 
 func TestPutGetBin(t *testing.T) {
 	plug := New()

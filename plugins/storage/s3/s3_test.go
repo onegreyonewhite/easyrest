@@ -89,11 +89,31 @@ func (f *fakeS3) writeObject(w http.ResponseWriter, r *http.Request, bucket, key
 		http.Error(w, "missing", http.StatusNotFound)
 		return
 	}
+	payload := obj.body
+	status := http.StatusOK
+	if withBody {
+		if rng := r.Header.Get("Range"); rng != "" {
+			var from int
+			if _, err := fmt.Sscanf(rng, "bytes=%d-", &from); err != nil || from < 0 {
+				http.Error(w, "bad range", http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
+			if from >= len(obj.body) {
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", len(obj.body)))
+				http.Error(w, "range", http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
+			payload = obj.body[from:]
+			status = http.StatusPartialContent
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", from, len(obj.body)-1, len(obj.body)))
+		}
+	}
 	w.Header().Set("Content-Type", obj.ctype)
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(obj.body)))
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(payload)))
 	w.Header().Set("Last-Modified", obj.mod.Format(http.TimeFormat))
 	if withBody {
-		_, _ = w.Write(obj.body)
+		w.WriteHeader(status)
+		_, _ = w.Write(payload)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
@@ -198,6 +218,45 @@ func TestInitCreatesBucket(t *testing.T) {
 	if _, err := New().Init(map[string]any{"bucket": "media"}, easyrest.HostRPC{}); err == nil {
 		t.Fatal("expected missing keys")
 	}
+}
+
+func TestPutStreamGetStream(t *testing.T) {
+	fake, srv := startFake(t)
+	plug := New()
+	if _, err := plug.Init(settings(srv.URL, nil), easyrest.HostRPC{}); err != nil {
+		t.Fatal(err)
+	}
+	rel, _, err := plug.PutStream("note.txt", strings.NewReader("hello"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rel != "note.txt" {
+		t.Fatalf("rel %q", rel)
+	}
+	obj, ok := fake.object("media", "note.txt")
+	if !ok || string(obj.body) != "hello" {
+		t.Fatalf("object %#v ok %v", obj, ok)
+	}
+	if got := readS3Stream(t, plug, 0); got != "hello" {
+		t.Fatalf("body %q", got)
+	}
+	if got := readS3Stream(t, plug, 4); got != "o" {
+		t.Fatalf("suffix %q", got)
+	}
+}
+
+func readS3Stream(t *testing.T, plug *Plugin, offset int64) string {
+	t.Helper()
+	rc, _, _, err := plug.GetStream("note.txt", offset, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	body, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
 }
 
 func TestPutGetPrefix(t *testing.T) {

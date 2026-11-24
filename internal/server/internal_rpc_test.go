@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -269,5 +271,103 @@ func TestInternalRPC_ListenFD(t *testing.T) {
 	}
 	if got.Status != http.StatusOK || !strings.Contains(string(got.Body), `"id"`) {
 		t.Fatalf("status %d body %q", got.Status, got.Body)
+	}
+}
+
+type sharedRecPlugin struct {
+	fakeDBPlugin
+	ids       []string
+	commits   int
+	rollbacks int
+}
+
+func (p *sharedRecPlugin) BeginTx(ctx map[string]any) (string, map[string]any, error) {
+	return "sess", nil, nil
+}
+
+func (p *sharedRecPlugin) CommitTx(id string, ctx map[string]any) (map[string]any, error) {
+	if id != "sess" {
+		return nil, easyrest.ErrSharedTxNotFound
+	}
+	p.commits++
+	return map[string]any{"committed": true}, nil
+}
+
+func (p *sharedRecPlugin) RollbackTx(id string) error {
+	p.rollbacks++
+	return nil
+}
+
+func (p *sharedRecPlugin) TableCreate(_ string, _ string, data []map[string]any, ctx map[string]any) ([]map[string]any, map[string]any, error) {
+	id, _ := easyrest.SharedTxID(ctx)
+	p.ids = append(p.ids, id)
+	return data, nil, nil
+}
+
+func TestSharedTx_InternalCallsShareOneID(t *testing.T) {
+	origCfg := GetConfig()
+	origDB := DbPlugins.Load()
+	t.Cleanup(func() {
+		SetConfig(origCfg)
+		DbPlugins.Store(origDB)
+	})
+	plugin := &sharedRecPlugin{}
+	SetConfig(config.Config{
+		PluginMap: map[string]config.PluginConfig{"db": {Uri: "sqlite://memory"}},
+	})
+	DbPlugins.Store(&map[string]easyrest.DBPlugin{"db": plugin})
+
+	session, err := directPlugins{}.Begin(context.Background(), "db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"ada", "grace"} {
+		res, err := session.TableCreate(easyrest.HostCall{
+			DB:   "db",
+			Name: "users",
+			Header: map[string]string{
+				"Content-Type": "application/json",
+			},
+			Body: []byte(`[{"name":"` + name + `"}]`),
+		})
+		if err != nil || res.Status != http.StatusCreated {
+			t.Fatalf("create %s: status %d err %v body %q", name, res.Status, err, res.Body)
+		}
+	}
+	if _, err := session.TableCreate(easyrest.HostCall{DB: "other", Name: "users", Body: []byte(`[{}]`)}); err == nil {
+		t.Fatal("expected database mismatch")
+	}
+	out, err := session.Commit(context.Background())
+	if err != nil || out["committed"] != true {
+		t.Fatalf("commit: %#v %v", out, err)
+	}
+	if err := session.Rollback(context.Background()); err != nil {
+		t.Fatalf("rollback after commit: %v", err)
+	}
+	if plugin.commits != 1 || plugin.rollbacks != 0 || len(plugin.ids) != 2 || plugin.ids[0] != "sess" || plugin.ids[1] != "sess" {
+		t.Fatalf("commits=%d rollbacks=%d ids=%v", plugin.commits, plugin.rollbacks, plugin.ids)
+	}
+}
+
+func TestSharedTx_UnsupportedPlugin(t *testing.T) {
+	origDB := DbPlugins.Load()
+	t.Cleanup(func() { DbPlugins.Store(origDB) })
+	DbPlugins.Store(&map[string]easyrest.DBPlugin{"db": &fakeDBPlugin{}})
+	_, err := directPlugins{}.Begin(context.Background(), "db")
+	if !errors.Is(err, easyrest.ErrSharedTxUnsupported) {
+		t.Fatalf("begin: %v", err)
+	}
+}
+
+func TestSharedTx_PublicHeaderIgnored(t *testing.T) {
+	public := httptest.NewRequest(http.MethodGet, "/api/db/users/", nil)
+	public.Header.Set(sharedTxHeader, "secret")
+	if _, ok := buildPluginContext(public, "db", "users", "")[easyrest.SharedTxKey]; ok {
+		t.Fatal("public request joined a transaction")
+	}
+	internal := public.WithContext(context.WithValue(public.Context(), internalCallKey{}, true))
+	got := buildPluginContext(internal, "db", "users", "")
+	if got[easyrest.SharedTxKey] != "secret" {
+		t.Fatalf("internal id: %#v", got[easyrest.SharedTxKey])
 	}
 }

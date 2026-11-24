@@ -49,6 +49,14 @@ Before `COMMIT`, the plugin harvests `response.*` (including `response.headers` 
 
 `planned` reads `Plan Rows` from `EXPLAIN (FORMAT JSON)` and does not count rows. `estimated` starts from that value. The host replaces it with an exact count when it is strictly less than `db_max_rows`. See [Prefer](../../../internal/server/README.md#prefer).
 
+## Shared transaction
+
+`BeginTx` holds one `pgx.Tx` until `CommitTx`, `RollbackTx`, expiry, or `Close`. Later calls with `_tx` set run on that transaction. `prefer.tx` is ignored for those calls. `set_config` still runs on every joined statement. `db.pre-request` runs on the first one. `db.post-request` and the `response.*` / `cache.invalidate` harvest run in `CommitTx`.
+
+At most 16 sessions stay open. Each one keeps a pool connection. The default lifetime is 30 seconds when the caller sets no deadline. A statement error aborts the session: `CommitTx` then returns `shared transaction aborted`.
+
+Bulk insert at or above `bulkThreshold` returns `bulk create is not supported inside a shared transaction` and does not start another transaction. The caller contract is in [Plugin SDK](../../../plugin/README.md#shared-transaction) and [Embed](../../../embed/README.md#shared-transaction).
+
 ## See also
 
 - [Server README](../../../README.md)
