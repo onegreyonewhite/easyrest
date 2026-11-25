@@ -9,7 +9,7 @@ The URI is `sqlite://` plus a filesystem path, not a `file:` DSN. Query paramete
 | `cache_size` | `10000` | SQLite `cache_size` pragma |
 | `mmap_size` | omitted | `mmap_size` pragma. Applied only when the value is greater than 0. Zero is accepted and leaves mmap unset. A negative value fails `InitConnection` |
 
-Any other query string is passed through on the `file:` DSN the driver opens. A normal connection also sets `_busy_timeout=5000`. `use_query: true` opens the database read-only (`mode=ro`).
+Any other query string is passed through on the `file:` DSN the driver opens. A normal connection also sets `_busy_timeout=5000`. `use_query: true` alone opens the database read-only (`mode=ro`) as a `query` plugin. With `internal: true` as well, the server loads the writable `db` plugin on the same URI instead.
 
 ```yaml
 plugins:

@@ -1171,6 +1171,16 @@ func TestNewPgQueryPlugin(t *testing.T) {
 	require.NotNil(t, p.dbPluginPointer)
 }
 
+func TestPgRawQuery(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	mock.ExpectQuery("INSERT INTO t (id) VALUES (1)").
+		WillReturnRows(pgxmock.NewRows([]string{}))
+	rows, err := plugin.RawQuery(context.Background(), "INSERT INTO t (id) VALUES (1)")
+	require.NoError(t, err)
+	require.Len(t, rows, 0)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestPgQueryCall(t *testing.T) {
 	plugin, mock := newTestPlugin(t)
 	qp := &pgQueryPlugin{dbPluginPointer: plugin}

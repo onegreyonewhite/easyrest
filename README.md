@@ -300,7 +300,7 @@ docker run --rm -p 8080:8080 -v $PWD/config.yaml:/config.yaml \
 
 The image is distroless, runs as non-root, and contains only `easyrest-server` (`[Dockerfile](Dockerfile)`).
 
-TLS (`tls_enabled`, or both cert and key files) serves HTTP/2. Without TLS the server speaks h2c. `SIGHUP` reloads the same config files, restarts plugins, and rebuilds the chi router. `SIGINT`/`SIGTERM` shut down gracefully.
+TLS (`tls_enabled`, or both cert and key files) serves HTTP/2 over TLS. Without TLS the server accepts HTTP/1 and unencrypted HTTP/2 on the same port. `SIGHUP` reloads the same config files, restarts plugins, and rebuilds the chi router. `SIGINT`/`SIGTERM` shut down gracefully.
 
 Optional pprof on `easyrest-server` only: `ER_PPROF_ADDR=:6060`.
 

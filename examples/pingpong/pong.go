@@ -25,7 +25,7 @@ func EmbedOptions(pingURL string, logf func(string, ...any)) []embed.Option {
 	return []embed.Option{
 		embed.WithDB("sqlite", func() easyrest.DBPlugin { return sqliteplugin.NewSqlitePlugin() }),
 		embed.WithView("pong", PongView),
-		embed.WithService(func(ctx context.Context) error {
+		embed.WithService(func(ctx context.Context, _ embed.PluginCaller) error {
 			return RunPing(ctx, url, logf)
 		}),
 	}

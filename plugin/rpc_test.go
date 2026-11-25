@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"context"
 	"errors"
 	"math"
 	"net"
@@ -68,6 +69,19 @@ func (s *stubDBPlugin) GetSchema(ctx map[string]any) (any, map[string]any, error
 		return nil, s.returnCtx, errors.New("schema failed")
 	}
 	return map[string]any{"tables": []string{"users"}}, s.returnCtx, nil
+}
+
+type stubRawDB struct {
+	stubDBPlugin
+	lastQuery string
+}
+
+func (s *stubRawDB) RawQuery(_ context.Context, query string) ([]map[string]any, error) {
+	s.lastQuery = query
+	if s.fail {
+		return nil, errors.New("raw query failed")
+	}
+	return []map[string]any{{"q": query}}, nil
 }
 
 type stubQueryPlugin struct {
@@ -311,6 +325,31 @@ func TestDBPluginRPC_ReturnsCtx(t *testing.T) {
 	}
 	if got["from"] != "plugin" {
 		t.Fatalf("error path ctx: %#v", got)
+	}
+}
+
+func TestDBPluginRPC_RawQuery(t *testing.T) {
+	impl := &stubRawDB{}
+	client, cleanup := startRPCServer(t, &DBPluginRPCServer{Impl: impl})
+	defer cleanup()
+	db := &DBPluginRPC{client: client}
+
+	rows, err := db.RawQuery(context.Background(), "SELECT 1")
+	if err != nil {
+		t.Fatalf("RawQuery: %v", err)
+	}
+	if len(rows) != 1 || rows[0]["q"] != "SELECT 1" {
+		t.Fatalf("rows %#v", rows)
+	}
+	if impl.lastQuery != "SELECT 1" {
+		t.Fatalf("lastQuery %q", impl.lastQuery)
+	}
+
+	plain, plainCleanup := startRPCServer(t, &DBPluginRPCServer{Impl: &stubDBPlugin{}})
+	defer plainCleanup()
+	unsupported := &DBPluginRPC{client: plain}
+	if _, err := unsupported.RawQuery(context.Background(), "SELECT 1"); err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("expected not supported, got %v", err)
 	}
 }
 

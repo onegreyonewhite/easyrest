@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"bytes"
+	"context"
 	"encoding/gob"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 type DBPluginRPC struct{ client *rpc.Client }
 
 var _ DBTransactor = (*DBPluginRPC)(nil)
+var _ RawQuerier = (*DBPluginRPC)(nil)
 
 func (g *DBPluginRPC) InitConnection(uri string) error {
 	req := InitConnectionRequest{URI: uri}
@@ -161,6 +163,20 @@ func (g *DBPluginRPC) GetSchema(ctx map[string]any) (any, map[string]any, error)
 	return resp.Schema, outCtx, nil
 }
 
+func (g *DBPluginRPC) RawQuery(ctx context.Context, query string) ([]map[string]any, error) {
+	var resp RawQueryResponse
+	err := g.client.Call("Plugin.RawQuery", RawQueryRequest{Query: query}, &resp)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Error != "" {
+		return nil, errors.New(resp.Error)
+	}
+	rows := resp.Rows
+	resp.Rows = nil
+	return rows, nil
+}
+
 func (g *DBPluginRPC) BeginTx(ctx map[string]any) (string, map[string]any, error) {
 	var resp BeginTxResponse
 	if err := g.client.Call("Plugin.BeginTx", BeginTxRequest{Ctx: ctx}, &resp); err != nil {
@@ -275,6 +291,21 @@ func (s *DBPluginRPCServer) GetSchema(req GetSchemaRequest, resp *GetSchemaRespo
 		return nil
 	}
 	resp.Schema = schema
+	return nil
+}
+
+func (s *DBPluginRPCServer) RawQuery(req RawQueryRequest, resp *RawQueryResponse) error {
+	rq, ok := s.Impl.(RawQuerier)
+	if !ok {
+		resp.Error = "raw query not supported"
+		return nil
+	}
+	rows, err := rq.RawQuery(context.Background(), req.Query)
+	if err != nil {
+		resp.Error = err.Error()
+		return nil
+	}
+	resp.Rows = rows
 	return nil
 }
 

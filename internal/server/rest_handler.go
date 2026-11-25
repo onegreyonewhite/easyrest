@@ -46,6 +46,7 @@ type PluginCaller interface {
 	TableUpdate(easyrest.HostCall) (easyrest.HostResult, error)
 	TableDelete(easyrest.HostCall) (easyrest.HostResult, error)
 	CallFunction(easyrest.HostCall) (easyrest.HostResult, error)
+	Query(ctx context.Context, db, query string) ([]map[string]any, error)
 	CacheGet(name, key string) (string, error)
 	CacheSet(name, key, value string, ttl *time.Duration) error
 	CacheDelete(name, key string) error
@@ -298,6 +299,12 @@ type directPlugins struct{}
 
 var _ PluginCaller = directPlugins{}
 
+// Plugins returns the in-process plugin caller for embed services and tests.
+// View and rest handlers use the same implementation on Call.Plugins.
+func Plugins() PluginCaller {
+	return directPlugins{}
+}
+
 func (directPlugins) TableGet(req easyrest.HostCall) (easyrest.HostResult, error) {
 	return dispatchHost(http.MethodGet, internalTablePath(req), req)
 }
@@ -316,6 +323,39 @@ func (directPlugins) TableDelete(req easyrest.HostCall) (easyrest.HostResult, er
 
 func (directPlugins) CallFunction(req easyrest.HostCall) (easyrest.HostResult, error) {
 	return dispatchHost(http.MethodPost, "/api/"+req.DB+"/rpc/"+req.Name+"/", req)
+}
+
+func (directPlugins) Query(ctx context.Context, db, query string) ([]map[string]any, error) {
+	db = strings.ToLower(strings.TrimSpace(db))
+	if db == "" {
+		return nil, errors.New("database name is empty")
+	}
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, errors.New("query is empty")
+	}
+	cfg := currentConfig()
+	plugCfg, ok := cfg.PluginMap[db]
+	if !ok || !plugCfg.UseQuery || !plugCfg.Internal {
+		return nil, fmt.Errorf("raw query is not allowed for database %q", db)
+	}
+	plugins := DbPlugins.Load()
+	if plugins == nil {
+		return nil, fmt.Errorf("database %q is not loaded", db)
+	}
+	plug, ok := (*plugins)[db]
+	if !ok || plug == nil {
+		return nil, fmt.Errorf("database %q is not loaded", db)
+	}
+	rq, ok := plug.(easyrest.RawQuerier)
+	if !ok {
+		return nil, fmt.Errorf("database %q does not support raw query", db)
+	}
+	rows, err := rq.RawQuery(ctx, query)
+	if rows == nil && err == nil {
+		rows = []map[string]any{}
+	}
+	return rows, err
 }
 
 func (directPlugins) Begin(ctx context.Context, db string) (DBSession, error) {

@@ -51,6 +51,8 @@ var Handshake = plugin.HandshakeConfig{
 
 `QUERY` does not join a shared transaction. `DBQueryPlugin` has no begin, commit, or rollback method.
 
+`RawQuerier` is an optional interface on a writable `DBPlugin` implementation. The host calls `RawQuery` only from in-process rest handlers and views when the connection has both `use_query: true` and `internal: true`. The RPC key stays `db` and adds `Plugin.RawQuery` when the implementation supports it.
+
 One process can register both keys, as [cmd/plugin-sqlite/main.go](../cmd/plugin-sqlite/main.go) does:
 
 ```go

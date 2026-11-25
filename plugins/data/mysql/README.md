@@ -1,6 +1,6 @@
 # MySQL
 
-Table CRUD, schema, and optional `QUERY` for a `mysql://` URI. `easyrest-server` keeps the plugin in-process. The external binary is `easyrest-plugin-mysql`.
+Table CRUD, schema, and optional `QUERY` for a `mysql://` URI. `easyrest-server` keeps the plugin in-process. The external binary is `easyrest-plugin-mysql`. With both `use_query: true` and `internal: true`, the writable plugin also serves in-process `RawQuery` (no `START TRANSACTION READ ONLY`).
 
 The plugin removes these query parameters before building the driver DSN:
 

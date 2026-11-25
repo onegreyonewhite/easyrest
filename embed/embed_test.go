@@ -65,6 +65,44 @@ func TestHandler_HealthAndRoutes(t *testing.T) {
 	}
 }
 
+func TestServe_ServiceReceivesPluginCaller(t *testing.T) {
+	t.Cleanup(func() {
+		server.StopPlugins()
+		_, _ = embed.Handler("port: \"1\"\n", nil)
+	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	checked := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		_ = embed.Serve(ctx, fmt.Sprintf("port: \"%d\"\ncheck_scope: false\n", port), nil,
+			embed.WithService(func(svcCtx context.Context, plugins embed.PluginCaller) error {
+				_, err := plugins.Query(svcCtx, "missing", "select 1")
+				if err == nil || !strings.Contains(err.Error(), "raw query is not allowed") {
+					t.Errorf("Query: %v", err)
+				}
+				close(checked)
+				<-svcCtx.Done()
+				return nil
+			}),
+		)
+	}()
+
+	select {
+	case <-checked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("service did not check plugins")
+	}
+	cancel()
+}
+
 func TestServe_ServiceStopsWhenContextCanceled(t *testing.T) {
 	t.Cleanup(func() {
 		server.StopPlugins()
@@ -84,7 +122,7 @@ func TestServe_ServiceStopsWhenContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		done <- embed.Serve(ctx, fmt.Sprintf("port: \"%d\"\ncheck_scope: false\n", port), nil,
-			embed.WithService(func(ctx context.Context) error {
+			embed.WithService(func(ctx context.Context, _ embed.PluginCaller) error {
 				close(started)
 				<-ctx.Done()
 				return nil
@@ -131,10 +169,10 @@ func TestServe_ServiceErrorStopsServer(t *testing.T) {
 
 	go func() {
 		done <- embed.Serve(ctx, fmt.Sprintf("port: \"%d\"\ncheck_scope: false\n", port), nil,
-			embed.WithService(func(context.Context) error {
+			embed.WithService(func(context.Context, embed.PluginCaller) error {
 				return want
 			}),
-			embed.WithService(func(ctx context.Context) error {
+			embed.WithService(func(ctx context.Context, _ embed.PluginCaller) error {
 				<-ctx.Done()
 				close(stopped)
 				return nil

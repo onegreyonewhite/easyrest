@@ -206,6 +206,34 @@ func (p *pgPlugin) InitConnection(uri string) error {
 	return nil
 }
 
+var _ easyrest.RawQuerier = (*pgPlugin)(nil)
+
+// RawQuery runs one SQL statement on the writable connection.
+func (p *pgPlugin) RawQuery(ctx context.Context, query string) ([]map[string]any, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, errors.New("query is empty")
+	}
+	if p.db == nil {
+		return nil, errors.New("database connection not available")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	timeout := p.defaultTimeout
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	rows, err := p.db.Query(queryCtx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return p.processRows(rows, time.UTC)
+}
+
 // Close shuts down the database pool and clears cached timezones.
 func (p *pgPlugin) Close() {
 	p.sessionMu.Lock()

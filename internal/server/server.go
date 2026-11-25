@@ -16,9 +16,6 @@ import (
 
 	"maps"
 
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
-
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/golang-jwt/jwt/v5"
@@ -644,6 +641,49 @@ func buildLiveHandler(cfg config.Config) (http.Handler, error) {
 	return handler, err
 }
 
+func newHTTPServer(conf *config.Config, handler http.Handler) *http.Server {
+	sc := conf.Server
+	srv := &http.Server{
+		Addr:              ":" + conf.Port,
+		Handler:           handler,
+		ReadTimeout:       sc.ReadTimeout,
+		WriteTimeout:      sc.WriteTimeout,
+		IdleTimeout:       sc.IdleTimeout,
+		MaxHeaderBytes:    sc.MaxHeaderBytes,
+		ReadHeaderTimeout: sc.ReadHeaderTimeout,
+		HTTP2: &http.HTTP2Config{
+			MaxConcurrentStreams:          sc.HTTP2MaxConcurrentStreams,
+			MaxReadFrameSize:              sc.HTTP2MaxReadFrameSize,
+			MaxReceiveBufferPerConnection: sc.HTTP2MaxUploadBufferPerConnection,
+			MaxReceiveBufferPerStream:     sc.HTTP2MaxUploadBufferPerStream,
+			SendPingTimeout:               sc.HTTP2ReadIdleTimeout,
+			PingTimeout:                   sc.HTTP2PingTimeout,
+			PermitProhibitedCipherSuites:  sc.HTTP2PermitProhibitedCipherSuites,
+		},
+		ConnState: func(conn net.Conn, state http.ConnState) {
+			switch state {
+			case http.StateNew:
+				if tcpConn, ok := conn.(*net.TCPConn); ok {
+					tcpConn.SetKeepAlive(true)
+					tcpConn.SetKeepAlivePeriod(sc.KeepAlivePeriod)
+				}
+			case http.StateIdle:
+				if tcpConn, ok := conn.(*net.TCPConn); ok {
+					tcpConn.SetReadBuffer(0)
+					tcpConn.SetWriteBuffer(0)
+				}
+			}
+		},
+	}
+	if !conf.TLSEnabled {
+		protos := new(http.Protocols)
+		protos.SetHTTP1(true)
+		protos.SetUnencryptedHTTP2(true)
+		srv.Protocols = protos
+	}
+	return srv
+}
+
 // Run starts the HTTP server from the configuration set by SetupApplication.
 // It stops on SIGINT or SIGTERM. SIGHUP reloads config without stopping.
 func Run() {
@@ -677,40 +717,7 @@ func Serve(ctx context.Context) error {
 		handler = otelhttp.NewHandler(handler, "server-request")
 	}
 
-	srv := &http.Server{
-		Addr:              ":" + conf.Port,
-		Handler:           handler,
-		ReadTimeout:       conf.Server.ReadTimeout,
-		WriteTimeout:      conf.Server.WriteTimeout,
-		IdleTimeout:       conf.Server.IdleTimeout,
-		MaxHeaderBytes:    conf.Server.MaxHeaderBytes,
-		ReadHeaderTimeout: conf.Server.ReadHeaderTimeout,
-		ConnState: func(conn net.Conn, state http.ConnState) {
-			switch state {
-			case http.StateNew:
-				if tcpConn, ok := conn.(*net.TCPConn); ok {
-					tcpConn.SetKeepAlive(true)
-					tcpConn.SetKeepAlivePeriod(conf.Server.KeepAlivePeriod)
-				}
-			case http.StateIdle:
-				if tcpConn, ok := conn.(*net.TCPConn); ok {
-					tcpConn.SetReadBuffer(0)
-					tcpConn.SetWriteBuffer(0)
-				}
-			}
-		},
-	}
-
-	h2s := &http2.Server{
-		MaxConcurrentStreams:         conf.Server.HTTP2MaxConcurrentStreams,
-		MaxReadFrameSize:             conf.Server.HTTP2MaxReadFrameSize,
-		MaxUploadBufferPerConnection: conf.Server.HTTP2MaxUploadBufferPerConnection,
-		MaxUploadBufferPerStream:     conf.Server.HTTP2MaxUploadBufferPerStream,
-		IdleTimeout:                  conf.Server.HTTP2IdleTimeout,
-		ReadIdleTimeout:              conf.Server.HTTP2ReadIdleTimeout,
-		PingTimeout:                  conf.Server.HTTP2PingTimeout,
-		PermitProhibitedCipherSuites: conf.Server.HTTP2PermitProhibitedCipherSuites,
-	}
+	srv := newHTTPServer(&conf, handler)
 
 	rpcLis, err := listenInternalRPC(conf.InternalRPC)
 	if err != nil {
@@ -723,7 +730,6 @@ func Serve(ctx context.Context) error {
 	listenErr := make(chan error, 1)
 	go func() {
 		if conf.TLSEnabled {
-			http2.ConfigureServer(srv, h2s)
 			stdlog.Printf("TLS server listening on port %s...", conf.Port)
 			err := srv.ListenAndServeTLS(conf.TLSCertFile, conf.TLSKeyFile)
 			if err != nil && err != http.ErrServerClosed {
@@ -732,7 +738,6 @@ func Serve(ctx context.Context) error {
 			return
 		}
 		stdlog.Printf("Server listening on port %s...", conf.Port)
-		srv.Handler = h2c.NewHandler(handler, h2s)
 		err := srv.ListenAndServe()
 		if err != nil && err != http.ErrServerClosed {
 			listenErr <- err

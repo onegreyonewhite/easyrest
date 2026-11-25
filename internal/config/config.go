@@ -80,12 +80,11 @@ type ServerConfig struct {
 	MaxHeaderBytes    int           `yaml:"max_header_bytes"`
 	MaxBodySize       int64         `yaml:"max_body_size"`
 
-	// HTTP/2 specific
-	HTTP2MaxConcurrentStreams         uint32        `yaml:"http2_max_concurrent_streams"`
-	HTTP2MaxReadFrameSize             uint32        `yaml:"http2_max_read_frame_size"`
-	HTTP2MaxUploadBufferPerConnection int32         `yaml:"http2_max_upload_buffer_per_connection"`
-	HTTP2MaxUploadBufferPerStream     int32         `yaml:"http2_max_upload_buffer_per_stream"`
-	HTTP2IdleTimeout                  time.Duration `yaml:"http2_idle_timeout"`
+	// HTTP/2 (applied to net/http.Server.HTTP2)
+	HTTP2MaxConcurrentStreams         int           `yaml:"http2_max_concurrent_streams"`
+	HTTP2MaxReadFrameSize             int           `yaml:"http2_max_read_frame_size"`
+	HTTP2MaxUploadBufferPerConnection int           `yaml:"http2_max_upload_buffer_per_connection"`
+	HTTP2MaxUploadBufferPerStream     int           `yaml:"http2_max_upload_buffer_per_stream"`
 	HTTP2ReadIdleTimeout              time.Duration `yaml:"http2_read_idle_timeout"`
 	HTTP2PingTimeout                  time.Duration `yaml:"http2_ping_timeout"`
 	HTTP2PermitProhibitedCipherSuites bool          `yaml:"http2_permit_prohibited_cipher_suites"`

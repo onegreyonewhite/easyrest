@@ -478,6 +478,33 @@ func (m *mysqlPlugin) InitConnection(uri string) error {
 	return nil
 }
 
+var _ easyrest.RawQuerier = (*mysqlPlugin)(nil)
+
+// RawQuery runs one SQL statement on the writable connection.
+func (m *mysqlPlugin) RawQuery(ctx context.Context, query string) ([]map[string]any, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, errors.New("query is empty")
+	}
+	if m.db == nil {
+		return nil, errors.New("database connection not available")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, m.defaultTimeout)
+	if m.defaultTimeout == 0 {
+		queryCtx, cancel = context.WithTimeout(ctx, 30*time.Second)
+	}
+	defer cancel()
+	rows, err := m.db.QueryContext(queryCtx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRows(rows)
+}
+
 // Close shuts down the MySQL connection pool.
 func (m *mysqlPlugin) Close() {
 	m.sessionMu.Lock()

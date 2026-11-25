@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"context"
 	"errors"
 
 	"github.com/hashicorp/go-plugin"
@@ -13,11 +14,11 @@ var ErrCacheMiss = errors.New("cache miss")
 // into HTTP ETags; the patch component of Version is not.
 const (
 	VersionMajor = 0
-	VersionMinor = 23
+	VersionMinor = 24
 )
 
 // Version is the plugin version.
-var Version = "v0.23.0"
+var Version = "v0.24.0"
 
 // DBPlugin – interface for DB access plugins.
 // Methods that take ctx may return an updated context map. A nil returned ctx
@@ -41,6 +42,12 @@ type DBTransactor interface {
 	BeginTx(ctx map[string]any) (string, map[string]any, error)
 	CommitTx(id string, ctx map[string]any) (map[string]any, error)
 	RollbackTx(id string) error
+}
+
+// RawQuerier runs one SQL statement on the DB connection opened by InitConnection.
+// Statements without a result set return an empty slice.
+type RawQuerier interface {
+	RawQuery(ctx context.Context, query string) ([]map[string]any, error)
 }
 
 // RPC request/response structures.
@@ -165,6 +172,15 @@ type RollbackTxRequest struct {
 
 // RollbackTxResponse reports a rollback failure. An unknown id is success.
 type RollbackTxResponse struct {
+	Error string
+}
+
+type RawQueryRequest struct {
+	Query string
+}
+
+type RawQueryResponse struct {
+	Rows  []map[string]any
 	Error string
 }
 

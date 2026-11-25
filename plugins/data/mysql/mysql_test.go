@@ -1267,6 +1267,23 @@ func TestNewMysqlQueryPlugin(t *testing.T) {
 	}
 }
 
+func TestMysqlRawQuery(t *testing.T) {
+	plugin, mock := newTestPlugin(t)
+	defer plugin.db.Close()
+	mock.ExpectQuery("INSERT INTO t \\(id\\) VALUES \\(1\\)").
+		WillReturnRows(sqlmock.NewRows([]string{}))
+	rows, err := plugin.RawQuery(context.Background(), "INSERT INTO t (id) VALUES (1)")
+	if err != nil {
+		t.Fatalf("RawQuery: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("rows len = %d, want 0", len(rows))
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMysqlQueryCall(t *testing.T) {
 	plugin, mock := newTestPlugin(t)
 	defer plugin.db.Close()

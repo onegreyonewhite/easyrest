@@ -36,7 +36,7 @@ func TestPingReceivesPong(t *testing.T) {
 	opts := []embed.Option{
 		embed.WithDB("sqlite", func() easyrest.DBPlugin { return sqliteplugin.NewSqlitePlugin() }),
 		embed.WithView("pong", pingpong.PongView),
-		embed.WithService(func(runCtx context.Context) error {
+		embed.WithService(func(runCtx context.Context, _ embed.PluginCaller) error {
 			timer := time.NewTimer(0)
 			defer timer.Stop()
 			for {

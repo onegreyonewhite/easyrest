@@ -1,6 +1,6 @@
 # Postgres
 
-Table CRUD, schema, and optional `QUERY`. The URI scheme is `postgres://`. `postgresql://` is rejected. `easyrest-server` keeps the plugin in-process. The external binary is `easyrest-plugin-postgres`.
+Table CRUD, schema, and optional `QUERY`. The URI scheme is `postgres://`. `postgresql://` is rejected. `easyrest-server` keeps the plugin in-process. The external binary is `easyrest-plugin-postgres`. With both `use_query: true` and `internal: true`, the writable plugin also serves in-process `RawQuery` (no read-only transaction).
 
 The plugin removes these query parameters before the rest of the URI is used as the pgx DSN:
 

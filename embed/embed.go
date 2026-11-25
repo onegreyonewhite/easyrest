@@ -26,13 +26,15 @@ type (
 	HandlerError = server.HandlerError
 	// View writes the HTTP response for one restapi view.
 	View = server.View
-	// PluginCaller is the in-process internal RPC available to a rest handler.
+	// PluginCaller is the in-process internal RPC available to a rest handler, view, or service.
 	PluginCaller = server.PluginCaller
 )
 
 // Service runs until ctx is canceled or it fails.
+// plugins is the same in-process caller as Call.Plugins in views and rest handlers.
+// Plugins are loaded before any service starts.
 // Return nil after ctx is done. Return a non-nil error to stop the process.
-type Service func(ctx context.Context) error
+type Service func(ctx context.Context, plugins PluginCaller) error
 
 // ErrCacheMiss is a cache store miss.
 var ErrCacheMiss = easyrest.ErrCacheMiss
@@ -158,6 +160,7 @@ func WithRestSpec(hook func(name string, doc map[string]any) error) Option {
 }
 
 // WithService registers a background task that runs beside the HTTP server.
+// The task receives the same PluginCaller as embed views after config and plugins load.
 // SIGHUP reload applies only to the HTTP server, not to sibling services.
 func WithService(run Service) Option {
 	return func(s *settings) {
@@ -192,10 +195,11 @@ func Serve(ctx context.Context, overlay string, files []string, opts ...Option) 
 	g.Go(func() error {
 		return server.Serve(gctx)
 	})
+	caller := server.Plugins()
 	for _, svc := range cfg.services {
 		svc := svc
 		g.Go(func() error {
-			return svc(gctx)
+			return svc(gctx, caller)
 		})
 	}
 	err := g.Wait()

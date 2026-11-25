@@ -167,7 +167,6 @@ server:
   http2_max_read_frame_size: 16384
   http2_max_upload_buffer_per_connection: 65536
   http2_max_upload_buffer_per_stream: 32768
-  http2_idle_timeout: 10s
   http2_read_idle_timeout: 5s
   http2_ping_timeout: 2s
   http2_permit_prohibited_cipher_suites: true
@@ -211,6 +210,24 @@ server:
 	if cfg.Server.HTTP2MaxConcurrentStreams != 100 {
 		t.Errorf("HTTP2 streams: %d", cfg.Server.HTTP2MaxConcurrentStreams)
 	}
+	if cfg.Server.HTTP2MaxReadFrameSize != 16384 {
+		t.Errorf("HTTP2MaxReadFrameSize: %d", cfg.Server.HTTP2MaxReadFrameSize)
+	}
+	if cfg.Server.HTTP2MaxUploadBufferPerConnection != 65536 {
+		t.Errorf("HTTP2MaxUploadBufferPerConnection: %d", cfg.Server.HTTP2MaxUploadBufferPerConnection)
+	}
+	if cfg.Server.HTTP2MaxUploadBufferPerStream != 32768 {
+		t.Errorf("HTTP2MaxUploadBufferPerStream: %d", cfg.Server.HTTP2MaxUploadBufferPerStream)
+	}
+	if cfg.Server.HTTP2ReadIdleTimeout != 5*time.Second {
+		t.Errorf("HTTP2ReadIdleTimeout: %v", cfg.Server.HTTP2ReadIdleTimeout)
+	}
+	if cfg.Server.HTTP2PingTimeout != 2*time.Second {
+		t.Errorf("HTTP2PingTimeout: %v", cfg.Server.HTTP2PingTimeout)
+	}
+	if !cfg.Server.HTTP2PermitProhibitedCipherSuites {
+		t.Error("HTTP2PermitProhibitedCipherSuites")
+	}
 	if cfg.Server.TrustedProxyMode != "header" || cfg.Server.TrustedProxyHeader != "X-Real-IP" {
 		t.Errorf("proxy: %#v", cfg.Server)
 	}
@@ -232,6 +249,22 @@ server:
 	}
 	if _, ok := cfg.PluginMap["demo"]; !ok {
 		t.Errorf("PluginMap missing demo: %#v", cfg.PluginMap)
+	}
+}
+
+func TestLoad_LegacyHTTP2IdleTimeoutIgnored(t *testing.T) {
+	path := writeConfig(t, "legacy.yaml", `
+server:
+  idle_timeout: 4s
+  http2_idle_timeout: 10s
+  http2_max_concurrent_streams: 50
+`)
+	cfg := mustLoad(t, []string{path}, "")
+	if cfg.Server.IdleTimeout != 4*time.Second {
+		t.Errorf("IdleTimeout: %v", cfg.Server.IdleTimeout)
+	}
+	if cfg.Server.HTTP2MaxConcurrentStreams != 50 {
+		t.Errorf("HTTP2MaxConcurrentStreams: %d", cfg.Server.HTTP2MaxConcurrentStreams)
 	}
 }
 

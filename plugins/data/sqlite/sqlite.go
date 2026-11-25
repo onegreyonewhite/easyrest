@@ -128,6 +128,28 @@ func (s *sqlitePlugin) InitConnection(uri string) error {
 	return s.initConnection(uri, false)
 }
 
+var _ easyrest.RawQuerier = (*sqlitePlugin)(nil)
+
+// RawQuery runs one SQL statement on the writable connection.
+func (s *sqlitePlugin) RawQuery(ctx context.Context, query string) ([]map[string]any, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, errors.New("query is empty")
+	}
+	if s.db == nil {
+		return nil, errors.New("database connection not available")
+	}
+	if ctx == nil {
+		ctx = backgroundCtx
+	}
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanResultRows(rows, 0)
+}
+
 func (s *sqlitePlugin) initConnection(uri string, readOnly bool) error {
 	dsn, err := buildSQLiteDSN(uri, readOnly)
 	if err != nil {

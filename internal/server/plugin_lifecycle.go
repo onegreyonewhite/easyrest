@@ -239,8 +239,9 @@ func LoadPlugins() {
 		}
 		pluginTypeHint := splitURI[0]
 		pluginExec := "easyrest-plugin-" + pluginTypeHint
+		queryOnly := pluginCfg.UseQuery && !pluginCfg.Internal
 		kind := "DB"
-		if pluginCfg.UseQuery {
+		if queryOnly {
 			kind = "Query"
 		}
 
@@ -253,7 +254,7 @@ func LoadPlugins() {
 				continue
 			}
 		} else {
-			if pluginCfg.UseQuery {
+			if queryOnly {
 				if plug, ok := initPreservedConnection(PreservedQueryPlugins, pluginTypeHint, pluginCfg.Uri, connName, kind); ok {
 					newQueryPlugins[connName] = plug
 					stdlog.Printf("Connection %s (%s as preserved) initialized with interfaces: [%s]", connName, pluginExec, kind)
@@ -288,7 +289,7 @@ func LoadPlugins() {
 		}
 
 		loaded := false
-		if pluginCfg.UseQuery {
+		if queryOnly {
 			if plug, ok := dispenseConnection[easyrest.DBQueryPlugin](rpcClient, "query", pluginCfg.Uri, connName, pluginPath, kind); ok {
 				newQueryPlugins[connName] = plug
 				loaded = true

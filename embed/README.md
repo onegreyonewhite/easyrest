@@ -10,7 +10,9 @@ err := embed.Serve(ctx, "", []string{"config.yaml"},
 
 `Call`, `View`, `RestHandler`, and `PluginCaller` are the same types as the server package. A view registered with `WithView` is selected by the restapi `handler` field. Authentication, the scope check, and request middleware have already run. The function writes the status, headers, and body. Content plugins do not render that response, and response middleware of the view request does not run. The route contract is in [Rest views](../internal/server/README.md#rest-views).
 
-`call.Plugins` is the in-process caller: table get, create, update, delete, a function call, cache, and storage. Those calls do not forward the view's token. A rest handler from `WithRestHandler` receives the same caller and returns a value for the content plugins to render.
+`call.Plugins` is the in-process caller: table get, create, update, delete, a function call, cache, and storage. On a database connection with both `use_query: true` and `internal: true`, `Query(ctx, db, sql)` runs one writable SQL statement on that same connection. Statements without rows return an empty slice. `Query` does not join a shared transaction from `Begin` and does not bind parameters. Those calls do not forward the view's token. A rest handler from `WithRestHandler` receives the same caller and returns a value for the content plugins to render.
+
+A task from `WithService` receives the same `PluginCaller` as its second argument after config and plugins load, for example `plugins.Query(ctx, "orders", "select 1")`. `Query` and the deadline passed into `Begin` follow the service context. Table get, create, update, delete, and function calls use the same internal dispatch as views and are not tied to that context.
 
 ## Shared transaction
 

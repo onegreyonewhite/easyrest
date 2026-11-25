@@ -244,7 +244,9 @@ func TestTableRoutesInternalQuery(t *testing.T) {
 	})
 
 	queryPlug := &countingQueryPlugin{}
-	PreservedDbPlugins = map[string]PreservedPluginFactory[easyrest.DBPlugin]{}
+	PreservedDbPlugins = map[string]PreservedPluginFactory[easyrest.DBPlugin]{
+		"sqlite": func() easyrest.DBPlugin { return &fakeDBPlugin{} },
+	}
 	PreservedQueryPlugins = map[string]PreservedPluginFactory[easyrest.DBQueryPlugin]{
 		"sqlite": func() easyrest.DBQueryPlugin { return queryPlug },
 	}

@@ -120,7 +120,7 @@ tls_key_file: ""
 | `global_request_middlewares` | empty | Middleware names applied to every connection |
 | `default_content_handlers` | empty | Empty means the five standard content plugins, in order `json`, `ndjson`, `xml`, `csv`, `form` |
 | `default_storage_plugin` | `local` when empty | Instance name used when a REST action does not set `storage` |
-| `tls_enabled` | false | With both cert and key files, serves HTTP/2. Without TLS the server speaks h2c. Server-built absolute URLs use `https`. `X-Forwarded-Proto` and `Forwarded` choose the scheme only while TLS is off |
+| `tls_enabled` | false | With both cert and key files, serves HTTP/2 over TLS. Without TLS the server accepts HTTP/1 and unencrypted HTTP/2 on the same port. Server-built absolute URLs use `https`. `X-Forwarded-Proto` and `Forwarded` choose the scheme only while TLS is off |
 | `tls_cert_file`, `tls_key_file` | empty | Certificate and key paths |
 
 There is no top-level `token_secret` key. If `auth_plugins` is omitted, Load synthesizes a `jwt` plugin with an empty `jwt_secret` and `flow: password`.
@@ -138,7 +138,7 @@ Each key under `plugins` is a named database connection. The HTTP path uses that
 | `uri` | required | Passed to the data plugin. The scheme selects the driver |
 | `path` | empty | Forces an external binary |
 | `title` | empty | Schema title |
-| `use_query` | false | `true` makes the connection `QUERY`-only |
+| `use_query` | false | `true` makes the connection `QUERY`-only on `/api/{db}/`. With `internal: true` together, the server loads a writable DB connection instead: `/api/{db}/` stays hidden, the name is a `/restapi` source, and in-process views may call `Plugins.Query` |
 | `internal` | false | Removes the key from every `/api/{db}/` route and leaves it as a `/restapi` source |
 | `db_tx_end` | `commit` | `commit`, `commit-allow-override`, `rollback`, `rollback-allow-override` |
 | `db_prefer_count` | empty | Copied into `prefer.count` when the client omits `count` |
@@ -200,7 +200,7 @@ Durations use Go's `time.ParseDuration` form (`5s`, `3m`). Defaults from `defaul
 
 `trusted_proxy_mode` is `none`, `xff_count`, or `header`. `trusted_proxy_header` is the header name when the mode is `header` (for example `CF-Connecting-IP` or `X-Real-IP`).
 
-HTTP/2 fields, left at zero unless set: `http2_max_concurrent_streams`, `http2_max_read_frame_size`, `http2_max_upload_buffer_per_connection`, `http2_max_upload_buffer_per_stream`, `http2_idle_timeout`, `http2_read_idle_timeout`, `http2_ping_timeout`, `http2_permit_prohibited_cipher_suites`.
+HTTP/2 fields map to `net/http.Server.HTTP2`. Leave them at zero to use library defaults. Keys: `http2_max_concurrent_streams`, `http2_max_read_frame_size`, `http2_max_upload_buffer_per_connection`, `http2_max_upload_buffer_per_stream`, `http2_read_idle_timeout` (`SendPingTimeout`), `http2_ping_timeout`, `http2_permit_prohibited_cipher_suites`. HTTP/2 connection idle time follows `idle_timeout` (default `120s`); there is no separate `http2_idle_timeout`.
 
 `disable_html_escape` turns off `<`, `>`, and `&` escaping in JSON bodies.
 

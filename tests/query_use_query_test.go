@@ -12,6 +12,7 @@ import (
 	"github.com/onegreyonewhite/easyrest/internal/config"
 	"github.com/onegreyonewhite/easyrest/internal/server"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
+	jwtplugin "github.com/onegreyonewhite/easyrest/plugins/auth/jwt"
 	sqlitePlugin "github.com/onegreyonewhite/easyrest/plugins/data/sqlite"
 	_ "modernc.org/sqlite"
 )
@@ -51,6 +52,9 @@ func registerSQLitePreservedPlugins() {
 	}
 	server.PreservedQueryPlugins["sqlite"] = func() easyrest.DBQueryPlugin {
 		return sqlitePlugin.NewSqliteQueryPlugin()
+	}
+	server.PreservedAuthPlugins["jwt"] = func() easyrest.AuthPlugin {
+		return &jwtplugin.JWTAuthPlugin{}
 	}
 }
 
@@ -121,6 +125,35 @@ func TestUseQueryEnabled(t *testing.T) {
 			t.Fatal("Expected Query plugin to be loaded when use_query is true")
 		}
 	})
+}
+
+func TestUseQueryInternal(t *testing.T) {
+	dbPath := setupQueryTestDB(t)
+	defer os.Remove(dbPath)
+	defer server.StopPlugins()
+
+	registerSQLitePreservedPlugins()
+	applyTestConfig(t, testSQLiteYAML("sqlite://"+dbPath, false, "    use_query: true\n    internal: true\n"))
+
+	cfg := server.GetConfig()
+	cfg.PluginMap["test"] = config.PluginConfig{
+		Name:     "test",
+		Uri:      "sqlite://" + dbPath,
+		UseQuery: true,
+		Internal: true,
+	}
+	server.SetConfig(cfg)
+
+	_ = server.SetupRouter()
+
+	dbPlugins := *server.DbPlugins.Load()
+	if _, ok := dbPlugins["test"]; !ok {
+		t.Fatal("Expected DB plugin when use_query and internal are both true")
+	}
+	queryPlugins := *server.QueryPlugins.Load()
+	if _, ok := queryPlugins["test"]; ok {
+		t.Fatal("Expected query plugin not to load when use_query and internal are both true")
+	}
 }
 
 func TestUseQueryDisabled(t *testing.T) {

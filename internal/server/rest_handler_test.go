@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -14,9 +15,109 @@ import (
 	"github.com/onegreyonewhite/easyrest/internal/config"
 	easyrest "github.com/onegreyonewhite/easyrest/plugin"
 	lrustore "github.com/onegreyonewhite/easyrest/plugins/data/lru"
+	sqlitePlugin "github.com/onegreyonewhite/easyrest/plugins/data/sqlite"
 	cachemw "github.com/onegreyonewhite/easyrest/plugins/middleware/cache"
 	"github.com/onegreyonewhite/easyrest/plugins/storage/memory"
 )
+
+type rawQueryFake struct {
+	fakeDBPlugin
+	calls int
+}
+
+func (f *rawQueryFake) RawQuery(context.Context, string) ([]map[string]any, error) {
+	f.calls++
+	return []map[string]any{}, nil
+}
+
+func TestPluginCallerQuery(t *testing.T) {
+	origCfg := GetConfig()
+	origDB := DbPlugins.Load()
+	t.Cleanup(func() {
+		SetConfig(origCfg)
+		DbPlugins.Store(origDB)
+	})
+
+	fake := &rawQueryFake{}
+	SetConfig(config.Config{
+		PluginMap: map[string]config.PluginConfig{
+			"db": {Uri: "sqlite://memory", UseQuery: true, Internal: true},
+		},
+	})
+	plugins := map[string]easyrest.DBPlugin{"db": fake}
+	DbPlugins.Store(&plugins)
+
+	caller := directPlugins{}
+	rows, err := caller.Query(context.Background(), "db", "SELECT 1")
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("rows %#v", rows)
+	}
+	if fake.calls != 1 {
+		t.Fatalf("calls = %d", fake.calls)
+	}
+
+	SetConfig(config.Config{
+		PluginMap: map[string]config.PluginConfig{
+			"db": {Uri: "sqlite://memory", UseQuery: true, Internal: false},
+		},
+	})
+	fake.calls = 0
+	if _, err := caller.Query(context.Background(), "db", "SELECT 1"); err == nil {
+		t.Fatal("expected error without internal flag")
+	}
+	if fake.calls != 0 {
+		t.Fatalf("calls = %d", fake.calls)
+	}
+}
+
+func TestInternalQueryRestAndHTTP(t *testing.T) {
+	plug := sqlitePlugin.NewSqlitePlugin()
+	if err := plug.InitConnection("sqlite://:memory:"); err != nil {
+		t.Fatalf("InitConnection: %v", err)
+	}
+	defer plug.Close()
+
+	ctx := context.Background()
+	if _, err := plug.RawQuery(ctx, `DROP TABLE IF EXISTS users`); err != nil {
+		t.Fatalf("DROP: %v", err)
+	}
+	if _, err := plug.RawQuery(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`); err != nil {
+		t.Fatalf("CREATE: %v", err)
+	}
+	if _, err := plug.RawQuery(ctx, `INSERT INTO users (name) VALUES ('ada')`); err != nil {
+		t.Fatalf("INSERT: %v", err)
+	}
+
+	cfg := restUsersConfig()
+	cfg.PluginMap = map[string]config.PluginConfig{
+		"db": {Uri: "sqlite://memory", UseQuery: true, Internal: true},
+	}
+	app := cfg.RestAPI["v1"]
+	app.Source = "db"
+	app.Public = true
+	cfg.RestAPI["v1"] = app
+
+	router := serveRest(t, cfg, map[string]easyrest.DBPlugin{"db": plug})
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/restapi/v1/users/?select=id,name", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rest list status %d body %q", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "ada") {
+		t.Fatalf("body %q", rec.Body.String())
+	}
+
+	apiGet := httptest.NewRecorder()
+	if !denyInternalDB(apiGet, httptest.NewRequest(http.MethodGet, "/api/db/users/", nil), "db") {
+		t.Fatal("expected internal db to be denied on /api")
+	}
+	if apiGet.Code != http.StatusNotFound {
+		t.Fatalf("GET /api/db status %d", apiGet.Code)
+	}
+}
 
 func TestRestHandler_ListReturnsJSON(t *testing.T) {
 	t.Cleanup(func() { SetRestHandlers(nil) })
